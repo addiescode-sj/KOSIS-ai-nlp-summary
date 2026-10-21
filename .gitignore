@@ -1,6 +1,29 @@
-.DS_Store
-.env
-.venv/
-__pycache__/
-data/cache/
+node_modules/
 .claude/settings.local.json
+.DS_Store
+docs/reports/raw/
+
+# Secrets (KOSIS / HCX API keys must never reach GitHub)
+.env
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Provided data (security pledge: keep out of the repo)
+data/raw/
+data/samples/
+eval/golden/
+eval/results/
+
+# From team repo
+data/cache/

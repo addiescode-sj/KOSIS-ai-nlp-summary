@@ -57,3 +57,4 @@ docs/              제출 문서 (질문 유형, 검색 전략, ADR, 한계·개
 - KOSIS API 응답은 `data/cache/`에 캐시해 평가가 재현 가능하게 한다.
 - 평가 실행: `uv run python -m eval.harness --suite stat|search|agent` (T1-11에서 확정 후 갱신)
 - 비자명한 로직(계산·검증·판정)은 pytest 하나 이상을 남긴다.
+- 베이스라인(B0) 코드는 `kosis_chat/`, 설계 문서는 `docs/plans/`, 개인 하네스 지침은 `docs/notes/dev-harness-CLAUDE.md`.
