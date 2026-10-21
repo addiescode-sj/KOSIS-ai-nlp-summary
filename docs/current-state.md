@@ -12,6 +12,18 @@ KOSIS statistics AI chatbot (국가데이터처 mentoring project): natural-lang
 - Stage 1 → **B0 baseline**. PLAN rev 3 approved 2026-10-20. Offline code (TASKS Phase 1–5) written and passing with MockClient (44 tests).
 - B0 is **not complete**: no HCX run, no real table, no golden set yet (Phase 6 blocked).
 - No real data in the repo (tests use made-up tables in tests/fixtures/).
+- **Active task: T1-01 EDA** (Linear KOS-9, due 2026-10-22), branch `T1-01-eda-kos-9` (pushed, head 72003de). Team workflow is plan-gate (CLAUDE.md §0); [plans/T1-01.md](../plans/T1-01.md) is approved (Option B: B0 loader/cleaner + metadata hierarchy in a notebook).
+
+## T1-01 handoff (2026-10-21)
+
+- Shared data in `data/` (gitignored, not committed): 14 catalog CSVs (one per survey, 2,364 tables total, UTF-8 BOM) and `통계표_메타데이터.jsonl` (34 MB, same 2,364 tables: classifications with lvl/upItmId/leaf, items, period code lists). **No statistic values** in either. 879 tables have an empty unit.
+- Downloading every table is not planned (≥144M cells by metadata). Values are fetched only for the 5 target tables:
+  DT_1B8000G (B0 table), DT_1B26006_A01 (%), DT_1B83A35 (monthly), DT_1BPA001 (multi-level, projection; cut at 2025), DT_1B81A24 (blank unit).
+- `notebooks/kosis_fetch_tables.ipynb`: fetches latest 10 periods per period type into `data/raw/kosis/<survey>/<org>_<tbl>_<prdSe>.json` + `.meta.json` (format B), cache in `data/cache/kosis/`. First run (15:22) failed for all 5 with `'PRD_DE'` (PRD meta gives ranges only); fixed in 72003de to take period codes from the shared metadata. **Not re-run yet**: rerun with `RETRY_FAILED = True`.
+- `notebooks/eda_units.ipynb`: EDA split into units 0–8, each code cell has a markdown cell above (what / how / how to read / what goes into docs/eda.md). Owner wants to run and interpret **one unit at a time**. `notebooks/eda.ipynb` is the older all-in-one version with the owner's uncommitted local edits (outputs).
+- Next: rerun fetch → unit 0–1 (loader pass/fail) → units 2–7 one by one → write `docs/eda.md` (structure and counts only, no cell values) → fill `## Result` in plans/T1-01.md → TASK.md `[x]`.
+- Local only, uncommitted: `configs/model.yaml` (duplicate `openai_compat` block merged; backend `openai_compat` with OpenRouter nemotron — owner to decide commit vs `gemini`), `notebooks/eda.ipynb`.
+- This PC has no Python on PATH (Microsoft Store stub), so hooks (plan_gate, linear_sync) do not run here and notebooks were not executed by Claude. Linear MCP is not connected yet; KOS-9 status was not synced.
 
 ## Last completed work
 
@@ -33,7 +45,7 @@ KOSIS statistics AI chatbot (국가데이터처 mentoring project): natural-lang
 
 ## Blocked / unverified
 
-- KOSIS OpenAPI key, HCX access and token limit, provided metadata format — not verified (2026-10-21).
+- KOSIS OpenAPI key works (fetch run on 2026-10-21 got meta responses); HCX access and token limit not verified.
 - B0 completion needs real HCX evidence; Mock tests alone do not complete B0.
 
 ## How to verify
@@ -45,6 +57,9 @@ KOSIS statistics AI chatbot (국가데이터처 mentoring project): natural-lang
 - Other pre-test models: `openai_compat` block + `PRETEST_API_KEY`; these runs (and mock) are marked `pretest` and never appended to eval-history.
 
 ## Context Index
+
+- plans/T1-01.md — contains: approved EDA plan, measurement table (9 items mapped to R1–R9), target tables — use_for: T1-01
+- TASK.md — contains: team roadmap T0–T3 with Linear IDs, deadlines, dependencies — use_for: picking tasks
 
 - docs/plans/20261020-baseline-chatbot/PLAN.md — contains: file layout, input formats + TableInput fields, data/commit policy, prompt rules, API errors, comparison protocol, scoring rules — use_for: B0 implementation
 - docs/plans/20261020-baseline-chatbot/TASKS.md — contains: B0 tasks by phase with blocked items — use_for: /execute
