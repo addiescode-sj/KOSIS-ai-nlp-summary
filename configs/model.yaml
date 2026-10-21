@@ -1,0 +1,35 @@
+# Model and evaluation settings. Secrets go in .env, not here.
+backend: gemini          # mock | hcx | gemini | openai_compat (mock/openai_compat runs never go to eval-history)
+prompt_version: baseline-v1
+
+model:
+  name: TBD              # HCX model name, confirmed on 2026-10-21
+  temperature: 0
+  max_tokens: 1024
+  max_input_tokens: null # HCX input token limit; null = not checked yet
+  timeout_seconds: 60
+
+# Gemini (current development model, 2026-10-21). Key: GEMINI_API_KEY in .env or Colab secrets.
+# Gemini 3.x ignores temperature; thinking_level (low | medium | high) is used instead.
+# Thinking tokens count toward max_tokens, so this block uses a larger budget.
+gemini:
+  model: gemini-3.8-flash
+  thinking_level: low
+  max_tokens: 8192
+  api_key_env: GEMINI_API_KEY
+
+# Pre-test with another model through any OpenAI-compatible /chat/completions API.
+# Uses model.temperature / max_tokens / timeout_seconds above. Key is read from .env (api_key_env).
+# Examples:
+#   OpenAI   base_url: https://api.openai.com/v1                                 model: gpt-4o-mini
+#   Ollama   base_url: http://localhost:11434/v1  (no key)                       model: qwen2.5:7b
+openai_compat:
+  base_url: null
+  model: null
+  api_key_env: PRETEST_API_KEY
+
+mock:
+  response: "[mock] 표에 있는 값만으로 답변합니다. 출처: KOSIS"
+
+eval:
+  runs: 1                # runs per question; keep fixed across B0..B4
