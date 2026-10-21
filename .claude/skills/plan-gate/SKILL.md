@@ -11,6 +11,8 @@ description: KOSIS 프로젝트의 모든 TASK.md 태스크 수행 절차. 구�
 - 인자로 받은 ID, 없으면 TASK.md에서 의존성이 풀린 첫 `[ ]` 태스크를 고른다.
 - TASK.md에서 해당 줄을 `[~]`로 바꾼다. git 브랜치 `<ID>-<slug>` (예: `T1-05-fetch-normalize`)를 만든다.
   hook은 브랜치 이름의 ID로 활성 태스크를 식별한다.
+- TASK.md 상태 변경은 hook(`linear_sync.py`)이 Linear 이슈에 자동 반영한다 (TASK.md → Linear 단방향).
+  Linear에서 상태를 바꾸지 말고 TASK.md를 고친다. 담당자 지정·코멘트는 Linear MCP(`linear`)로 해도 된다.
 
 ## 2. Context (읽기만)
 - CLAUDE.md 원칙, 관련 기존 코드·스키마, 직전 태스크의 plan `## Result`.

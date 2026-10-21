@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(os.environ.get("CLAUDE_PROJECT_DIR") or Path(__file__).resolve().parents[2])
-ALWAYS_ALLOWED = ("plans/", ".claude/", "TASK.md", "CLAUDE.md", ".gitignore")
+ALWAYS_ALLOWED = ("plans/", ".claude/", "TASK.md", "CLAUDE.md", ".gitignore", ".mcp.json", "README.md")
 REQUIRED_SECTIONS = ("## Option A", "## Option B", "## Option C", "## Verify", "## Decision")
 TASK_ID = r"T\d+-\d+"
 
