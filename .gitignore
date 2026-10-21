@@ -27,3 +27,6 @@ eval/results/
 
 # From team repo
 data/cache/
+
+# data dir
+data/
