@@ -78,12 +78,14 @@ class HCXClient(LLMClient):
 
     POST {base_url}/v3/chat-completions/{model} with "Authorization: Bearer <HCX_API_KEY>".
     Reasoning models (HCX-007) take maxCompletionTokens and thinking.effort; the others take maxTokens.
-    Rate limits (429) and server errors (5xx) are retried with the delays in RETRY_DELAYS.
+    Rate limits (429) and server errors (5xx) are retried with the delays in RETRY_DELAYS,
+    or the server's Retry-After value when it is longer (capped at MAX_RETRY_WAIT).
     """
 
     name = "hcx"
     REASONING_MODELS = ("HCX-007",)
-    RETRY_DELAYS = (2.0, 5.0, 15.0)
+    RETRY_DELAYS = (5.0, 15.0, 30.0, 60.0)
+    MAX_RETRY_WAIT = 120.0
     RETRY_HTTP_CODES = (429, 500, 502, 503, 504)
 
     def __init__(self, settings: Settings, sleep: Callable[[float], None] = time.sleep) -> None:
@@ -97,6 +99,7 @@ class HCXClient(LLMClient):
             raise ValueError(f"{settings.api_key_env} is not set in .env")
         self.url = f"{settings.base_url.rstrip('/')}/v3/chat-completions/{settings.model_name}"
         self._sleep = sleep
+        self._retry_after: float | None = None
 
     @property
     def is_reasoning(self) -> bool:
@@ -130,15 +133,20 @@ class HCXClient(LLMClient):
         for delay in self.RETRY_DELAYS:
             if not (result.error or "").startswith(tuple(f"HTTP {c}" for c in self.RETRY_HTTP_CODES)):
                 break
-            self._sleep(delay)
+            self._sleep(min(max(delay, self._retry_after or 0.0), self.MAX_RETRY_WAIT))
             result = self._call(system, user)
         return result
 
     def _call(self, system: str, user: str) -> LLMResult:
+        self._retry_after = None
         try:
             with urllib.request.urlopen(self._request(system, user), timeout=self.settings.timeout_seconds) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
+            try:
+                self._retry_after = float(exc.headers.get("Retry-After", ""))
+            except (TypeError, ValueError):
+                self._retry_after = None
             detail = exc.read().decode("utf-8", "replace")[:300]
             low = detail.lower()
             too_long = exc.code == 400 and "token" in low and any(w in low for w in ("exceed", "limit", "too long", "초과"))

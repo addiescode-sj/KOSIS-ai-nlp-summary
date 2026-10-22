@@ -159,3 +159,11 @@ def test_pretest_runs_stay_out_of_history(golden, mock_settings, tmp_path, monke
     monkeypatch.setattr(scorer, "append_history", lambda path, row: written.append(row))
     assert scorer.main(["--run", str(run_dir), "--append-history"]) == 0
     assert written == [] and "사전 테스트" in capsys.readouterr().err
+
+
+def test_interval_waits_between_calls_only(golden, mock_settings, tmp_path, monkeypatch):
+    waits = []
+    monkeypatch.setattr(run_eval.time, "sleep", waits.append)
+    client = MockClient("x")
+    run_eval.run(golden, "B0", mock_settings, tmp_path / "results", client=client, interval=3.0)
+    assert waits == [3.0] * (len(client.calls) - 1)

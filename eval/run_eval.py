@@ -9,6 +9,7 @@ import json
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from eval.scorer import KINDS, SCORING_VERSION, write_jsonl
@@ -88,8 +89,9 @@ def run(
     out_root: Path,
     client: LLMClient | None = None,
     runs: int | None = None,
+    interval: float = 0.0,
 ) -> Path:
-    """Execute every golden question `runs` times; returns the run directory."""
+    """Execute every golden question `runs` times, waiting `interval` seconds between calls; returns the run directory."""
     version, items, golden_sha = load_golden(golden_path)
     runs = runs or settings.eval_runs
     client = client or build_client(settings)
@@ -114,6 +116,8 @@ def run(
     for run_index in range(runs):
         for item in items:
             bot = bots[item["table"]]
+            if interval and results:
+                time.sleep(interval)  # stay under per-minute rate limits (HCX 429)
             answer = bot.ask(item["question"])
             failed = answer.status != "ok"
             results.append(
@@ -168,6 +172,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--thinking", choices=["none", "low", "medium", "high"], default=None, help="override thinking effort (HCX-007) / level (gemini)")
     parser.add_argument("--max-tokens", type=int, default=None, help="override max output tokens (raise it when thinking is on)")
     parser.add_argument("--runs", type=int, default=None, help="override eval.runs (changing it requires re-running all stages)")
+    parser.add_argument("--interval", type=float, default=0.0, help="seconds to wait between model calls (avoids HTTP 429)")
     parser.add_argument("--out", default="eval/results")
     args = parser.parse_args(argv)
 
@@ -175,7 +180,7 @@ def main(argv: list[str] | None = None) -> int:
     settings = load_settings(
         args.config, backend=args.backend, model_name=args.model, thinking_level=args.thinking, max_tokens=args.max_tokens
     )
-    run_dir = run(resolve_path(args.golden), args.stage, settings, resolve_path(args.out), runs=args.runs)
+    run_dir = run(resolve_path(args.golden), args.stage, settings, resolve_path(args.out), runs=args.runs, interval=args.interval)
     print(f"saved: {run_dir}")
     print(f"next: python -m eval.review export --run {run_dir.relative_to(PROJECT_ROOT) if run_dir.is_relative_to(PROJECT_ROOT) else run_dir}")
     return 0

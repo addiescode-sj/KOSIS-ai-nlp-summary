@@ -74,6 +74,23 @@ def test_retries_rate_limit_then_succeeds(mock_settings, server_factory):
     assert delays == [HCXClient.RETRY_DELAYS[0]] and len(srv.requests) == 2
 
 
+def test_retry_waits_for_longer_retry_after(mock_settings, server_factory, monkeypatch):
+    srv = server_factory(status=429, body={"status": {"code": "42901"}})
+    monkeypatch.setattr(HCXClient, "RETRY_DELAYS", (1.0,))
+    delays = []
+    client = HCXClient(_settings(mock_settings, srv.base_url), sleep=delays.append)
+    orig = client._call
+
+    def call_with_header(system, user):
+        result = orig(system, user)
+        client._retry_after = 40.0  # as parsed from a Retry-After header
+        return result
+
+    client._call = call_with_header
+    client.generate("s", "u")
+    assert delays == [40.0]
+
+
 def test_errors_become_statuses(mock_settings, server_factory):
     no_sleep = lambda _: None  # noqa: E731
     srv = server_factory(status=503, body={"status": {"code": "50000", "message": "busy"}})
