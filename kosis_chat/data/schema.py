@@ -72,11 +72,6 @@ class TableInput:
     cells: tuple[Cell, ...]
 
     @property
-    def units_summary(self) -> list[str]:
-        """Distinct cell units in first-seen order (display only, never used for calculation)."""
-        return list(dict.fromkeys(c.unit for c in self.cells))
-
-    @property
     def period_range(self) -> tuple[str, str] | None:
         """Smallest and largest raw period string, or None for an empty table."""
         periods = sorted(c.period_raw for c in self.cells)

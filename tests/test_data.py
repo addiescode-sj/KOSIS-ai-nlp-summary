@@ -18,7 +18,6 @@ def test_format_a_loads_with_row_units_and_raw_values(fixtures):
     assert table.meta.file_sha256 == sha256_of(fixtures / "pop_a.csv")
     assert table.cells[0].dims == {"성별": "계"}
     assert table.cells[0].value_raw == "1,000"
-    assert table.units_summary == ["명", "%"]
     assert table.period_range == ("2022", "2024")
     assert validate(table) == []
 

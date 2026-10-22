@@ -158,7 +158,7 @@ def main(argv: list[str] | None = None) -> int:
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     if summary["provisional"]:
         print(f"[잠정] 미검토 {summary['pending']}개가 남아 있습니다.", file=sys.stderr)
-    if args.append_history and manifest.get("pretest", manifest["model"]["backend"] in ("mock", "openai_compat")):
+    if args.append_history and manifest.get("pretest", manifest["model"]["backend"] == "mock"):
         print(f"[사전 테스트] backend={manifest['model']['backend']} 결과는 eval-history.md에 기록하지 않습니다.", file=sys.stderr)
     elif args.append_history:
         model = f"{manifest['model']['backend']}:{manifest['model']['model_name']}"

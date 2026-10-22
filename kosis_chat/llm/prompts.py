@@ -26,6 +26,12 @@ USER_TEMPLATE = """[통계표]
 [질문]
 {question}"""
 
+# Optional answer-format instructions (e.g. a form.txt given with --form), placed after the question.
+FORM_TEMPLATE = """
+
+[답변 형식]
+{form}"""
+
 
 def get_system_prompt(version: str) -> str:
     try:
@@ -34,5 +40,8 @@ def get_system_prompt(version: str) -> str:
         raise ValueError(f"unknown prompt version {version!r}; known: {sorted(SYSTEM_PROMPTS)}") from None
 
 
-def build_user_prompt(table_text: str, question: str) -> str:
-    return USER_TEMPLATE.format(table_text=table_text, question=question.strip())
+def build_user_prompt(table_text: str, question: str, form: str | None = None) -> str:
+    prompt = USER_TEMPLATE.format(table_text=table_text, question=question.strip())
+    if form and form.strip():
+        prompt += FORM_TEMPLATE.format(form=form.strip())
+    return prompt

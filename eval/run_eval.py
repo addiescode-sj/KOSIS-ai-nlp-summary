@@ -9,13 +9,14 @@ import json
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from eval.scorer import KINDS, SCORING_VERSION, write_jsonl
 from kosis_chat.chatbot import Chatbot
 from kosis_chat.config import PROJECT_ROOT, Settings, load_env, load_settings, resolve_path
 from kosis_chat.data.loader import load_table, sha256_of
-from kosis_chat.llm.model import LLMClient, build_client
+from kosis_chat.llm.model import BACKENDS, LLMClient, build_client
 
 REQUIRED_ITEM_KEYS = ("id", "kind", "question", "table", "table_sha256")
 _NUMBER = re.compile(r"\d[\d,]*(?:\.\d+)?")
@@ -88,11 +89,14 @@ def run(
     out_root: Path,
     client: LLMClient | None = None,
     runs: int | None = None,
+    interval: float = 0.0,
+    form_path: Path | None = None,
 ) -> Path:
-    """Execute every golden question `runs` times; returns the run directory."""
+    """Execute every golden question `runs` times, waiting `interval` seconds between calls; returns the run directory."""
     version, items, golden_sha = load_golden(golden_path)
     runs = runs or settings.eval_runs
     client = client or build_client(settings)
+    form = form_path.read_text(encoding="utf-8-sig") if form_path else None
 
     bots: dict[str, Chatbot] = {}
     data_hashes: dict[str, str] = {}
@@ -102,7 +106,7 @@ def run(
             actual = sha256_of(table_path) if table_path.exists() else "missing"
             if actual != item["table_sha256"]:
                 raise GoldenError(f"{item['table']}: sha256 {actual} does not match golden {item['table_sha256']}")
-            bots[item["table"]] = Chatbot(load_table(table_path), client=client, settings=settings)
+            bots[item["table"]] = Chatbot(load_table(table_path), client=client, settings=settings, form=form)
             data_hashes[item["table"]] = actual
 
     started = dt.datetime.now().astimezone()
@@ -114,6 +118,8 @@ def run(
     for run_index in range(runs):
         for item in items:
             bot = bots[item["table"]]
+            if interval and results:
+                time.sleep(interval)  # stay under per-minute rate limits (HCX 429)
             answer = bot.ask(item["question"])
             failed = answer.status != "ok"
             results.append(
@@ -144,13 +150,17 @@ def run(
         "data_sha256": data_hashes,
         "scoring_version": SCORING_VERSION,
         "prompt_version": settings.prompt_version,
+        # form.txt changes often, so its path, hash and a copy (form.txt in the run dir) are kept with the run.
+        "form": {"path": str(form_path), "sha256": sha256_of(form_path)} if form_path else None,
         "model": settings.model_params(),
         "runs": runs,
         "questions": len(items),
-        # Mock and ad-hoc OpenAI-compatible runs are pre-tests and stay out of eval-history.
-        "pretest": settings.backend in ("mock", "openai_compat"),
+        # Mock runs are pre-tests and stay out of eval-history.
+        "pretest": settings.backend == "mock",
     }
     write_jsonl(run_dir / "results.jsonl", results)
+    if form is not None:
+        (run_dir / "form.txt").write_text(form, encoding="utf-8")
     (run_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     (run_dir / "golden.jsonl").write_text(
         "".join(json.dumps(i, ensure_ascii=False) + "\n" for i in items), encoding="utf-8"
@@ -163,15 +173,31 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--stage", required=True, help="stage name, e.g. B0")
     parser.add_argument("--golden", default="eval/golden/v1", help="golden version directory or .jsonl file")
     parser.add_argument("--config", default=None)
-    parser.add_argument("--backend", choices=["mock", "hcx", "gemini", "openai_compat"], default=None)
-    parser.add_argument("--model", default=None, help="override the model name (gemini / openai_compat)")
+    parser.add_argument("--backend", choices=BACKENDS, default=None)
+    parser.add_argument("--model", default=None, help="override the HCX model name, e.g. HCX-007")
+    parser.add_argument(
+        "--thinking", choices=["none", "low", "medium", "high"], default=None, help="override thinking effort (HCX-007 only)"
+    )
+    parser.add_argument("--max-tokens", type=int, default=None, help="override max output tokens (raise it when thinking is on)")
     parser.add_argument("--runs", type=int, default=None, help="override eval.runs (changing it requires re-running all stages)")
+    parser.add_argument("--interval", type=float, default=0.0, help="seconds to wait between model calls (avoids HTTP 429)")
+    parser.add_argument("--form", default=None, help="text file with answer-format instructions appended to each question")
     parser.add_argument("--out", default="eval/results")
     args = parser.parse_args(argv)
 
     load_env()
-    settings = load_settings(args.config, backend=args.backend, model_name=args.model)
-    run_dir = run(resolve_path(args.golden), args.stage, settings, resolve_path(args.out), runs=args.runs)
+    settings = load_settings(
+        args.config, backend=args.backend, model_name=args.model, thinking_level=args.thinking, max_tokens=args.max_tokens
+    )
+    run_dir = run(
+        resolve_path(args.golden),
+        args.stage,
+        settings,
+        resolve_path(args.out),
+        runs=args.runs,
+        interval=args.interval,
+        form_path=resolve_path(args.form) if args.form else None,
+    )
     print(f"saved: {run_dir}")
     print(f"next: python -m eval.review export --run {run_dir.relative_to(PROJECT_ROOT) if run_dir.is_relative_to(PROJECT_ROOT) else run_dir}")
     return 0
