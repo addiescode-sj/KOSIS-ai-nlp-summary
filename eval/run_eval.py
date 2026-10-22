@@ -16,7 +16,7 @@ from eval.scorer import KINDS, SCORING_VERSION, write_jsonl
 from kosis_chat.chatbot import Chatbot
 from kosis_chat.config import PROJECT_ROOT, Settings, load_env, load_settings, resolve_path
 from kosis_chat.data.loader import load_table, sha256_of
-from kosis_chat.llm.model import LLMClient, build_client
+from kosis_chat.llm.model import BACKENDS, LLMClient, build_client
 
 REQUIRED_ITEM_KEYS = ("id", "kind", "question", "table", "table_sha256")
 _NUMBER = re.compile(r"\d[\d,]*(?:\.\d+)?")
@@ -155,8 +155,8 @@ def run(
         "model": settings.model_params(),
         "runs": runs,
         "questions": len(items),
-        # Mock and ad-hoc OpenAI-compatible runs are pre-tests and stay out of eval-history.
-        "pretest": settings.backend in ("mock", "openai_compat"),
+        # Mock runs are pre-tests and stay out of eval-history.
+        "pretest": settings.backend == "mock",
     }
     write_jsonl(run_dir / "results.jsonl", results)
     if form is not None:
@@ -173,9 +173,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--stage", required=True, help="stage name, e.g. B0")
     parser.add_argument("--golden", default="eval/golden/v1", help="golden version directory or .jsonl file")
     parser.add_argument("--config", default=None)
-    parser.add_argument("--backend", choices=["mock", "hcx", "gemini", "openai_compat"], default=None)
-    parser.add_argument("--model", default=None, help="override the model name (hcx / gemini / openai_compat)")
-    parser.add_argument("--thinking", choices=["none", "low", "medium", "high"], default=None, help="override thinking effort (HCX-007) / level (gemini)")
+    parser.add_argument("--backend", choices=BACKENDS, default=None)
+    parser.add_argument("--model", default=None, help="override the HCX model name, e.g. HCX-007")
+    parser.add_argument(
+        "--thinking", choices=["none", "low", "medium", "high"], default=None, help="override thinking effort (HCX-007 only)"
+    )
     parser.add_argument("--max-tokens", type=int, default=None, help="override max output tokens (raise it when thinking is on)")
     parser.add_argument("--runs", type=int, default=None, help="override eval.runs (changing it requires re-running all stages)")
     parser.add_argument("--interval", type=float, default=0.0, help="seconds to wait between model calls (avoids HTTP 429)")

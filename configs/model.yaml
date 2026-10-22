@@ -1,38 +1,20 @@
 # Model and evaluation settings. Secrets go in .env, not here.
-backend: hcx             # mock | hcx | gemini | openai_compat (mock/openai_compat runs never go to eval-history)
+backend: hcx             # hcx | mock (mock runs are pre-tests and never go to eval-history)
 prompt_version: baseline-v1
 
-# HCX (HyperCLOVA X, the evaluated model) via CLOVA Studio v3 chat-completions. Key: HCX_API_KEY in .env.
-# Models (T1-16): HCX-007 (reasoning, thinking_effort none|low|medium|high), HCX-DASH-002 (light, no thinking).
-# Thinking tokens count toward max_tokens on HCX-007: use about 5120 when thinking_effort is not none.
+# HCX (HyperCLOVA X) via CLOVA Studio v3 chat-completions. Key: HCX_API_KEY in .env.
+# Models: HCX-DASH-002 (light, current tuning model), HCX-007 (reasoning, paused since 10/22).
+# thinking_effort (none | low | medium | high) is sent to HCX-007 only; its thinking tokens count
+# toward max_tokens, so use about 5120 when it is not none.
 model:
-  name: HCX-007
+  name: HCX-DASH-002
   thinking_effort: none
   temperature: 0
   max_tokens: 1024
-  max_input_tokens: null # HCX input token limit; null = not checked yet
+  max_input_tokens: null # input token limit checked before calling; null = not checked
   timeout_seconds: 60
   base_url: https://clovastudio.stream.ntruss.com
   api_key_env: HCX_API_KEY
-
-# Gemini (development model before HCX access, 2026-10-21). Key: GEMINI_API_KEY in .env or Colab secrets.
-# Gemini 3.x ignores temperature; thinking_level (low | medium | high) is used instead.
-# Thinking tokens count toward max_tokens, so this block uses a larger budget.
-gemini:
-  model: gemini-3.8-flash
-  thinking_level: low
-  max_tokens: 8192
-  api_key_env: GEMINI_API_KEY
-
-# Pre-test with another model through any OpenAI-compatible /chat/completions API.
-# Uses model.temperature / max_tokens / timeout_seconds above. Key is read from .env (api_key_env).
-# Examples:
-#   OpenAI   base_url: https://api.openai.com/v1                                 model: gpt-4o-mini
-#   Ollama   base_url: http://localhost:11434/v1  (no key)                       model: qwen2.5:7b
-openai_compat:
-  base_url: null
-  model: null
-  api_key_env: PRETEST_API_KEY
 
 mock:
   response: "[mock] 표에 있는 값만으로 답변합니다. 출처: KOSIS"

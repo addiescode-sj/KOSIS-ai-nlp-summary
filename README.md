@@ -88,11 +88,12 @@ Q  출생아가 줄어든 원인이 뭐야?
 A  통계 수치만으로는 원인을 판단할 수 없습니다. 연도별 출생아 수와 증감률은 안내할 수 있습니다.
 ```
 
-## 현재 상태 (2026-10-21)
+## 현재 상태 (2026-10-22)
 
-- **실전 1 · B0 베이스라인**: 표 데이터 + 질문 → LLM → 답변이 끝까지 도는 가장 단순한 챗봇(`kosis_chat/`)과
-  평가 도구(`eval/`)의 오프라인 코드가 완성됐고 Mock 기반 테스트(44개)가 통과한다.
-- 아직 안 된 것: 실제 LLM 실행, 실제 통계표, 골든셋. 그래서 B0 기준 점수는 아직 없다.
+- **실전 1 · B0 베이스라인**: 표 데이터 + 질문 → HCX → 답변이 끝까지 도는 가장 단순한 챗봇(`kosis_chat/`)과
+  평가 도구(`eval/`)가 동작한다. HCX(CLOVA Studio) 실제 호출을 확인했다.
+- 튜닝 모델은 **HCX-DASH-002** (HCX-007은 10/22부터 보류). 답변 형식 지시는 `--form <파일>`로 질문마다 붙여 실험한다.
+- 알려진 한계: B0는 표 전체를 프롬프트에 넣으므로 큰 표(예: DT_1JC1502, 1,814행)는 DASH 입력 한도를 넘어 `input_too_long`이 된다.
 - B0 이후 한 번에 하나씩 바꾸며 B1(전처리) → B3(코드 계산) → B4(숫자 검증)로 올리고, 같은 골든셋으로 `eval-history.md`에 한 줄씩 쌓는다.
 - 최신 상태와 막힌 항목은 [docs/current-state.md](docs/current-state.md)를 본다 (새 세션·새 팀원의 시작점).
 
@@ -107,19 +108,23 @@ bash scripts/verify.sh                     # 오프라인 검증: pytest(Mock) +
 # API 키 없이 흐름만 확인 (Mock)
 python -m kosis_chat.cli --table tests/fixtures/pop_a.csv --backend mock -q "2023년 여자 인구는?"
 
-# 실제 모델로 질문 (.env에 GEMINI_API_KEY 필요, 기본 백엔드: Gemini)
+# 실제 모델로 질문 (.env에 HCX_API_KEY 필요, 기본 백엔드: HCX-007 thinking 끔)
 python -m kosis_chat.cli --table <표 파일> -q "질문"
+# 모델·thinking 바꾸기 (thinking을 켜면 max-tokens를 늘린다)
+python -m kosis_chat.cli --table <표 파일> --thinking low --max-tokens 5120 -q "질문"
+python -m kosis_chat.cli --table <표 파일> --model HCX-DASH-002 -q "질문"
 ```
 
 | 환경변수 | 용도 |
 | --- | --- |
 | `KOSIS_API_KEY` | KOSIS OpenAPI |
-| `GEMINI_API_KEY` | 개발용 기본 모델 (Gemini) |
-| `HCX_API_KEY`, `HCX_API_URL` | 최종 대상 모델 HCX (호출 방식 확인 중) |
+| `HCX_API_KEY` | 기본·평가 대상 모델 HCX (CLOVA Studio v3, `nv-`로 시작하는 키) |
+| `GEMINI_API_KEY` | HCX 이전 개발용 모델 (Gemini, `--backend gemini`) |
 | `PRETEST_API_KEY` | OpenAI 호환 API로 다른 모델 사전 테스트 |
 | `LINEAR_API_KEY`, `LINEAR_TEAM_KEY` | TASK.md → Linear 자동 동기화 (선택) |
 
-백엔드·모델 설정은 [configs/model.yaml](configs/model.yaml). Mock·사전 테스트(`openai_compat`) 실행 결과는 `eval-history`에 올리지 않는다.
+백엔드·모델 설정은 [configs/model.yaml](configs/model.yaml). Mock 실행 결과는 사전 테스트라 `eval-history`에 올리지 않는다.
+`--form`을 쓴 실행은 결과 폴더에 그때의 `form.txt` 사본이, `manifest.json`에 해시가 남는다.
 
 ## 평가
 

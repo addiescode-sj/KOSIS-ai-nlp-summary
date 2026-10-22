@@ -10,7 +10,6 @@ from kosis_chat.chatbot import Chatbot
 from kosis_chat.config import load_settings
 from kosis_chat.data.loader import load_table
 from kosis_chat.llm.model import HCXClient, build_client
-from tests.test_openai_compat import server_factory  # noqa: F401  (fixture)
 
 
 @pytest.fixture
@@ -23,13 +22,16 @@ def hcx_key(monkeypatch):
     monkeypatch.setenv("HCX_API_KEY", "nv-dummy")
 
 
+def no_sleep(_):
+    pass
+
+
 def _settings(mock_settings, base_url, **kw):
-    values = {"backend": "hcx", "base_url": base_url, "model_name": "HCX-007", "api_key_env": "HCX_API_KEY", "thinking_level": "none"}
-    values.update(kw)
-    return replace(mock_settings, **values)
+    values = {"backend": "hcx", "base_url": base_url, "model_name": "HCX-007", "thinking_level": "none"}
+    return replace(mock_settings, **{**values, **kw})
 
 
-def ok_body(text="2023년 여자 인구는 100명입니다. 출처: 테스트"):
+def ok_body(text="2023년 여자 인구는 100명입니다."):
     return {
         "status": {"code": "20000", "message": "OK"},
         "result": {
@@ -45,19 +47,18 @@ def test_reasoning_model_request_shape(table, mock_settings, server_factory):
     settings = _settings(mock_settings, srv.base_url)
     answer = Chatbot(table, settings=settings).ask("여자 인구는?")
     assert answer.status == "ok" and "100명" in answer.text
-    req, headers = srv.requests[0], srv.headers[0]
+    req = srv.requests[0]
     assert [m["role"] for m in req["messages"]] == ["system", "user"]
     assert req["temperature"] == 0 and req["maxCompletionTokens"] == settings.max_tokens
     assert req["thinking"] == {"effort": "none"} and "maxTokens" not in req
-    assert headers["Authorization"] == "Bearer nv-dummy"
+    assert srv.request_headers[0]["Authorization"] == "Bearer nv-dummy"
     assert HCXClient(settings).url == srv.base_url + "/v3/chat-completions/HCX-007"
 
 
-def test_light_model_uses_max_tokens_without_thinking(table, mock_settings, server_factory):
+def test_light_model_uses_max_tokens_without_thinking(mock_settings, server_factory):
     srv = server_factory(body=ok_body())
     client = HCXClient(_settings(mock_settings, srv.base_url, model_name="HCX-DASH-002", max_tokens=512))
-    result = client.generate("sys", "user")
-    assert result.usage["totalTokens"] == 135
+    assert client.generate("sys", "user").usage["totalTokens"] == 135
     assert srv.requests[0]["maxTokens"] == 512 and "thinking" not in srv.requests[0]
 
 
@@ -74,39 +75,34 @@ def test_retries_rate_limit_then_succeeds(mock_settings, server_factory):
     assert delays == [HCXClient.RETRY_DELAYS[0]] and len(srv.requests) == 2
 
 
-def test_retry_waits_for_longer_retry_after(mock_settings, server_factory, monkeypatch):
-    srv = server_factory(status=429, body={"status": {"code": "42901"}})
-    monkeypatch.setattr(HCXClient, "RETRY_DELAYS", (1.0,))
+def test_retry_waits_for_longer_retry_after(mock_settings, server_factory):
+    srv = server_factory(status=429, body={"status": {"code": "42901"}}, headers={"Retry-After": "40"})
     delays = []
-    client = HCXClient(_settings(mock_settings, srv.base_url), sleep=delays.append)
-    orig = client._call
-
-    def call_with_header(system, user):
-        result = orig(system, user)
-        client._retry_after = 40.0  # as parsed from a Retry-After header
-        return result
-
-    client._call = call_with_header
-    client.generate("s", "u")
-    assert delays == [40.0]
+    HCXClient(_settings(mock_settings, srv.base_url), sleep=delays.append).generate("s", "u")
+    assert delays == [40.0, 40.0, 40.0, 60.0]
 
 
 def test_errors_become_statuses(mock_settings, server_factory):
-    no_sleep = lambda _: None  # noqa: E731
-    srv = server_factory(status=503, body={"status": {"code": "50000", "message": "busy"}})
-    result = HCXClient(_settings(mock_settings, srv.base_url), sleep=no_sleep).generate("s", "u")
+    busy = server_factory(status=503, body={"status": {"code": "50000", "message": "busy"}})
+    result = HCXClient(_settings(mock_settings, busy.base_url), sleep=no_sleep).generate("s", "u")
     assert result.status == "api_error" and "HTTP 503" in result.error
-    assert len(srv.requests) == 1 + len(HCXClient.RETRY_DELAYS)
+    assert len(busy.requests) == 1 + len(HCXClient.RETRY_DELAYS)
 
     bad = server_factory(status=401, body={"status": {"code": "40100", "message": "Unauthorized"}})
     assert "HTTP 401" in HCXClient(_settings(mock_settings, bad.base_url), sleep=no_sleep).generate("s", "u").error
     assert len(bad.requests) == 1  # auth errors are not retried
 
-    long = server_factory(status=400, body={"status": {"code": "40000", "message": "Input token limit exceeded"}})
+    long = server_factory(status=400, body={"status": {"code": "40003", "message": "Context length exceeded."}})
     assert HCXClient(_settings(mock_settings, long.base_url)).generate("s", "u").status == "input_too_long"
 
     empty = server_factory(body=ok_body(""))
     assert "empty response" in HCXClient(_settings(mock_settings, empty.base_url)).generate("s", "u").error
+
+
+def test_timeout_and_connection_failure(mock_settings, server_factory):
+    slow = server_factory(body=ok_body(), delay=1.0)
+    assert HCXClient(_settings(mock_settings, slow.base_url, timeout_seconds=0.2)).generate("s", "u").status == "timeout"
+    assert HCXClient(_settings(mock_settings, "http://127.0.0.1:9")).generate("s", "u").status == "api_error"
 
 
 def test_missing_key_or_model_is_a_config_error(mock_settings, monkeypatch):
@@ -118,18 +114,13 @@ def test_missing_key_or_model_is_a_config_error(mock_settings, monkeypatch):
         HCXClient(_settings(mock_settings, "http://x", model_name="TBD"))
 
 
-def test_load_settings_reads_hcx_model_block(tmp_path):
+def test_load_settings_reads_model_block(tmp_path):
     cfg = tmp_path / "m.yaml"
-    cfg.write_text(
-        "backend: hcx\nmodel: {name: HCX-007, thinking_effort: low, max_tokens: 5120}\n"
-        "gemini: {model: g, thinking_level: high}\n",
-        encoding="utf-8",
-    )
+    cfg.write_text("backend: hcx\nmodel: {name: HCX-007, thinking_effort: low, max_tokens: 5120}\n", encoding="utf-8")
     s = load_settings(cfg)
     assert (s.model_name, s.thinking_level, s.max_tokens) == ("HCX-007", "low", 5120)
     assert (s.base_url, s.api_key_env) == ("https://clovastudio.stream.ntruss.com", "HCX_API_KEY")
-    assert load_settings(cfg, thinking_level="none").thinking_level == "none"
-    assert load_settings(cfg, backend="mock").thinking_level is None
+    assert load_settings(cfg, thinking_level="none", model_name="HCX-DASH-002").model_name == "HCX-DASH-002"
 
 
 def test_repo_config_defaults_to_hcx():

@@ -1,6 +1,5 @@
 # Runtime
 pyyaml>=6.0
 python-dotenv>=1.0
-google-genai>=2.3
 # Tests (offline, Mock only)
 pytest>=8.0
