@@ -76,12 +76,20 @@ def test_golden_cell_facts_resolve_to_parquet_rows():
             cell = Cell.from_row(row)
             cells[cell.ref()] = cell
     assert len(facts) == 67
+    unit_misses = set()
     for f in facts:
         cell = cells[f["source_ref"]]
         if f.get("value") is None:
             assert cell.value is None and cell.value_raw.strip() == f["raw"]
         else:
             assert cell.value == pytest.approx(f["value"])
+        fact = cell.to_fact(f["id"])
+        assert (fact.source_ref, fact.period, fact.raw) == (f["source_ref"], f["period"], f.get("raw"))
+        if fact.unit != f.get("unit"):
+            unit_misses.add((fact.unit, cell.item_name, *(d.label for d in cell.dims)))
+    # The data carries no unit for these two; the golden author filled them in by hand.
+    assert {m[0] for m in unit_misses} == {None}
+    assert all("합계출산율" in m or "기대수명(출생시 기대여명)" in m for m in unit_misses)
 
 
 def test_cell_from_parquet_row_keeps_dim_order():
@@ -94,6 +102,32 @@ def test_cell_from_parquet_row_keeps_dim_order():
         "value_raw": "69.1", "value": 69.1, "value_kind": "ok",
     }  # fmt: skip
     assert Cell.from_row(row).ref() == "DT_101094A001|T1|S2|A3|2020"
+
+
+def cell(**kw):
+    base = dict(org_id="101", tbl_id="T", source="api", prd_se="Y", period="2025", item_id="T1", item_name="i",
+                value_raw="12", value=12.0, value_kind="ok")  # fmt: skip
+    return Cell(**(base | kw))
+
+
+@pytest.mark.parametrize(
+    ("kw", "unit"),
+    [
+        ({"item_name": "출생건수 (명)"}, "명"),
+        ({"item_name": "조출생률 (천명당)"}, "천명당"),
+        ({"item_name": "x", "dims": [{"name": "기본항목별", "code": "11", "label": "출생아수(명)"}]}, "명"),
+        ({"item_name": "x", "dims": [{"name": "기본항목별", "code": "41", "label": "기대수명(출생시 기대여명)"}]}, None),
+        ({"item_name": "x", "dims": [{"name": "행정구역별", "code": "29", "label": "세종특별자치시(2012~)"}]}, None),
+        ({"item_name": "인구밀도 (명)", "unit": "명/㎢"}, "명/㎢"),
+    ],
+)
+def test_cell_unit_from_column_or_suffix(kw, unit):
+    assert cell(**kw).unit_or_suffix() == unit
+
+
+def test_symbol_cell_to_fact_keeps_raw():
+    fact = cell(value_raw=" - ", value=None, value_kind="dash").to_fact("a1")
+    assert (fact.value, fact.raw, fact.source_ref) == (None, "-", "T|T1|2025")
 
 
 def test_answer_with_fact_parts_and_source():
@@ -131,6 +165,11 @@ def test_citation_format():
         pytest.param(lambda: Fact(id="f1", value=76309), id="value without source_ref or derivation"),
         pytest.param(lambda: Fact(id="f1"), id="fact with no basis at all"),
         pytest.param(lambda: StatResult(facts=[CELL, CELL]), id="duplicate fact ids"),
+        pytest.param(
+            lambda: StatResult(facts=[CELL, Fact(id="f3", value=1.0, derivation="f2 - f1", round=0)]),
+            id="derivation references unknown fact",
+        ),
+        pytest.param(lambda: Fact(id="f3", value=1.0, derivation="f2 - f1"), id="derivation without round"),
         pytest.param(
             lambda: StatAnswer(outcome="answered", result=StatResult(facts=[CELL]), parts=[FactPart(fact_id="f9")], source=SOURCE),
             id="V1 unknown fact reference",

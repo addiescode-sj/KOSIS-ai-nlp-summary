@@ -6,6 +6,7 @@ Field names follow the golden set (eval/golden/stat_golden.jsonl) so golden fact
 
 from __future__ import annotations
 
+import re
 from typing import Annotated, Literal, get_args
 
 from pydantic import BaseModel, Field, model_validator
@@ -32,6 +33,10 @@ QUESTION_KINDS = get_args(QuestionKind)
 REFUSAL_REASONS = get_args(RefusalReason)
 VALUE_KINDS = get_args(ValueKind)
 MAX_DIMS = 8  # dim1..dim8 columns in the Parquet files
+# Trailing "(unit)" in an item name or dim label, e.g. "출생건수 (명)", "출생아수(명)".
+# ponytail: short no-space/no-digit token only, so "(출생시 기대여명)" or "(2012~)" are not units; a unit table if this misses too many.
+_UNIT_SUFFIX = re.compile(r"\(([^()\s\d~]{1,5})\)\s*$")
+_IDENT = re.compile(r"[A-Za-z_]\w*")
 
 
 class Source(BaseModel):
@@ -114,6 +119,26 @@ class Cell(BaseModel):
         """source_ref used by Fact and the golden set: 'tbl_id|item_id|dim codes...|period'."""
         return "|".join([self.tbl_id, self.item_id, *(d.code for d in self.dims), self.period])
 
+    def unit_or_suffix(self) -> str | None:
+        """Unit column, else a trailing '(unit)' in the item name, else in a dim label. None when unknown."""
+        if self.unit:
+            return self.unit
+        for text in [self.item_name, *(d.label for d in self.dims)]:
+            if m := _UNIT_SUFFIX.search(text):
+                return m.group(1)
+        return None
+
+    def to_fact(self, fact_id: str) -> Fact:
+        return Fact(
+            id=fact_id,
+            value=self.value,
+            unit=self.unit_or_suffix(),
+            period=self.period,
+            dims={d.name: d.label for d in self.dims},
+            source_ref=self.ref(),
+            raw=None if self.value_kind == "ok" else self.value_raw.strip(),
+        )
+
 
 class StatQuery(BaseModel):
     """Question analysis result (T1-06)."""
@@ -147,6 +172,8 @@ class Fact(BaseModel):
             raise ValueError(f"fact {self.id}: a value needs a source_ref or a derivation")
         if not (self.source_ref or self.derivation or self.note):
             raise ValueError(f"fact {self.id}: needs a source_ref, a derivation or a note")
+        if self.derivation and self.round is None:
+            raise ValueError(f"fact {self.id}: a derivation needs round")
         return self
 
 
@@ -161,6 +188,10 @@ class StatResult(BaseModel):
         dupes = sorted({i for i in ids if ids.count(i) > 1})
         if dupes:
             raise ValueError(f"duplicate fact ids: {dupes}")
+        unknown = {f.id: sorted(set(_IDENT.findall(f.derivation)) - set(ids)) for f in self.facts if f.derivation}
+        unknown = {k: v for k, v in unknown.items() if v}
+        if unknown:
+            raise ValueError(f"derivations reference unknown facts: {unknown}")
         return self
 
     def get(self, fact_id: str) -> Fact | None:
