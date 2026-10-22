@@ -8,7 +8,7 @@
 
 - [ ] **T0-01** 레포 골격 — uv 프로젝트, `src/kosis_ai/`, `eval/`, pytest·ruff, `.env.example`, `.gitignore`
 - [ ] **T0-02** KOSIS OpenAPI 연결 — 키 발급, 통계표 1개 조회 스모크 테스트, 응답 캐시(`data/cache/`)
-- [ ] **T0-03** 공통 Pydantic 스키마 — `StatQuery`, `StatResult`, `Source`, `Refusal`, `StatAnswer` 확정 (3단계 공용 계약)
+- [x] **T0-03** 공통 Pydantic 스키마 — `StatQuery`, `StatResult`, `Source`, `Refusal`, `StatAnswer` 확정 (3단계 공용 계약) → 결과: 골든 fact 적합 0/98 → 98/98, 골든 셀 fact → Parquet 행 연결 45/67 → 67/67, tables.csv 2,364/2,364, 계약 위반 차단 테스트 0 → 16 (`src/kosis_ai/schemas.py`)
 
 ## Phase 1 — 실전 1: 통계 수치 요약 모듈 (10/20~10/28)
 
