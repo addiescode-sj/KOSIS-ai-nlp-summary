@@ -47,11 +47,10 @@ def test_timeout_and_api_error_become_statuses(table, mock_settings):
     assert (answer.status, answer.error) == ("api_error", "500")
 
 
-def test_hcx_client_is_interface_only(table, mock_settings):
-    settings = replace(mock_settings, backend="hcx")
+def test_hcx_backend_builds_hcx_client(mock_settings, monkeypatch):
+    monkeypatch.setenv("HCX_API_KEY", "nv-dummy")
+    settings = replace(mock_settings, backend="hcx", model_name="HCX-007", base_url="http://x", api_key_env="HCX_API_KEY")
     assert isinstance(build_client(settings), HCXClient)
-    answer = Chatbot(table, settings=settings).ask("q")
-    assert answer.status == "api_error" and "not implemented" in answer.error
 
 
 def test_cli_answers_questions_with_mock(fixtures, capsys):

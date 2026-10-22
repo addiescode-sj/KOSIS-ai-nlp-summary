@@ -71,7 +71,8 @@
 
 ## Phase 6: B0 run with HCX (blocked until owner inputs arrive)
 
-- [ ] T-023 `kosis_chat/llm/model.py` — HCXClient 구현, max_input_tokens 기입 (FR-005) — BLOCKED: HCX 호출 방식 (10/21)
+- [x] T-023 `kosis_chat/llm/model.py` — HCXClient 구현, max_input_tokens 기입 (FR-005)
+  > done 10/22: CLOVA Studio v3 chat-completions (Bearer HCX_API_KEY), 기본 HCX-007 thinking none, 429/5xx 재시도, CLI·run_eval에 --thinking/--max-tokens. 가짜 서버 테스트 7개 (64 passed). 실제 호출은 사용자 PC에서 확인 필요(T-026). max_input_tokens는 아직 null
 - [ ] T-024 B0 대상 표 1개를 형식 A 또는 B로 `data/samples/`에 준비 (AC-006) — BLOCKED: 대상 표 선정 (10/21)
 - [ ] T-025 `eval/golden/v1/` 골든셋 작성 (문항 종류 4가지, fact별 계산식·입력 셀·허용오차) — BLOCKED: 담당·내용 (10/22) after: T-024
 - [ ] T-026 HCX로 CLI 실행 확인 (AC-006) after: T-023, T-024

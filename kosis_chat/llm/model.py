@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import json
 import socket
+import time
 import urllib.error
 import urllib.request
+import uuid
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Sequence
@@ -72,17 +74,93 @@ class MockClient(LLMClient):
 
 
 class HCXClient(LLMClient):
-    """HyperCLOVA X client. Interface only until the call method is confirmed (TASKS T-023)."""
+    """HyperCLOVA X through the CLOVA Studio v3 chat-completions API (non-streaming).
+
+    POST {base_url}/v3/chat-completions/{model} with "Authorization: Bearer <HCX_API_KEY>".
+    Reasoning models (HCX-007) take maxCompletionTokens and thinking.effort; the others take maxTokens.
+    Rate limits (429) and server errors (5xx) are retried with the delays in RETRY_DELAYS.
+    """
 
     name = "hcx"
+    REASONING_MODELS = ("HCX-007",)
+    RETRY_DELAYS = (2.0, 5.0, 15.0)
+    RETRY_HTTP_CODES = (429, 500, 502, 503, 504)
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, sleep: Callable[[float], None] = time.sleep) -> None:
         self.settings = settings
+        if not settings.model_name or settings.model_name == "TBD":
+            raise ValueError("model.name (HCX model) is not set in configs/model.yaml (or pass --model)")
+        if not settings.base_url:
+            raise ValueError("model.base_url (CLOVA Studio URL) is not set in configs/model.yaml")
+        self._key = get_secret(settings.api_key_env)
+        if not self._key:
+            raise ValueError(f"{settings.api_key_env} is not set in .env")
+        self.url = f"{settings.base_url.rstrip('/')}/v3/chat-completions/{settings.model_name}"
+        self._sleep = sleep
+
+    @property
+    def is_reasoning(self) -> bool:
+        return self.settings.model_name.upper().startswith(self.REASONING_MODELS)
+
+    def _body(self, system: str, user: str) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            "temperature": self.settings.temperature,
+        }
+        if self.is_reasoning:
+            # Thinking tokens count toward maxCompletionTokens.
+            body["maxCompletionTokens"] = self.settings.max_tokens
+            body["thinking"] = {"effort": self.settings.thinking_level or "none"}
+        else:
+            body["maxTokens"] = self.settings.max_tokens
+        return body
+
+    def _request(self, system: str, user: str) -> urllib.request.Request:
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Authorization": f"Bearer {self._key}",
+            "X-NCP-CLOVASTUDIO-REQUEST-ID": uuid.uuid4().hex,
+        }
+        data = json.dumps(self._body(system, user)).encode("utf-8")
+        return urllib.request.Request(self.url, data=data, headers=headers, method="POST")
 
     def generate(self, system: str, user: str) -> LLMResult:
-        raise NotImplementedError(
-            "HCXClient is not implemented yet: endpoint, auth and model name are confirmed on 2026-10-21"
-        )
+        result = self._call(system, user)
+        for delay in self.RETRY_DELAYS:
+            if not (result.error or "").startswith(tuple(f"HTTP {c}" for c in self.RETRY_HTTP_CODES)):
+                break
+            self._sleep(delay)
+            result = self._call(system, user)
+        return result
+
+    def _call(self, system: str, user: str) -> LLMResult:
+        try:
+            with urllib.request.urlopen(self._request(system, user), timeout=self.settings.timeout_seconds) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", "replace")[:300]
+            low = detail.lower()
+            too_long = exc.code == 400 and "token" in low and any(w in low for w in ("exceed", "limit", "too long", "초과"))
+            return LLMResult(text="", status=STATUS_INPUT_TOO_LONG if too_long else STATUS_API_ERROR, error=f"HTTP {exc.code}: {detail}")
+        except (TimeoutError, socket.timeout):
+            return LLMResult(text="", status=STATUS_TIMEOUT, error="request timed out")
+        except urllib.error.URLError as exc:
+            if isinstance(exc.reason, (TimeoutError, socket.timeout)):
+                return LLMResult(text="", status=STATUS_TIMEOUT, error="request timed out")
+            return LLMResult(text="", status=STATUS_API_ERROR, error=f"connection failed: {exc.reason}")
+        except json.JSONDecodeError as exc:
+            return LLMResult(text="", status=STATUS_API_ERROR, error=f"invalid JSON response: {exc}")
+        code = str((data.get("status") or {}).get("code", ""))
+        result = data.get("result") or {}
+        if code != "20000" or not isinstance(result.get("message"), dict):
+            return LLMResult(text="", status=STATUS_API_ERROR, error=f"unexpected response: {str(data)[:300]}")
+        usage = result.get("usage") or {}
+        text = result["message"].get("content") or ""
+        if not text:
+            # With thinking on, a small maxCompletionTokens can be used up before any answer text.
+            return LLMResult(text="", status=STATUS_API_ERROR, usage=usage, error=f"empty response (finishReason={result.get('finishReason')})")
+        return LLMResult(text=text, usage=usage)
 
 
 class OpenAICompatClient(LLMClient):

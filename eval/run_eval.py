@@ -164,13 +164,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--golden", default="eval/golden/v1", help="golden version directory or .jsonl file")
     parser.add_argument("--config", default=None)
     parser.add_argument("--backend", choices=["mock", "hcx", "gemini", "openai_compat"], default=None)
-    parser.add_argument("--model", default=None, help="override the model name (gemini / openai_compat)")
+    parser.add_argument("--model", default=None, help="override the model name (hcx / gemini / openai_compat)")
+    parser.add_argument("--thinking", choices=["none", "low", "medium", "high"], default=None, help="override thinking effort (HCX-007) / level (gemini)")
+    parser.add_argument("--max-tokens", type=int, default=None, help="override max output tokens (raise it when thinking is on)")
     parser.add_argument("--runs", type=int, default=None, help="override eval.runs (changing it requires re-running all stages)")
     parser.add_argument("--out", default="eval/results")
     args = parser.parse_args(argv)
 
     load_env()
-    settings = load_settings(args.config, backend=args.backend, model_name=args.model)
+    settings = load_settings(
+        args.config, backend=args.backend, model_name=args.model, thinking_level=args.thinking, max_tokens=args.max_tokens
+    )
     run_dir = run(resolve_path(args.golden), args.stage, settings, resolve_path(args.out), runs=args.runs)
     print(f"saved: {run_dir}")
     print(f"next: python -m eval.review export --run {run_dir.relative_to(PROJECT_ROOT) if run_dir.is_relative_to(PROJECT_ROOT) else run_dir}")

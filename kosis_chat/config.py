@@ -68,6 +68,11 @@ def load_settings(path: str | Path | None = None, **overrides: Any) -> Settings:
         "eval_runs": int((data.get("eval") or {}).get("runs", 1)),
     }
     overrides = {k: v for k, v in overrides.items() if v is not None}
+    if overrides.get("backend", values["backend"]) == "hcx":
+        # The model block is the HCX block (CLOVA Studio). thinking_effort applies to HCX-007 only.
+        values["base_url"] = model.get("base_url", "https://clovastudio.stream.ntruss.com")
+        values["api_key_env"] = model.get("api_key_env", "HCX_API_KEY")
+        values["thinking_level"] = model.get("thinking_effort")
     if overrides.get("backend", values["backend"]) == "openai_compat":
         # Pre-test backend keeps its own model block so the HCX settings stay untouched.
         compat = data.get("openai_compat") or {}
