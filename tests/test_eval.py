@@ -167,3 +167,21 @@ def test_interval_waits_between_calls_only(golden, mock_settings, tmp_path, monk
     client = MockClient("x")
     run_eval.run(golden, "B0", mock_settings, tmp_path / "results", client=client, interval=3.0)
     assert waits == [3.0] * (len(client.calls) - 1)
+
+
+def test_form_is_appended_and_recorded(golden, mock_settings, tmp_path):
+    form = tmp_path / "form.txt"
+    form.write_text("한 문장으로 답하세요.", encoding="utf-8")
+    client = MockClient("x")
+    run_dir = run_eval.run(golden, "B0", mock_settings, tmp_path / "results", client=client, form_path=form)
+    assert all(user.endswith("[답변 형식]\n한 문장으로 답하세요.") for _, user in client.calls)
+    manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["form"]["sha256"] == sha256_of(form)
+    assert (run_dir / "form.txt").read_text(encoding="utf-8") == "한 문장으로 답하세요."
+
+
+def test_no_form_leaves_prompt_unchanged(golden, mock_settings, tmp_path):
+    client = MockClient("x")
+    run_dir = run_eval.run(golden, "B0", mock_settings, tmp_path / "results", client=client)
+    assert "[답변 형식]" not in client.calls[0][1]
+    assert json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))["form"] is None

@@ -46,17 +46,19 @@ class Chatbot:
         client: LLMClient | None = None,
         settings: Settings | None = None,
         prompt_version: str | None = None,
+        form: str | None = None,
     ) -> None:
         self.settings = settings or load_settings()
         self.client = client or build_client(self.settings)
         self.prompt_version = prompt_version or self.settings.prompt_version
         self.system_prompt = prompts.get_system_prompt(self.prompt_version)
+        self.form = form  # answer-format instructions appended to every question
         # Each stage adds one step here (B1 rules, B2 analysis, B3 calculation, B4 validation).
         self.table = preprocessing.clean(table)
         self.table_text = serializer.to_markdown(self.table)
 
     def ask(self, question: str) -> Answer:
-        user_prompt = prompts.build_user_prompt(self.table_text, question)
+        user_prompt = prompts.build_user_prompt(self.table_text, question, self.form)
         tokens = estimate_tokens(self.system_prompt + user_prompt)
         limit = self.settings.max_input_tokens
         if limit is not None and tokens > limit:

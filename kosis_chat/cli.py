@@ -21,6 +21,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", default=None, help="override the model name (hcx / gemini / openai_compat)")
     parser.add_argument("--thinking", choices=["none", "low", "medium", "high"], default=None, help="override thinking effort (HCX-007) / level (gemini)")
     parser.add_argument("--max-tokens", type=int, default=None, help="override max output tokens (raise it when thinking is on)")
+    parser.add_argument("--form", default=None, help="text file with answer-format instructions appended to each question")
     parser.add_argument("--question", "-q", action="append", help="ask this question and exit (repeatable)")
     return parser
 
@@ -40,7 +41,11 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     try:
-        bot = Chatbot(table, settings=settings)
+        form = resolve_path(args.form).read_text(encoding="utf-8-sig") if args.form else None
+        bot = Chatbot(table, settings=settings, form=form)
+    except OSError as exc:
+        print(f"--form 파일을 읽을 수 없습니다: {exc}", file=sys.stderr)
+        return 2
     except ValueError as exc:  # backend misconfigured, e.g. openai_compat without base_url
         print(f"설정 오류: {exc}", file=sys.stderr)
         return 2
