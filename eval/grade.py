@@ -28,6 +28,7 @@ class Grade(BaseModel):
     question_id: str
     kind: str
     type: str | None = None
+    eda_traps: list[str] = Field(default_factory=list)  # copied from the golden item for per-trap breakdown
     outcome: str
     verdict: str
     error_types: list[str] = Field(default_factory=list)
@@ -181,6 +182,7 @@ def grade(item: GoldenItem, answer: StatAnswer, cells: dict[str, Cell]) -> Grade
         question_id=item.id,
         kind=item.kind,
         type=item.type,
+        eda_traps=item.eda_traps,
         outcome=answer.outcome,
         verdict=verdict,
         error_types=sorted(errors),

@@ -124,6 +124,15 @@ def test_report_metrics_and_files(table, tmp_path):
     assert "수치 정확도" in (run_dir / "report.md").read_text(encoding="utf-8")
 
 
+def test_report_breaks_down_by_eda_trap(table, tmp_path):
+    items = [_item(table, id="q1", eda_traps=["label_reuse", "unit_missing"]), _item(table, id="q2", eda_traps=["label_reuse"])]
+    summary = summarize(grade_all(items, {"q1": oracle_answer(items[0])}))  # q2 unanswered -> FAIL under its traps
+    assert summary["by_trap"] == {"label_reuse": {"PASS": 1, "FAIL": 1}, "unit_missing": {"PASS": 1}}
+    run_dir = save_report(grade_all(items, {}), {"stage": "t", "started_at": "now", "golden_version": "v",
+                          "golden_sha256": "0" * 64, "questions": 2, "answers": "x"}, tmp_path)
+    assert "| trap=label_reuse | 0 | 0 | 2 |" in (run_dir / "report.md").read_text(encoding="utf-8")
+
+
 def test_oracle_passes_and_golden_checks_run(table, tmp_path):
     item = _item(table)
     golden = tmp_path / "g.jsonl"

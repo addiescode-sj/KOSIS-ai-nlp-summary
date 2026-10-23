@@ -41,7 +41,7 @@ def oracle_answer(item: GoldenItem) -> StatAnswer:
 
 
 def _failed(item: GoldenItem, why: str) -> Grade:
-    return Grade(question_id=item.id, kind=item.kind, type=item.type, outcome="none", verdict="FAIL",
+    return Grade(question_id=item.id, kind=item.kind, type=item.type, eda_traps=item.eda_traps, outcome="none", verdict="FAIL",
                  error_types=["run_failure"], details=[why])
 
 
@@ -67,8 +67,11 @@ def summarize(grades: list[Grade]) -> dict:
     numeric = [g for g in grades if g.kind in ("answerable", "default_allowed")]
     refusal = [g for g in grades if g.kind == "not_answerable"]
     by_type: dict[str, Counter] = {}
+    by_trap: dict[str, Counter] = {}
     for g in grades:
         by_type.setdefault(g.type or "none", Counter())[g.verdict] += 1
+        for trap in g.eda_traps:
+            by_trap.setdefault(trap, Counter())[g.verdict] += 1
     return aggregate(rows) | {
         # A numeric question is correct when it was answered with every required fact right.
         "numeric_accuracy": _rate(
@@ -79,6 +82,7 @@ def summarize(grades: list[Grade]) -> dict:
         "false_refusals": sum(1 for g in grades if "false_refusal" in g.error_types),
         "number_errors": sum(g.number_errors for g in grades),
         "by_type": {t: dict(c) for t, c in sorted(by_type.items())},
+        "by_trap": {t: dict(c) for t, c in sorted(by_trap.items())},
         "needs_review": sum(1 for g in grades if g.needs_review),
     }
 
@@ -111,6 +115,8 @@ def render_markdown(summary: dict, meta: dict) -> str:
             lines.append(f"| kind={kind} | {k['pass']} | {k['partial']} | {k['fail']} |")
     for t, c in summary["by_type"].items():
         lines.append(f"| type={t} | {c.get('PASS', 0)} | {c.get('PARTIAL', 0)} | {c.get('FAIL', 0)} |")
+    for t, c in summary["by_trap"].items():
+        lines.append(f"| trap={t} | {c.get('PASS', 0)} | {c.get('PARTIAL', 0)} | {c.get('FAIL', 0)} |")
     if summary["error_types"]:
         lines += ["", "오류 유형: " + ", ".join(f"{k} {v}" for k, v in summary["error_types"].items())]
     return "\n".join(lines) + "\n"
