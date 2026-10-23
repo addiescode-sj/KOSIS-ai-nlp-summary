@@ -15,7 +15,7 @@ REQUIRED_META_FIELDS = (
     "fetched_at",
 )
 PERIOD_TYPES = ("Y", "M", "Q", "H")
-INPUT_FORMATS = ("A", "B")
+INPUT_FORMATS = ("A", "B", "C")  # A: CSV, B: KOSIS JSON, C: Parquet (data/values)
 VALUE_FLAGS = ("ok", "missing", "suppressed", "provisional", "unparsed")
 
 
@@ -64,6 +64,8 @@ class Cell:
     # Derived by preprocessing; value_raw is never changed.
     value: float | None = None
     value_flag: str | None = None
+    # Where the unit came from: given | item_name | dim_label | override | unknown (see loader.infer_unit).
+    unit_source: str = "given"
 
 
 @dataclass(frozen=True)

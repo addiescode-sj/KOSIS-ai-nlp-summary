@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
+from typing import Any
 
 from kosis_chat.config import Settings, load_settings
 from kosis_chat.data import preprocessing, serializer
@@ -26,6 +28,9 @@ class Answer:
     prompt_version: str
     error: str | None = None
     input_tokens_estimate: int = 0
+    latency_seconds: float = 0.0  # time spent in the model call, including retries
+    attempts: int = 0  # HTTP requests made (0 when no call was sent)
+    usage: dict[str, Any] = field(default_factory=dict)  # token counts reported by the API
 
     @property
     def ok(self) -> bool:
@@ -55,7 +60,7 @@ class Chatbot:
         self.form = form  # answer-format instructions appended to every question
         # Each stage adds one step here (B1 rules, B2 analysis, B3 calculation, B4 validation).
         self.table = preprocessing.clean(table)
-        self.table_text = serializer.to_markdown(self.table)
+        self.table_text = serializer.serialize(self.table, self.settings.serialization)
 
     def ask(self, question: str) -> Answer:
         user_prompt = prompts.build_user_prompt(self.table_text, question, self.form)
@@ -64,15 +69,27 @@ class Chatbot:
         if limit is not None and tokens > limit:
             # Never truncate the table silently.
             return self._answer("", STATUS_INPUT_TOO_LONG, f"estimated {tokens} tokens > limit {limit}", tokens)
+        started = time.perf_counter()
         try:
             result = self.client.generate(self.system_prompt, user_prompt)
         except TimeoutError as exc:
-            return self._answer("", STATUS_TIMEOUT, str(exc) or "timeout", tokens)
+            return self._answer("", STATUS_TIMEOUT, str(exc) or "timeout", tokens, time.perf_counter() - started, 1)
         except Exception as exc:  # recorded as a run failure, never dropped from evaluation
-            return self._answer("", STATUS_API_ERROR, f"{type(exc).__name__}: {exc}", tokens)
-        return self._answer(result.text, result.status, result.error, tokens)
+            error = f"{type(exc).__name__}: {exc}"
+            return self._answer("", STATUS_API_ERROR, error, tokens, time.perf_counter() - started, 1)
+        latency = time.perf_counter() - started
+        return self._answer(result.text, result.status, result.error, tokens, latency, result.attempts, result.usage)
 
-    def _answer(self, text: str, status: str, error: str | None, tokens: int) -> Answer:
+    def _answer(
+        self,
+        text: str,
+        status: str,
+        error: str | None,
+        tokens: int,
+        latency: float = 0.0,
+        attempts: int = 0,
+        usage: dict[str, Any] | None = None,
+    ) -> Answer:
         return Answer(
             text=text,
             status=status,
@@ -80,4 +97,7 @@ class Chatbot:
             prompt_version=self.prompt_version,
             error=error,
             input_tokens_estimate=tokens,
+            latency_seconds=latency,
+            attempts=attempts,
+            usage=usage or {},
         )

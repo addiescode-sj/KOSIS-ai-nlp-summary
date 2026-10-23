@@ -6,6 +6,7 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import logging
 import re
 import subprocess
 import sys
@@ -19,6 +20,8 @@ from kosis_chat.data.loader import load_table, sha256_of
 from kosis_chat.llm.model import BACKENDS, LLMClient, build_client
 
 REQUIRED_ITEM_KEYS = ("id", "kind", "question", "table", "table_sha256")
+log = logging.getLogger("kosis.eval")
+LOG_FORMAT = "%(asctime)s %(levelname)-7s %(message)s"
 _NUMBER = re.compile(r"\d[\d,]*(?:\.\d+)?")
 
 
@@ -98,16 +101,43 @@ def run(
     client = client or build_client(settings)
     form = form_path.read_text(encoding="utf-8-sig") if form_path else None
 
+    log.info(
+        "start: %d questions x %d runs, %d tables, model=%s:%s prompt=%s serialization=%s interval=%.1fs",
+        len(items), runs, len({i["table"] for i in items}), settings.backend, settings.model_name,
+        settings.prompt_version, settings.serialization, interval,
+    )
+    run_started = time.perf_counter()
     bots: dict[str, Chatbot] = {}
     data_hashes: dict[str, str] = {}
-    for item in items:
-        table_path = resolve_path(item["table"])
-        if item["table"] not in bots:
-            actual = sha256_of(table_path) if table_path.exists() else "missing"
-            if actual != item["table_sha256"]:
-                raise GoldenError(f"{item['table']}: sha256 {actual} does not match golden {item['table_sha256']}")
-            bots[item["table"]] = Chatbot(load_table(table_path), client=client, settings=settings, form=form)
-            data_hashes[item["table"]] = actual
+    load_timing: dict[str, dict] = {}
+    table_names = list(dict.fromkeys(i["table"] for i in items))
+    for n, name in enumerate(table_names, start=1):
+        table_path = resolve_path(name)
+        t0 = time.perf_counter()
+        actual = sha256_of(table_path) if table_path.exists() else "missing"
+        if actual != next(i["table_sha256"] for i in items if i["table"] == name):
+            expected = next(i["table_sha256"] for i in items if i["table"] == name)
+            raise GoldenError(f"{name}: sha256 {actual} does not match golden {expected}")
+        t1 = time.perf_counter()
+        table = load_table(table_path)
+        t2 = time.perf_counter()
+        bots[name] = Chatbot(table, client=client, settings=settings, form=form)  # clean + serialize
+        t3 = time.perf_counter()
+        data_hashes[name] = actual
+        load_timing[name] = {
+            "cells": len(table.cells),
+            "table_chars": len(bots[name].table_text),
+            "hash_s": round(t1 - t0, 3),
+            "load_s": round(t2 - t1, 3),
+            "prepare_s": round(t3 - t2, 3),
+        }
+        log.info(
+            "[load %d/%d] %s: %s cells, %s chars | hash %.2fs, load %.2fs, prepare %.2fs",
+            n, len(table_names), Path(name).name, f"{len(table.cells):,}", f"{len(bots[name].table_text):,}",
+            t1 - t0, t2 - t1, t3 - t2,
+        )
+    load_total = time.perf_counter() - run_started
+    log.info("data load done: %d tables in %.2fs", len(table_names), load_total)
 
     started = dt.datetime.now().astimezone()
     run_id = f"{started:%Y%m%d-%H%M%S}-{stage}"
@@ -115,13 +145,23 @@ def run(
     run_dir.mkdir(parents=True, exist_ok=False)
 
     results = []
+    waited = 0.0
+    total_calls = runs * len(items)
     for run_index in range(runs):
         for item in items:
             bot = bots[item["table"]]
             if interval and results:
                 time.sleep(interval)  # stay under per-minute rate limits (HCX 429)
+                waited += interval
             answer = bot.ask(item["question"])
             failed = answer.status != "ok"
+            log.log(
+                logging.WARNING if failed else logging.INFO,
+                "[call %d/%d] %s %s %.2fs (attempts %d, in %s chars, tokens %s/%s)%s",
+                len(results) + 1, total_calls, item["id"], answer.status, answer.latency_seconds, answer.attempts,
+                f"{len(bot.table_text):,}", answer.usage.get("promptTokens", "-"), answer.usage.get("completionTokens", "-"),
+                f" {answer.error[:120]}" if failed and answer.error else "",
+            )
             results.append(
                 {
                     "question_id": item["id"],
@@ -130,6 +170,9 @@ def run(
                     "call_status": answer.status,
                     "call_error": answer.error,
                     "raw_answer": answer.text,
+                    "latency_seconds": round(answer.latency_seconds, 3),
+                    "attempts": answer.attempts,
+                    "usage": answer.usage,
                     "automatic_checks": automatic_checks(item, answer.text, bot.table.meta),
                     # A failed call is a deterministic FAIL; everything else waits for a human.
                     "review_status": "confirmed" if failed else "pending",
@@ -140,6 +183,8 @@ def run(
                 }
             )
 
+    timing = _timing_summary(results, load_timing, load_total, waited, time.perf_counter() - run_started)
+    _log_timing(timing, results)
     manifest = {
         "run_id": run_id,
         "stage": stage,
@@ -150,6 +195,7 @@ def run(
         "data_sha256": data_hashes,
         "scoring_version": SCORING_VERSION,
         "prompt_version": settings.prompt_version,
+        "serialization": settings.serialization,
         # form.txt changes often, so its path, hash and a copy (form.txt in the run dir) are kept with the run.
         "form": {"path": str(form_path), "sha256": sha256_of(form_path)} if form_path else None,
         "model": settings.model_params(),
@@ -157,6 +203,7 @@ def run(
         "questions": len(items),
         # Mock runs are pre-tests and stay out of eval-history.
         "pretest": settings.backend == "mock",
+        "timing": timing,
     }
     write_jsonl(run_dir / "results.jsonl", results)
     if form is not None:
@@ -165,7 +212,61 @@ def run(
     (run_dir / "golden.jsonl").write_text(
         "".join(json.dumps(i, ensure_ascii=False) + "\n" for i in items), encoding="utf-8"
     )
+    log.info("saved: %s", run_dir)
     return run_dir
+
+
+def _timing_summary(results: list[dict], load_timing: dict, load_total: float, waited: float, total: float) -> dict:
+    latencies = [r["latency_seconds"] for r in results]
+    calls = sum(latencies)
+    return {
+        "total_s": round(total, 2),
+        "data_load_s": round(load_total, 2),
+        "api_calls_s": round(calls, 2),
+        "interval_wait_s": round(waited, 2),
+        "calls": len(results),
+        "call_avg_s": round(calls / len(results), 2) if results else None,
+        "call_max_s": round(max(latencies), 2) if latencies else None,
+        "retried_calls": sum(1 for r in results if r["attempts"] > 1),
+        "tables": load_timing,
+    }
+
+
+def _log_timing(timing: dict, results: list[dict]) -> None:
+    statuses: dict[str, int] = {}
+    for r in results:
+        statuses[r["call_status"]] = statuses.get(r["call_status"], 0) + 1
+    log.info(
+        "done: total %.1fs = data load %.1fs + API calls %.1fs + interval wait %.1fs (+ other)",
+        timing["total_s"], timing["data_load_s"], timing["api_calls_s"], timing["interval_wait_s"],
+    )
+    log.info(
+        "calls: %d, avg %ss, max %ss, retried %d, status %s",
+        timing["calls"], timing["call_avg_s"], timing["call_max_s"], timing["retried_calls"], statuses,
+    )
+    for r in sorted(results, key=lambda r: r["latency_seconds"], reverse=True)[:3]:
+        log.info("slowest: %s %.2fs (attempts %d)", r["question_id"], r["latency_seconds"], r["attempts"])
+
+
+def setup_logging(log_dir: Path, stage: str) -> tuple[Path, list[logging.Handler]]:
+    """Log kosis.* to the terminal and to <log_dir>/<time>-<stage>.log; returns the file path and handlers to close."""
+    log_dir.mkdir(parents=True, exist_ok=True)
+    path = log_dir / f"{dt.datetime.now():%Y%m%d-%H%M%S}-{stage}.log"
+    formatter = logging.Formatter(LOG_FORMAT, datefmt="%H:%M:%S")
+    handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout), logging.FileHandler(path, encoding="utf-8")]
+    root = logging.getLogger("kosis")
+    root.setLevel(logging.INFO)
+    for h in handlers:
+        h.setFormatter(formatter)
+        root.addHandler(h)
+    return path, handlers
+
+
+def close_logging(handlers: list[logging.Handler]) -> None:
+    root = logging.getLogger("kosis")
+    for h in handlers:
+        root.removeHandler(h)
+        h.close()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -180,25 +281,39 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--max-tokens", type=int, default=None, help="override max output tokens (raise it when thinking is on)")
     parser.add_argument("--runs", type=int, default=None, help="override eval.runs (changing it requires re-running all stages)")
-    parser.add_argument("--interval", type=float, default=0.0, help="seconds to wait between model calls (avoids HTTP 429)")
+    parser.add_argument("--interval", type=float, default=1.0, help="seconds to wait between model calls (avoids HTTP 429; default 1)")
     parser.add_argument("--form", default=None, help="text file with answer-format instructions appended to each question")
+    parser.add_argument("--serialization", choices=["long", "wide"], default=None, help="table text style (default: model.yaml)")
     parser.add_argument("--out", default="eval/results")
+    parser.add_argument("--log-dir", default="logs", help="folder for the run log file (default: logs/)")
     args = parser.parse_args(argv)
 
     load_env()
     settings = load_settings(
-        args.config, backend=args.backend, model_name=args.model, thinking_level=args.thinking, max_tokens=args.max_tokens
+        args.config,
+        backend=args.backend,
+        model_name=args.model,
+        thinking_level=args.thinking,
+        max_tokens=args.max_tokens,
+        serialization=args.serialization,
     )
-    run_dir = run(
-        resolve_path(args.golden),
-        args.stage,
-        settings,
-        resolve_path(args.out),
-        runs=args.runs,
-        interval=args.interval,
-        form_path=resolve_path(args.form) if args.form else None,
-    )
-    print(f"saved: {run_dir}")
+    log_path, handlers = setup_logging(resolve_path(args.log_dir), args.stage)
+    try:
+        run_dir = run(
+            resolve_path(args.golden),
+            args.stage,
+            settings,
+            resolve_path(args.out),
+            runs=args.runs,
+            interval=args.interval,
+            form_path=resolve_path(args.form) if args.form else None,
+        )
+    except Exception:
+        log.exception("run failed")
+        raise
+    finally:
+        close_logging(handlers)
+    print(f"log: {log_path}")
     print(f"next: python -m eval.review export --run {run_dir.relative_to(PROJECT_ROOT) if run_dir.is_relative_to(PROJECT_ROOT) else run_dir}")
     return 0
 

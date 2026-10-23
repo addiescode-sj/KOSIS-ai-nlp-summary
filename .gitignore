@@ -24,6 +24,7 @@ data/raw/
 data/samples/
 eval/golden/
 eval/results/
+logs/
 
 # From team repo
 data/cache/

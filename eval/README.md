@@ -35,6 +35,10 @@
    <form 파일 내용>
    ```
 
+- `[통계표]` 직렬화는 `--serialization`(또는 `model.yaml`의 `serialization`)으로 고른다.
+  - `long`(기본): 값 하나가 한 행 (`| 항목 | 분류… | 시점 | 값 | 단위 |`)
+  - `wide`: (항목, 분류) 한 행에 시점을 열로 펼침. 단위가 하나면 표 위에 한 번만 쓰고, 시점이 20개를 넘으면 20개씩 나눠 쓴다. 글자 수가 약 17~30%로 준다.
+- 단위가 없는 표(KOSIS가 `UNIT_NM`을 안 준 DT_1B8000F/H 등)는 항목명·분류명 괄호에서 단위를 찾고, 없으면 `단위 미상`으로 넣는다(`kosis_chat/data/loader.py` `infer_unit`).
 - `--form` 파일은 UTF-8로 읽고 앞뒤 공백은 지운다. 파일 내용은 그대로 붙으므로 제목이나 접두어가 필요하면 파일 안에 쓴다.
 - 시스템 프롬프트와 form 지시가 서로 다르면(예: 출처를 쓰라 / 생략하라) 모델이 둘 다 받는다.
   form으로 정한 형식을 계속 쓸 거라면 `prompts.py`에 새 버전을 추가하고 `model.yaml`의 `prompt_version`을 바꾼다.
@@ -42,15 +46,16 @@
 ## 3. 실행
 
 ```bat
-python -m eval.run_eval --stage <이름> --golden eval/golden/b0-loadable --interval 5 --form eval/golden/form.txt
+python -m eval.run_eval --stage <이름> --golden eval/golden/b0-loadable --form eval/golden/form.txt
 ```
 
 | 인자 | 뜻 |
 | --- | --- |
 | `--stage` | 결과 폴더 이름에 붙는 실험 이름. 예: `B0-dash`, `B0-dash-form-v2` |
 | `--golden` | 골든셋 폴더 또는 .jsonl 파일 |
-| `--interval N` | 문항 사이 N초 대기. HTTP 429(호출 한도)를 막는다. 5초 권장, 429가 남으면 15초 |
+| `--interval N` | 문항 사이 N초 대기(기본 1초). HTTP 429(호출 한도)가 남으면 5초, 그래도 남으면 15초 |
 | `--form PATH` | 답변 형식 지시 파일. 빼면 form 없이 실행 |
+| `--serialization long\|wide` | 표 직렬화 방식. 빼면 `model.yaml` 값 |
 | `--model` | 모델 바꾸기. 예: `HCX-007` |
 | `--thinking`, `--max-tokens` | HCX-007 thinking 설정. 켜면 max-tokens를 5120 정도로 늘린다 |
 | `--backend mock` | 키 없이 흐름만 확인 (사전 테스트, 점수 기록 안 됨) |
@@ -63,6 +68,20 @@ python -m eval.run_eval --stage <이름> --golden eval/golden/b0-loadable --inte
 | `manifest.json` | 모델·프롬프트 버전·골든셋·데이터 해시, form 경로와 sha256 |
 | `golden.jsonl` | 이번 실행에 쓴 골든셋 사본 |
 | `form.txt` | `--form`을 줬을 때 그 시점의 form 파일 사본 |
+
+### 실행 로그
+
+실행하면 단계마다 터미널에 한 줄씩 찍히고, 같은 내용이 `logs/<시각>-<stage>.log`에 저장된다(gitignore). `--log-dir`로 폴더를 바꿀 수 있다.
+
+```
+10:42:35 INFO    [load 1/6] 101_DT_1JC1502_c35fdfd8da.json: 1,806 cells, 19,634 chars | hash 0.01s, load 0.05s, prepare 0.03s
+10:42:35 INFO    data load done: 6 tables in 0.40s
+10:42:47 INFO    [call 1/40] S-VAL-03 ok 11.20s (attempts 1, in 47,634 chars, tokens 31000/45)
+10:52:11 INFO    done: total 590.0s = data load 0.4s + API calls 540.0s + interval wait 39.0s (+ other)
+```
+
+- `attempts`가 1보다 크면 429·5xx 재시도가 있었던 것(재시도마다 WARNING 줄).
+- 문항별 `latency_seconds`, `attempts`, `usage`(토큰)는 `results.jsonl`에, 전체 요약은 `manifest.json`의 `timing`에 남는다.
 
 ### 호출 실패 확인
 

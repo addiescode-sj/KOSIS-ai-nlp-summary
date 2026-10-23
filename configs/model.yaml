@@ -1,6 +1,7 @@
 # Model and evaluation settings. Secrets go in .env, not here.
 backend: hcx             # hcx | mock (mock runs are pre-tests and never go to eval-history)
 prompt_version: baseline-v1
+serialization: long      # long (one value per row) | wide (periods as columns); see kosis_chat/data/serializer.py
 
 # HCX (HyperCLOVA X) via CLOVA Studio v3 chat-completions. Key: HCX_API_KEY in .env.
 # Models: HCX-DASH-002 (light, current tuning model), HCX-007 (reasoning, paused since 10/22).

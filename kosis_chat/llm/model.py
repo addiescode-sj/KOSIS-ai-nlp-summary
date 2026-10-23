@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 import urllib.error
 import urllib.request
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from kosis_chat.config import Settings, get_secret
@@ -20,6 +21,8 @@ STATUS_TIMEOUT = "timeout"
 STATUS_API_ERROR = "api_error"
 STATUS_INPUT_TOO_LONG = "input_too_long"
 
+log = logging.getLogger("kosis.llm")
+
 
 @dataclass(frozen=True)
 class LLMResult:
@@ -27,6 +30,7 @@ class LLMResult:
     status: str = STATUS_OK
     usage: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
+    attempts: int = 1  # HTTP requests made, including retries
 
 
 class LLMClient(ABC):
@@ -98,12 +102,16 @@ class HCXClient(LLMClient):
 
     def generate(self, system: str, user: str) -> LLMResult:
         result, http_code, retry_after = self._call(system, user)
-        for delay in self.RETRY_DELAYS:
+        attempts = 1
+        for retry, delay in enumerate(self.RETRY_DELAYS, start=1):
             if http_code not in self.RETRY_HTTP_CODES:
                 break
-            self._sleep(min(max(delay, retry_after or 0.0), self.MAX_RETRY_WAIT))
+            wait = min(max(delay, retry_after or 0.0), self.MAX_RETRY_WAIT)
+            log.warning("HTTP %s, retry %d/%d after %.0fs", http_code, retry, len(self.RETRY_DELAYS), wait)
+            self._sleep(wait)
             result, http_code, retry_after = self._call(system, user)
-        return result
+            attempts += 1
+        return replace(result, attempts=attempts)
 
     def _body(self, system: str, user: str) -> dict[str, Any]:
         body: dict[str, Any] = {

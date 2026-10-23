@@ -18,6 +18,7 @@ DEFAULT_BASE_URL = "https://clovastudio.stream.ntruss.com"
 class Settings:
     backend: str = "mock"
     prompt_version: str = "baseline-v1"
+    serialization: str = "long"  # long | wide (kosis_chat/data/serializer.py)
     model_name: str = "TBD"
     thinking_level: str | None = None  # HCX-007 thinking.effort
     temperature: float = 0.0
@@ -59,6 +60,7 @@ def load_settings(path: str | Path | None = None, **overrides: Any) -> Settings:
     values: dict[str, Any] = {
         "backend": data.get("backend", "mock"),
         "prompt_version": data.get("prompt_version", "baseline-v1"),
+        "serialization": data.get("serialization", "long"),
         "model_name": model.get("name", "TBD"),
         "thinking_level": model.get("thinking_effort"),
         "temperature": float(model.get("temperature", 0)),
