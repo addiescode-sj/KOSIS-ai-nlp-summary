@@ -17,7 +17,7 @@
 - [x] **T1-01** EDA — 대상 통계표 3~5개 구조·단위·결측 기호·분류 체계 프로파일링 → `docs/eda.md` → 결과: 범위를 전체 2,364표로 확장해 프로파일링(처리 오류 0, 값 약 5.73억 개) → `docs/eda-full.md`
 - [ ] **T1-02** 질문 유형·답변 가능/불가 기준 문서 (산출물①) — 5종(단순 수치·추이·비교·구성비·최대최소) 예시 + 불가 사유(없는 연도·분류 불일치·단위·인과·결측) → `docs/question_types.md`
 - [ ] **T1-03** ⭐ 골든셋 v0 (산출물③) — T1-02 기준으로 30~40건, 유형별 고른 분포, 불가 질문 포함, 정답은 KOSIS 원값으로 손검증 → `eval/golden/stat_golden.jsonl`
-- [ ] **T1-04** ⭐ 평가 하네스 v1 — 수치 정확도 %, 거절률 %, 숫자 오류 건수, 유형별 분해, 리포트 저장 → `eval/harness.py`
+- [x] **T1-04** ⭐ 평가 하네스 v1 — 수치 정확도 %, 거절률 %, 숫자 오류 건수, 유형별 분해, 리포트 저장 → `eval/harness.py` → 결과: 골든 Pydantic 검증 0/40 → 40/40, 채점 전 fact↔Parquet 대조 0/67 → 67/67, 자동채점 oracle 40/40 PASS·오류 주입 검출 40/40 (`eval/harness.py`, `eval/grade.py`, `eval/golden.py`)
 - [ ] **T1-05** KOSIS 조회·정규화 — `fetch_table(table_id, filters) -> DataFrame` (tidy, 단위·결측 기호 처리)
 - [ ] **T1-06** 질의 분류·슬롯 추출 — LLM structured output으로 유형·항목·기간·분류 추출 → `StatQuery`
 - [ ] **T1-07** 계산 모듈 — pandas로 5종 계산(값·증감률·비교·구성비·최대최소), 단위 테스트

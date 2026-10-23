@@ -9,13 +9,11 @@ import sys
 from collections import Counter
 from pathlib import Path
 
+from kosis_ai.schemas import QUESTION_KINDS as KINDS
+
 SCORING_VERSION = "baseline-scoring-v1"
 
-KIND_ANSWERABLE = "answerable"
-KIND_NOT_ANSWERABLE = "not_answerable"
-KIND_CLARIFY = "clarify"
-KIND_DEFAULT_ALLOWED = "default_allowed"
-KINDS = (KIND_ANSWERABLE, KIND_NOT_ANSWERABLE, KIND_CLARIFY, KIND_DEFAULT_ALLOWED)
+KIND_ANSWERABLE, KIND_NOT_ANSWERABLE, KIND_CLARIFY, KIND_DEFAULT_ALLOWED = KINDS
 VERDICTS = ("PASS", "PARTIAL", "FAIL")
 
 _FACT_ERRORS = {"wrong_value", "wrong_unit", "wrong_period", "wrong_dims"}

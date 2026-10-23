@@ -1,0 +1,91 @@
+{
+  "stage": "T1-04-oracle",
+  "started_at": "2026-10-23T12:16:58+09:00",
+  "golden_version": "golden",
+  "golden_sha256": "640a6ba3d3abfd15bea55e152ee0ed9da7b54a8a10776e9f2221151952053e02",
+  "questions": 40,
+  "answers": "oracle",
+  "summary": {
+    "scoring_version": "baseline-scoring-v1",
+    "total": 40,
+    "confirmed": 40,
+    "pending": 0,
+    "provisional": false,
+    "by_kind": {
+      "answerable": {
+        "total": 25,
+        "confirmed": 25,
+        "pass": 25,
+        "partial": 0,
+        "fail": 0,
+        "pass_rate": 1.0
+      },
+      "not_answerable": {
+        "total": 10,
+        "confirmed": 10,
+        "pass": 10,
+        "partial": 0,
+        "fail": 0,
+        "pass_rate": 1.0
+      },
+      "clarify": {
+        "total": 2,
+        "confirmed": 2,
+        "pass": 2,
+        "partial": 0,
+        "fail": 0,
+        "pass_rate": 1.0
+      },
+      "default_allowed": {
+        "total": 3,
+        "confirmed": 3,
+        "pass": 3,
+        "partial": 0,
+        "fail": 0,
+        "pass_rate": 1.0
+      }
+    },
+    "unsupported_claims": 0,
+    "run_failures": 0,
+    "error_types": {},
+    "runs": 1,
+    "overall_pass_rate_per_run": {
+      "mean": 1.0,
+      "min": 1.0,
+      "max": 1.0
+    },
+    "numeric_accuracy": {
+      "hits": 28,
+      "total": 28,
+      "rate": 1.0
+    },
+    "refusal_rate": {
+      "hits": 10,
+      "total": 10,
+      "rate": 1.0
+    },
+    "false_refusals": 0,
+    "number_errors": 0,
+    "by_type": {
+      "compare": {
+        "PASS": 7
+      },
+      "extreme": {
+        "PASS": 5
+      },
+      "none": {
+        "PASS": 3
+      },
+      "share": {
+        "PASS": 4
+      },
+      "trend": {
+        "PASS": 6
+      },
+      "value": {
+        "PASS": 15
+      }
+    },
+    "needs_review": 12
+  }
+}

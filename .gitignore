@@ -30,10 +30,13 @@ logs/
 data/cache/
 
 # data dir
-data/
+/data/
 
 # 전달받은 전체 데이터(10/22, 보안 서약: 레포 밖)
 data_fix/
 # 최종 데이터 정리용 (data_new -> data, 기존 data -> data_old)
 data_new/
 data_old/
+
+# Per-question grades hold data values; report.md/json are aggregates and may be committed
+eval/reports/**/grades.jsonl

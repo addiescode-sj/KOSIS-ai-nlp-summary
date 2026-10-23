@@ -150,3 +150,22 @@ python -m eval.scorer --run eval\results\<실행 폴더>
 - 같은 골든셋, 같은 표, 같은 `--scope`, 같은 `--interval`로 실행한다.
 - 비교 기준: form 없이 DASH로 돌린 실행(`--stage B0-dash`).
 - `--stage` 이름에 무엇을 바꿨는지 드러나게 쓴다. form 내용은 실행 폴더의 `form.txt`와 `manifest.json`의 sha256으로 구분한다.
+
+## 7. 자동채점 (StatAnswer 출력)
+
+`summarize_stat`처럼 `StatAnswer`(Pydantic)를 돌려주는 파이프라인은 사람 판정 없이 채점한다. 자유 텍스트 답(B0)은 위 4번의 사람 판정을 그대로 쓴다.
+
+```bat
+python -m eval.harness --suite stat --answers answers.jsonl --stage T1-12
+python -m eval.harness --suite stat --oracle --stage oracle    # 골든 정답을 스스로 채점: 40/40 PASS여야 한다
+```
+
+- `answers.jsonl`: 한 줄에 `{"question_id": ..., "answer": <StatAnswer JSON>}`를 쓴다. 답이 없는 문항은 `run_failure`가 된다.
+- 골든은 `eval/golden.py`의 `GoldenItem`(Pydantic)으로 읽는다. 문항 종류별 필수 조건(예: not_answerable이면 `allowed_reasons`)을 검사한다. 또 `table_sha256`과 Parquet 해시를 맞춰 보고, `source_ref`가 있는 fact를 모두 Parquet 셀과 대조한다. 하나라도 어긋나면 채점하지 않는다. `scope`는 실행기 전용이라 채점에 쓰지 않는다.
+- 규칙(`eval/grade.py`)은 사람 판정과 같은 `RULES`/`decide_verdict`를 쓴다. LLM은 쓰지 않는다.
+  - 셀 fact는 `source_ref`와 값으로 맞춘다. 셀이 없을 때, 기간만 다르면 `wrong_period`, 나머지는 `wrong_dims`가 된다.
+  - 계산 fact는 입력 셀(`source_ref` 집합)로 짝을 짓고, 값은 골든 `round` 자릿수의 반 단위까지 허용한다. fact id나 식을 다르게 써도 된다.
+  - 숫자 오류(`unsupported_claim`)는 세 가지다. Parquet과 다른 셀 값, 다시 계산하면 안 맞는 계산 fact, 연결 문장(TextPart) 속 숫자(fact의 시점은 제외).
+  - 거절은 `allowed_reasons` 안의 사유여야 PASS다. 되묻기 문항에 답하면 `assumed_condition`, 기본값을 밝히지 않으면 `unstated_default`가 된다.
+  - 거절 문구가 충분한지, 되묻기 선택지가 좋은지는 코드로 판정하지 않는다. 리포트의 "사람 확인 필요"로 센다.
+- 결과는 `eval/reports/<시각>-<stage>/`에 저장된다. 지표(수치 정확도·거절률·숫자 오류 건수·kind/type별 분해)는 `report.md`/`report.json`에, 문항별 근거는 `grades.jsonl`(gitignore, 데이터 값 포함)에 남는다.
