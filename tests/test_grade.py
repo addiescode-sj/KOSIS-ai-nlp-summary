@@ -1,0 +1,178 @@
+"""Automatic grading: each injected error maps to the RULES error type and verdict; the golden oracle grades PASS."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import json
+
+import pytest
+
+from eval.golden import GoldenError, GoldenItem, load_items, read_cells
+from eval.grade import evaluate, grade
+from eval.harness import grade_all, oracle_answer, save_report, summarize
+from kosis_ai.schemas import Fact, FactPart, Refusal, Source, StatAnswer, StatResult, TextPart
+from tests.conftest import write_table
+
+ROOT = Path(__file__).resolve().parents[1]
+F1 = Fact(id="f1", value=500, unit="명", period="2023", source_ref="GRADE_TBL|T1|1|2023")
+F2 = Fact(id="f2", value=550, unit="명", period="2023", source_ref="GRADE_TBL|T1|2|2023")
+F3 = Fact(id="f3", value=1.1, derivation="f2 / f1", round=1)
+SOURCE = Source(org_id="101", tbl_id="GRADE_TBL", survey_nm="가상 인구조사", tbl_nm="가상 성별 인구")
+# Made-up cells with consistent value_kind (schemas.Cell rejects a symbol marked "ok").
+_CELLS = {("0", "2022"): "1000", ("1", "2022"): "480", ("2", "2022"): "520",
+          ("0", "2023"): "1050", ("1", "2023"): "500", ("2", "2023"): "550", ("0", "2024"): "-"}
+
+
+@pytest.fixture
+def table(tmp_path) -> Path:
+    rows = [{"period": period, "item_id": "T1", "item_name": "가상 인구", "unit": "명", "dim1_name": "성별",
+             "dim1_code": code, "dim1_label": {"0": "계", "1": "남자", "2": "여자"}[code], "value_raw": raw,
+             "value": None if raw == "-" else float(raw), "value_kind": "dash" if raw == "-" else "ok"}
+            for (code, period), raw in _CELLS.items()]
+    return write_table(tmp_path / "data", "GRADE_TBL", rows, {"survey_name": "가상 인구조사", "organization": "가상 기관",
+                       "table_name": "가상 성별 인구", "period": "년 (2022 ~ 2024)", "url": ""})
+
+
+def _item(path: Path, **kw) -> GoldenItem:
+    from kosis_chat.data.loader import sha256_of
+
+    base = {"id": "q", "kind": "answerable", "type": "compare", "question": "q", "table": str(path),
+            "table_sha256": sha256_of(path), "required_facts": [F1, F2, F3]}
+    return GoldenItem.model_validate(base | kw)
+
+
+def _answer(facts=(F1, F2, F3), text=None, **kw) -> StatAnswer:
+    parts = [FactPart(fact_id=f.id) for f in facts] + ([TextPart(text=text)] if text else [])
+    base = {"outcome": "answered", "result": StatResult(facts=list(facts)), "parts": parts, "source": SOURCE}
+    return StatAnswer.model_validate(base | kw)
+
+
+@pytest.fixture
+def cells(table):
+    return read_cells(table)
+
+
+def test_evaluate_supports_only_arithmetic():
+    assert evaluate("(f2 / f1 - 1) * 100", {"f1": 500, "f2": 550}) == pytest.approx(10.0)
+    with pytest.raises(ValueError):
+        evaluate("__import__('os')", {})
+
+
+def test_correct_answer_passes_even_with_renamed_ids_and_rewritten_formula(table, cells):
+    a = Fact(id="x", value=500, unit="명", period="2023", source_ref=F1.source_ref)
+    b = Fact(id="y", value=550, unit="명", period="2023", source_ref=F2.source_ref)
+    ratio = Fact(id="z", value=1.1, derivation="1 * y / x", round=2)
+    g = grade(_item(table), _answer((a, b, ratio), text="2023년 기준"), cells)
+    assert (g.verdict, g.error_types, g.number_errors) == ("PASS", [], 0)
+
+
+@pytest.mark.parametrize(
+    ("answer_kw", "errors"),
+    [
+        # value differs from both golden and Parquet -> wrong value and an unsupported number
+        ({"facts": (F1.model_copy(update={"value": 501}), F2, F3)}, ["unsupported_claim", "wrong_value"]),
+        # right cells, derived value off by more than half a unit of round
+        ({"facts": (F1, F2, F3.model_copy(update={"value": 1.3}))}, ["unsupported_claim", "wrong_value"]),
+        # same cell, other year (value taken from that year, so the number itself is supported)
+        ({"facts": (Fact(id="f1", value=480, period="2022", source_ref="GRADE_TBL|T1|1|2022"), F2,
+                    F3.model_copy(update={"value": 1.1}))}, ["wrong_period"]),
+        # a number typed into connecting text
+        ({"text": "약 3배"}, ["unsupported_claim"]),
+        ({"outcome": "refused", "facts": (), "refusal": Refusal(reason="no_item", message="m")}, ["false_refusal"]),
+    ],
+)
+def test_injected_errors_fail(table, cells, answer_kw, errors):
+    facts = answer_kw.pop("facts", (F1, F2, F3))
+    g = grade(_item(table), _answer(facts, **answer_kw), cells)
+    assert g.verdict == "FAIL" and g.error_types == errors
+
+
+def test_missing_aux_is_partial(table, cells):
+    aux = Fact(id="a1", value=1050, period="2023", source_ref="GRADE_TBL|T1|0|2023")
+    g = grade(_item(table, aux_facts=[aux]), _answer(), cells)
+    assert (g.verdict, g.error_types) == ("PARTIAL", ["missing_aux"])
+
+
+def test_refusal_reason_and_review_flag(table, cells):
+    item = _item(table, kind="not_answerable", required_facts=[], allowed_reasons=["no_period", "missing_value"])
+    ok = grade(item, _answer((), outcome="refused", refusal=Refusal(reason="missing_value", message="m")), cells)
+    assert ok.verdict == "PASS" and ok.needs_review == ["insufficient_reason"]
+    wrong = grade(item, _answer((), outcome="refused", refusal=Refusal(reason="causal", message="m")), cells)
+    assert wrong.error_types == ["wrong_reason"]
+    assert grade(item, _answer(), cells).error_types == ["missed_refusal"]
+
+
+def test_clarify_and_default(table, cells):
+    clarify = _item(table, kind="clarify", required_facts=[], clarify_options=["a", "b"])
+    assert grade(clarify, _answer(), cells).error_types == ["assumed_condition"]
+    default = _item(table, kind="default_allowed", default_applied={"period": "latest (2023)"})
+    assert grade(default, _answer(), cells).error_types == ["unstated_default"]
+    assert grade(default, _answer(default_applied={"sex": "계"}), cells).error_types == ["disallowed_default"]
+    assert grade(default, _answer(default_applied={"period": "2023"}), cells).verdict == "PASS"
+
+
+def test_report_metrics_and_files(table, tmp_path):
+    items = [_item(table, id="q1"), _item(table, id="q2", kind="not_answerable", required_facts=[], allowed_reasons=["no_period"])]
+    answers = {"q1": _answer(text="3배")}  # q2 unanswered -> run_failure
+    summary = summarize(grade_all(items, answers))
+    assert summary["numeric_accuracy"]["rate"] == 1.0  # facts right; the text number is a number error, not a fact error
+    assert summary["number_errors"] == 1 and summary["run_failures"] == 1
+    assert summary["refusal_rate"]["rate"] == 0.0
+    run_dir = save_report(grade_all(items, answers), {"stage": "t", "started_at": "now", "golden_version": "v",
+                          "golden_sha256": "0" * 64, "questions": 2, "answers": "x"}, tmp_path)
+    assert "수치 정확도" in (run_dir / "report.md").read_text(encoding="utf-8")
+
+
+def test_oracle_passes_and_golden_checks_run(table, tmp_path):
+    item = _item(table)
+    golden = tmp_path / "g.jsonl"
+    golden.write_text(item.model_dump_json() + "\n", encoding="utf-8")
+    _, items, _ = load_items(golden)
+    assert grade_all(items, {"q": oracle_answer(items[0])})[0].verdict == "PASS"
+    bad = json.loads(item.model_dump_json())
+    bad["required_facts"][0]["value"] = 501
+    bad["table_sha256"] = "0" * 64
+    golden.write_text(json.dumps(bad) + "\n", encoding="utf-8")
+    with pytest.raises(GoldenError, match="sha256"):
+        load_items(golden)
+
+
+# --- real golden set + Parquet (gitignored; skipped when absent or not yet on Parquet) ---
+
+def _real():
+    golden = ROOT / "eval" / "golden" / "stat_golden.jsonl"
+    if not golden.exists() or '"table_sha256"' not in golden.read_text(encoding="utf-8").split("\n", 1)[0] \
+            or ".parquet" not in golden.read_text(encoding="utf-8").split("\n", 1)[0]:
+        pytest.skip("golden set on Parquet not present (gitignored; run scripts/golden_to_parquet.py)")
+    return load_items(golden)[1]
+
+
+def test_golden_oracle_answers_all_pass():
+    items = _real()
+    grades = grade_all(items, {i.id: oracle_answer(i) for i in items})
+    assert [g.question_id for g in grades if g.verdict != "PASS"] == []
+    assert sum(g.number_errors for g in grades) == 0
+
+
+def test_golden_injected_errors_are_all_caught():
+    items = _real()
+    caught = total = 0
+    for item in items:
+        oracle = oracle_answer(item)
+        if item.kind in ("answerable", "default_allowed"):
+            first = next(f for f in item.required_facts if f.source_ref and f.value is not None)
+            facts = [f.model_copy(update={"value": f.value + 1}) if f.id == first.id else f for f in oracle.result.facts]
+            bad = oracle.model_copy(update={"result": StatResult(facts=facts)})
+            expect = "wrong_value"
+        elif item.kind == "not_answerable":
+            reason = next(r for r in ("causal", "out_of_scope") if r not in item.allowed_reasons)
+            bad = oracle.model_copy(update={"refusal": Refusal(reason=reason, message="m")})
+            expect = "wrong_reason"
+        else:
+            bad = StatAnswer(outcome="answered", source=oracle.source)
+            expect = "assumed_condition"
+        g = grade(item, bad, read_cells(item.path))
+        total += 1
+        caught += g.verdict == "FAIL" and expect in g.error_types
+    assert caught == total == len(items)
