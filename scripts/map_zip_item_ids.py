@@ -7,11 +7,11 @@ Data In (기본 --data data):
   values/<key>.parquet          고칠 표 (item_name은 그대로 두고 item_id만 바꾼다)
 Data Out:
   values/<key>.parquet          제자리에서 다시 쓴다 (임시 파일에 쓰고 이름을 바꿈)
-  zip_item_map.csv              표·항목명별 결과: mapped / nomatch(메타에 없는 이름) / dup(같은 이름이 여러 코드)
-  build_log.txt                 진행 기록을 이어 붙인다
+  build/zip_item_map.csv        표·항목명별 결과: mapped / nomatch(메타에 없는 이름) / dup(같은 이름이 여러 코드)
+  build/build_log.txt           진행 기록을 이어 붙인다
 nomatch·dup 항목은 이름을 그대로 둔다. 이미 코드로 바뀐 항목(item_id != item_name)은 건드리지 않아 여러 번 돌려도 같다.
 실행: 레포 루트에서
-  python scripts/map_zip_item_ids.py --dry-run   # 파일은 안 바꾸고 zip_item_map.csv와 요약만
+  python scripts/map_zip_item_ids.py --dry-run   # 파일은 안 바꾸고 build/zip_item_map.csv와 요약만
   python scripts/map_zip_item_ids.py
 """
 
@@ -115,7 +115,8 @@ def main(argv=None) -> int:
     data = Path(args.data)
     with (data / "tables.csv").open(encoding="utf-8-sig") as f:
         keys = [r["key"] for r in csv.DictReader(f) if r["source"] == "zip" and r["parquet"]]
-    log_file = (data / "build_log.txt").open("a", encoding="utf-8")
+    (data / "build").mkdir(exist_ok=True)
+    log_file = (data / "build" / "build_log.txt").open("a", encoding="utf-8")
 
     def log(msg: str) -> None:
         line = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] [map_zip_item_ids] {msg}"
@@ -124,7 +125,7 @@ def main(argv=None) -> int:
 
     log(f"data={data} zip tables={len(keys)} dry_run={args.dry_run}")
     started, status, rows_changed, tables_changed = time.time(), Counter(), 0, 0
-    with (data / "zip_item_map.csv").open("w", encoding="utf-8-sig", newline="") as f:
+    with (data / "build" / "zip_item_map.csv").open("w", encoding="utf-8-sig", newline="") as f:
         out = csv.writer(f)
         out.writerow(["key", "item_name", "item_id", "status"])
         for i, key in enumerate(keys, 1):

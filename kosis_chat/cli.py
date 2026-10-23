@@ -16,9 +16,7 @@ QUIT_WORDS = {"q", "quit", "exit", "종료"}
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m kosis_chat.cli", description="Ask questions about one KOSIS table.")
-    parser.add_argument(
-        "--table", required=True, help="data file: .csv or KOSIS .json with <name>.meta.json, or data/values/*.parquet"
-    )
+    parser.add_argument("--table", required=True, help="table file: data/values/<org>_<tbl>.parquet (meta from data/tables.csv)")
     parser.add_argument("--config", default=None, help="config file (default: configs/model.yaml)")
     parser.add_argument("--backend", choices=BACKENDS, default=None, help="override the configured backend")
     parser.add_argument("--model", default=None, help="override the HCX model name, e.g. HCX-007")
@@ -28,6 +26,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-tokens", type=int, default=None, help="override max output tokens (raise it when thinking is on)")
     parser.add_argument("--form", default=None, help="text file with answer-format instructions appended to each question")
     parser.add_argument("--serialization", choices=["long", "wide"], default=None, help="table text style (default: model.yaml)")
+    parser.add_argument(
+        "--scope", choices=["auto", "full"], default="auto", help="table part per question: auto (from the question) or full"
+    )
     parser.add_argument("--question", "-q", action="append", help="ask this question and exit (repeatable)")
     return parser
 
@@ -58,7 +59,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     try:
-        bot = Chatbot(table, settings=settings, form=form)
+        bot = Chatbot(table, settings=settings, form=form, scope_mode=args.scope)
     except ValueError as exc:  # backend misconfigured, e.g. HCX_API_KEY missing
         print(f"설정 오류: {exc}", file=sys.stderr)
         return 2
@@ -81,6 +82,7 @@ def main(argv: list[str] | None = None) -> int:
             if not question:
                 continue
         answer = bot.ask(question)
+        print(f"[범위 {answer.scope.get('cells', 0):,}칸, {answer.scope.get('table_chars', 0):,}자]")
         if answer.ok:
             print(answer.text)
         else:

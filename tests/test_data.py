@@ -1,90 +1,88 @@
-"""Input contract, loader adapters and baseline cleaning."""
+"""Input contract, the Parquet loader and baseline cleaning."""
 
 from __future__ import annotations
 
-import json
+import csv
 from dataclasses import replace
 
 import pytest
 
 from kosis_chat.data import preprocessing, serializer
-from kosis_chat.data.loader import load_table, sha256_of
+from kosis_chat.data.loader import UNKNOWN_UNIT, infer_unit, load_table, sha256_of
 from kosis_chat.data.schema import SchemaError, validate
 
 
-def test_format_a_loads_with_row_units_and_raw_values(fixtures):
-    table = load_table(fixtures / "pop_a.csv")
-    assert table.meta.input_format == "A"
-    assert table.meta.file_sha256 == sha256_of(fixtures / "pop_a.csv")
-    assert table.cells[0].dims == {"성별": "계"}
+def test_parquet_loads_with_catalog_meta_and_raw_values(pop_path):
+    table = load_table(pop_path)
+    assert table.meta.input_format == "parquet"
+    assert table.meta.file_sha256 == sha256_of(pop_path)
+    assert (table.meta.tbl_id, table.meta.tbl_nm, table.meta.survey_nm) == ("FAKE_TBL_001", "가상 성별 인구", "가상 인구조사")
+    assert table.meta.source_url == "https://example.invalid/fake-table-001"
+    assert "년 (2022 ~ 2024)" in table.meta.note
+    assert table.cells[0].dims == {"성별": "계"} and table.cells[0].dim_codes == {"성별": "0"}
     assert table.cells[0].value_raw == "1,000"
     assert table.period_range == ("2022", "2024")
     assert validate(table) == []
 
 
-def test_format_a_without_codes_uses_file_hash_and_row_number(fixtures):
-    table = load_table(fixtures / "pop_a.csv")
-    digest = sha256_of(fixtures / "pop_a.csv")[:12]
-    assert table.cells[0].source_ref == f"sha256:{digest}#row2"
-    assert table.cells[-1].source_ref == f"sha256:{digest}#row11"
+def test_source_ref_and_item_code_come_from_kosis_codes(pop_path, household_path):
+    assert load_table(pop_path).cells[2].source_ref == "FAKE_TBL_001|T1|2|2022"
+    cell = load_table(household_path).cells[1]
+    assert (cell.item_code, cell.source_ref) == ("T1", "FAKE_TBL_002|T1|00|2015")
 
 
-def test_format_a_with_codes_keeps_codes_in_source_ref(fixtures):
-    table = load_table(fixtures / "codes_a.csv")
-    assert table.cells[0].dim_codes == {"성별": "1"}
-    assert table.cells[0].source_ref == "FAKE_TBL_001|가상 인구|성별=1|2023"
+def test_unit_is_inferred_from_item_name(household_path):
+    table = load_table(household_path)
+    assert {(c.unit, c.unit_source) for c in table.cells} == {("가구", "item_name")}
 
 
-def test_format_b_kosis_json_maps_categories_and_codes(fixtures):
-    table = load_table(fixtures / "pop_b.json")
-    assert table.meta.input_format == "B"
-    assert table.meta.tbl_id == "FAKE_TBL_003"  # taken from the response, meta.json had none
-    assert table.cells[1].dims == {"연령": "0~14세"}
-    assert table.cells[1].dim_codes == {"연령": "1"}
-    assert table.cells[1].source_ref == "FAKE_TBL_003|T1|1|2023"
+@pytest.mark.parametrize(
+    ("unit", "item", "dims", "expected"),
+    [
+        ("명", "출생건수 (명)", [], ("명", "given")),
+        (None, "출생건수 (명)", ["경기도"], ("명", "item_name")),
+        ("", "인구동태건수", ["영아사망률(출생아 천명당)"], ("출생아 천명당", "dim_label")),
+        (None, "인구동태건수", ["기대수명(출생시 기대여명) - 남"], ("년", "override")),  # parentheses are not a unit
+        (None, "합계출산율", ["서울특별시"], ("명", "override")),
+        (None, "가상 항목", ["가상(분류)"], (UNKNOWN_UNIT, "unknown")),
+    ],
+)
+def test_infer_unit(unit, item, dims, expected):
+    assert infer_unit(unit, item, dims) == expected
 
 
-def test_missing_meta_field_is_rejected_with_field_name(fixtures):
+def test_other_formats_are_rejected(tmp_path):
+    data = tmp_path / "pop.csv"
+    data.write_text("item,period,value,unit\n", encoding="utf-8")
+    with pytest.raises(SchemaError, match="unsupported input format"):
+        load_table(data)
+
+
+def test_table_without_catalog_is_rejected(pop_path, data_dir):
+    (data_dir / "tables.csv").unlink()
+    with pytest.raises(SchemaError, match="tables.csv"):
+        load_table(pop_path)
+
+
+def test_table_missing_from_catalog_is_rejected(pop_path, data_dir):
+    path = pop_path.with_name("101_OTHER.parquet")
+    path.write_bytes(pop_path.read_bytes())
+    with pytest.raises(SchemaError, match="101_OTHER"):
+        load_table(path)
+
+
+def test_missing_meta_field_is_rejected_with_field_name(pop_path, data_dir):
+    catalog = data_dir / "tables.csv"
+    with catalog.open(encoding="utf-8-sig", newline="") as f:
+        rows = list(csv.DictReader(f))
+    rows[0]["organization"] = ""
+    with catalog.open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
     with pytest.raises(SchemaError) as exc:
-        load_table(fixtures / "missing_meta.csv")
+        load_table(pop_path)
     assert any("org_nm" in str(p) for p in exc.value.problems)
-
-
-def test_missing_meta_file_is_rejected(fixtures, tmp_path):
-    data = tmp_path / "t.csv"
-    data.write_text((fixtures / "pop_a.csv").read_text(encoding="utf-8"), encoding="utf-8")
-    with pytest.raises(SchemaError, match="meta file not found"):
-        load_table(data)
-
-
-def test_wide_format_is_rejected(fixtures):
-    with pytest.raises(SchemaError, match="wide format"):
-        load_table(fixtures / "wide.csv")
-
-
-def test_cp949_file_is_rejected(fixtures, tmp_path):
-    data = tmp_path / "cp.csv"
-    data.write_bytes((fixtures / "pop_a.csv").read_text(encoding="utf-8").encode("cp949"))
-    (tmp_path / "cp.meta.json").write_text((fixtures / "pop_a.meta.json").read_text(encoding="utf-8"), encoding="utf-8")
-    with pytest.raises(SchemaError, match="not UTF-8"):
-        load_table(data)
-
-
-def test_missing_required_column_is_rejected(fixtures, tmp_path):
-    data = tmp_path / "nounit.csv"
-    data.write_text("item,period,value\n가상 인구,2023,1\n", encoding="utf-8")
-    (tmp_path / "nounit.meta.json").write_text((fixtures / "pop_a.meta.json").read_text(encoding="utf-8"), encoding="utf-8")
-    with pytest.raises(SchemaError, match="unit"):
-        load_table(data)
-
-
-def test_meta_conflicting_with_response_is_rejected(fixtures, tmp_path):
-    (tmp_path / "b.json").write_text((fixtures / "pop_b.json").read_text(encoding="utf-8"), encoding="utf-8")
-    meta = json.loads((fixtures / "pop_b.meta.json").read_text(encoding="utf-8"))
-    meta["tbl_id"] = "OTHER"
-    (tmp_path / "b.meta.json").write_text(json.dumps(meta), encoding="utf-8")
-    with pytest.raises(SchemaError, match="tbl_id"):
-        load_table(tmp_path / "b.json")
 
 
 @pytest.mark.parametrize(
@@ -103,8 +101,8 @@ def test_parse_value(raw, value, flag):
     assert preprocessing.parse_value(raw) == (value, flag)
 
 
-def test_clean_keeps_original_fields(fixtures):
-    table = load_table(fixtures / "pop_a.csv")
+def test_clean_keeps_original_fields(pop_path):
+    table = load_table(pop_path)
     cleaned = preprocessing.clean(table)
     for before, after in zip(table.cells, cleaned.cells, strict=True):
         assert after.value_raw == before.value_raw
@@ -114,8 +112,8 @@ def test_clean_keeps_original_fields(fixtures):
         assert replace(after, value=None, value_flag=None) == before
 
 
-def test_markdown_shows_meta_header_and_unit_per_row(fixtures):
-    text = serializer.to_markdown(preprocessing.clean(load_table(fixtures / "pop_a.csv")))
+def test_markdown_shows_meta_header_and_unit_per_row(pop_path):
+    text = serializer.to_markdown(preprocessing.clean(load_table(pop_path)))
     assert "조사명: 가상 인구조사" in text
     assert "| 항목 | 성별 | 시점 | 값 | 단위 |" in text
     assert "| 가상 성비 | 계 | 2023 | 90.9 | % |" in text

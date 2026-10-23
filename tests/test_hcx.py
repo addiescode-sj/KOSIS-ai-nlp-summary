@@ -13,8 +13,8 @@ from kosis_chat.llm.model import HCXClient, build_client
 
 
 @pytest.fixture
-def table(fixtures):
-    return load_table(fixtures / "pop_a.csv")
+def table(pop_path):
+    return load_table(pop_path)
 
 
 @pytest.fixture(autouse=True)

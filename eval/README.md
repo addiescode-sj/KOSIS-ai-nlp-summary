@@ -2,7 +2,7 @@
 
 골든셋 문항을 HCX에 보내 답변을 받고, 사람이 판정한 뒤 점수를 집계하는 순서를 정리한다.
 `--form`으로 답변 형식 지시 파일을 바꿔 가며 프롬프트를 실험할 때도 이 순서를 그대로 쓴다.
-(2026-10-22 기준, 튜닝 모델 HCX-DASH-002)
+(2026-10-23 기준, 튜닝 모델 HCX-DASH-002, 데이터는 Parquet)
 
 ## 1. 준비
 
@@ -10,12 +10,13 @@
 | --- | --- | --- |
 | HCX 키 | `.env`의 `HCX_API_KEY=nv-...` | 커밋 금지 |
 | 모델 설정 | `configs/model.yaml`의 `model` 블록 | 기본 `HCX-DASH-002`, temperature 0, max_tokens 1024 |
-| 골든셋 | `eval/golden/b0-loadable/stat_golden_loadable.jsonl` (22문항) | gitignore, 팀 공유본에서 받는다 |
-| 표 파일 | `data/cache/<표>.json` + 같은 이름의 `.meta.json` | gitignore. 골든셋의 `table` 경로와 sha256이 맞아야 실행된다 |
+| 골든셋 | `eval/golden/stat_golden.jsonl` (40문항) | gitignore, 팀 공유본에서 받는다 |
+| 표 파일 | `data/values/<기관>_<표>.parquet` + `data/tables.csv` | gitignore. 골든셋의 `table` 경로와 sha256이 맞아야 실행된다 |
 | 답변 형식 지시 | 예: `eval/golden/form.txt` | 자주 바뀌므로 인자로 넘긴다 |
 
-- 전체 골든셋(`eval/golden/stat_golden.jsonl`, 40문항) 중 DT_1B8000F·DT_1B8000H 표는 응답에 단위(UNIT_NM)가 없어 B0 로더가 읽지 못한다.
-  그래서 지금은 나머지 4개 표 22문항만 모은 `b0-loadable`을 쓴다.
+- 골든셋은 10/23에 Parquet 기준으로 바꿨다(`scripts/golden_to_parquet.py`, 원본은 `eval/golden/backup/stat_golden.cache-v1.jsonl`).
+  문항마다 `table`(Parquet 경로), `table_sha256`(Parquet 파일 해시), `scope`(oracle 범위)가 있다.
+- 데이터를 다시 빌드하거나 고치면 Parquet 해시가 바뀌어 실행이 멈춘다. 그때는 `python scripts/golden_to_parquet.py --rehash`로 해시만 갱신한다.
 - 실행은 Anaconda Prompt에서 `conda activate kosis` 후 레포 루트에서 한다.
 
 ## 2. 프롬프트가 만들어지는 방식
@@ -26,7 +27,7 @@
 2. **user**:
    ```
    [통계표]
-   <메타 헤더 + 표 전체 Markdown>
+   <메타 헤더 + 이 질문의 범위만 자른 표 Markdown>
 
    [질문]
    <골든셋 question>
@@ -35,6 +36,13 @@
    <form 파일 내용>
    ```
 
+- Parquet 표는 통째로 넣으면 입력 한도를 넘기 때문에(DT_1JC1502는 15.9만 행), 문항마다 일부만 잘라 넣는다. `--scope`로 고른다(`kosis_chat/data/scope.py`).
+  - `oracle`(기본): 골든셋 문항의 `scope`(항목·분류 코드·시점 범위)만. 지역 등 분류는 정답과 **같은 수준 전부**를 넣는다(예: 시도 17개+전국). "검색이 완벽하면 답을 잘 쓰는가"를 보는 상한선.
+    문항별 범위와 글자 수는 `eval/golden/scope_report.md`에서 본다(가장 긴 문항이 약 9천 자).
+  - `auto`: 질문 글만 보고 고른다. 연도("2019~2023년", "이후", "최근 N년"), 분류 이름(서울/서울특별시, 충북 등 줄임말, 여성→여자), 항목 이름을 찾고,
+    분류 이름이 없으면 최상위 수준(전국+시도)만 넣는다. 그래도 3만 자가 넘으면 오래된 시점부터 뺀다. 실제 서비스·RAG와 비교하는 기준.
+  - `full`: 표 전체. 작은 표에서만 쓴다.
+  - 문항마다 실제로 보낸 범위(`scope`: 모드, 범위, 칸 수, 글자 수)가 `results.jsonl`에 남는다.
 - `[통계표]` 직렬화는 `--serialization`(또는 `model.yaml`의 `serialization`)으로 고른다.
   - `long`(기본): 값 하나가 한 행 (`| 항목 | 분류… | 시점 | 값 | 단위 |`)
   - `wide`: (항목, 분류) 한 행에 시점을 열로 펼침. 단위가 하나면 표 위에 한 번만 쓰고, 시점이 20개를 넘으면 20개씩 나눠 쓴다. 글자 수가 약 17~30%로 준다.
@@ -46,7 +54,7 @@
 ## 3. 실행
 
 ```bat
-python -m eval.run_eval --stage <이름> --golden eval/golden/b0-loadable --form eval/golden/form.txt
+python -m eval.run_eval --stage <이름> --golden eval/golden/stat_golden.jsonl --scope oracle --form eval/golden/form.txt
 ```
 
 | 인자 | 뜻 |
@@ -55,6 +63,7 @@ python -m eval.run_eval --stage <이름> --golden eval/golden/b0-loadable --form
 | `--golden` | 골든셋 폴더 또는 .jsonl 파일 |
 | `--interval N` | 문항 사이 N초 대기(기본 1초). HTTP 429(호출 한도)가 남으면 5초, 그래도 남으면 15초 |
 | `--form PATH` | 답변 형식 지시 파일. 빼면 form 없이 실행 |
+| `--scope oracle\|auto\|full` | 문항마다 넣을 표 범위(기본 `oracle`). 2장 참고 |
 | `--serialization long\|wide` | 표 직렬화 방식. 빼면 `model.yaml` 값 |
 | `--model` | 모델 바꾸기. 예: `HCX-007` |
 | `--thinking`, `--max-tokens` | HCX-007 thinking 설정. 켜면 max-tokens를 5120 정도로 늘린다 |
@@ -65,7 +74,7 @@ python -m eval.run_eval --stage <이름> --golden eval/golden/b0-loadable --form
 | 파일 | 내용 |
 | --- | --- |
 | `results.jsonl` | 문항별 답변(`raw_answer`), 호출 상태(`call_status`), 오류, 판정 |
-| `manifest.json` | 모델·프롬프트 버전·골든셋·데이터 해시, form 경로와 sha256 |
+| `manifest.json` | 모델·프롬프트 버전·직렬화·범위 모드(`scope_mode`)·골든셋·데이터 해시, form 경로와 sha256 |
 | `golden.jsonl` | 이번 실행에 쓴 골든셋 사본 |
 | `form.txt` | `--form`을 줬을 때 그 시점의 form 파일 사본 |
 
@@ -74,9 +83,9 @@ python -m eval.run_eval --stage <이름> --golden eval/golden/b0-loadable --form
 실행하면 단계마다 터미널에 한 줄씩 찍히고, 같은 내용이 `logs/<시각>-<stage>.log`에 저장된다(gitignore). `--log-dir`로 폴더를 바꿀 수 있다.
 
 ```
-10:42:35 INFO    [load 1/6] 101_DT_1JC1502_c35fdfd8da.json: 1,806 cells, 19,634 chars | hash 0.01s, load 0.05s, prepare 0.03s
-10:42:35 INFO    data load done: 6 tables in 0.40s
-10:42:47 INFO    [call 1/40] S-VAL-03 ok 11.20s (attempts 1, in 47,634 chars, tokens 31000/45)
+10:42:35 INFO    [load 3/5] 101_DT_1JC1502.parquet: 158,985 cells | hash 0.01s, load 2.10s, prepare 0.80s
+10:42:36 INFO    data load done: 5 tables in 3.40s
+10:42:41 INFO    [call 1/40] S-VAL-03 ok 4.20s (attempts 1, scope 19 cells / 858 chars, tokens 900/45)
 10:52:11 INFO    done: total 590.0s = data load 0.4s + API calls 540.0s + interval wait 39.0s (+ other)
 ```
 
@@ -94,7 +103,7 @@ python -c "import json;[print(r['question_id'],r['call_status'],(r['call_error']
 | 오류 | 원인과 대응 |
 | --- | --- |
 | `HTTP 429` (42901) | 호출 한도. 자동 재시도(5/15/30/60초) 후에도 실패한 것 → `--interval`을 늘린다 |
-| `input_too_long` (40003 Context length exceeded) | 표가 모델 입력 한도보다 크다. DT_1JC1502(1,814행)는 DASH에서 항상 이렇게 된다 → 프롬프트로는 해결 안 됨, 표를 줄이는 전처리가 필요 |
+| `input_too_long` (40003 Context length exceeded) | 표가 모델 입력 한도보다 크다. `--scope full`로 큰 표(DT_1JC1502 등)를 넣으면 이렇게 된다 → `oracle`이나 `auto`로 실행 |
 | `HTTP 401` | 키가 틀림 |
 | `HTTP 404` | 키에 열려 있지 않은 모델 이름 |
 
@@ -138,6 +147,6 @@ python -m eval.scorer --run eval\results\<실행 폴더>
 ## 6. 프롬프트 실험을 비교할 때
 
 - 한 번에 하나만 바꾼다(form 파일, 시스템 프롬프트 버전, 모델 중 하나).
-- 같은 골든셋, 같은 표, 같은 `--interval`로 실행한다.
+- 같은 골든셋, 같은 표, 같은 `--scope`, 같은 `--interval`로 실행한다.
 - 비교 기준: form 없이 DASH로 돌린 실행(`--stage B0-dash`).
 - `--stage` 이름에 무엇을 바꿨는지 드러나게 쓴다. form 내용은 실행 폴더의 `form.txt`와 `manifest.json`의 sha256으로 구분한다.

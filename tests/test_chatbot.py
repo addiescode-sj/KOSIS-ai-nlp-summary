@@ -14,8 +14,8 @@ from kosis_chat.llm.prompts import NUMBER_RULE
 
 
 @pytest.fixture
-def table(fixtures):
-    return load_table(fixtures / "pop_a.csv")
+def table(pop_path):
+    return load_table(pop_path)
 
 
 def test_ask_sends_rules_table_and_question(table, mock_settings):
@@ -53,21 +53,24 @@ def test_hcx_backend_builds_hcx_client(mock_settings, monkeypatch):
     assert isinstance(build_client(settings), HCXClient)
 
 
-def test_cli_answers_questions_with_mock(fixtures, capsys):
-    code = cli.main(["--table", str(fixtures / "pop_a.csv"), "--backend", "mock", "-q", "질문1", "-q", "질문2"])
+def test_cli_answers_questions_with_mock(pop_path, capsys):
+    code = cli.main(["--table", str(pop_path), "--backend", "mock", "-q", "질문1", "-q", "질문2"])
     out = capsys.readouterr().out
     assert code == 0
     assert out.count("[mock]") == 2
+    assert out.count("[범위 ") == 2
 
 
-def test_cli_reports_contract_problems(fixtures, capsys):
-    assert cli.main(["--table", str(fixtures / "wide.csv"), "--backend", "mock", "-q", "x"]) == 2
-    assert "wide format" in capsys.readouterr().err
+def test_cli_reports_contract_problems(tmp_path, capsys):
+    table = tmp_path / "pop.csv"
+    table.write_text("item,period,value,unit\n", encoding="utf-8")
+    assert cli.main(["--table", str(table), "--backend", "mock", "-q", "x"]) == 2
+    assert "unsupported input format" in capsys.readouterr().err
 
 
-def test_cli_form_file_is_sent_with_each_question(fixtures, tmp_path, capsys):
+def test_cli_form_file_is_sent_with_each_question(pop_path, tmp_path, capsys):
     form = tmp_path / "form.txt"
     form.write_text("﻿표 형식으로 답하세요.\n", encoding="utf-8")
-    assert cli.main(["--table", str(fixtures / "pop_a.csv"), "--backend", "mock", "--form", str(form), "-q", "x"]) == 0
-    assert cli.main(["--table", str(fixtures / "pop_a.csv"), "--backend", "mock", "--form", str(tmp_path / "none.txt"), "-q", "x"]) == 2
+    assert cli.main(["--table", str(pop_path), "--backend", "mock", "--form", str(form), "-q", "x"]) == 0
+    assert cli.main(["--table", str(pop_path), "--backend", "mock", "--form", str(tmp_path / "none.txt"), "-q", "x"]) == 2
     assert "--form" in capsys.readouterr().err

@@ -9,21 +9,21 @@ from kosis_chat.data.loader import sha256_of
 from kosis_chat.llm.model import HCXClient
 
 
-def _golden(fixtures, tmp_path):
-    table = fixtures / "pop_a.csv"
+def _golden(table, tmp_path):
     golden = tmp_path / "golden" / "v1"
     golden.mkdir(parents=True)
     items = [
-        {"id": f"q{i}", "kind": "answerable", "question": "q", "table": str(table), "table_sha256": sha256_of(table)}
+        {"id": f"q{i}", "kind": "answerable", "question": "q", "table": str(table), "table_sha256": sha256_of(table),
+         "scope": {}}
         for i in (1, 2)
     ]
     (golden / "g.jsonl").write_text("".join(json.dumps(i) + "\n" for i in items), encoding="utf-8")
     return golden
 
 
-def test_run_writes_step_logs_to_terminal_and_log_dir(fixtures, tmp_path, capsys):
+def test_run_writes_step_logs_to_terminal_and_log_dir(pop_path, tmp_path, capsys):
     out, logs = tmp_path / "results", tmp_path / "logs"
-    argv = ["--stage", "B0", "--golden", str(_golden(fixtures, tmp_path)), "--backend", "mock",
+    argv = ["--stage", "B0", "--golden", str(_golden(pop_path, tmp_path)), "--backend", "mock",
             "--interval", "0", "--out", str(out), "--log-dir", str(logs)]
     assert run_eval.main(argv) == 0
 
@@ -31,7 +31,7 @@ def test_run_writes_step_logs_to_terminal_and_log_dir(fixtures, tmp_path, capsys
     log_files = list(logs.glob("*-B0.log"))
     assert len(log_files) == 1
     text = log_files[0].read_text(encoding="utf-8")
-    for line in ("start: 2 questions", "[load 1/1] pop_a.csv", "data load done", "[call 1/2] q1 ok", "[call 2/2] q2 ok",
+    for line in ("start: 2 questions", "[load 1/1] 101_FAKE_TBL_001.parquet", "data load done", "[call 1/2] q1 ok", "[call 2/2] q2 ok",
                  "done: total", "slowest: q"):
         assert line in text and line in terminal
 
@@ -40,13 +40,13 @@ def test_run_writes_step_logs_to_terminal_and_log_dir(fixtures, tmp_path, capsys
     assert all(r["attempts"] == 1 and r["latency_seconds"] >= 0 for r in rows)
     timing = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))["timing"]
     assert timing["calls"] == 2 and timing["retried_calls"] == 0
-    assert timing["tables"][str(fixtures / "pop_a.csv")]["cells"] > 0
+    assert timing["tables"][str(pop_path)]["cells"] > 0
 
 
-def test_logging_handlers_are_removed_after_run(fixtures, tmp_path):
+def test_logging_handlers_are_removed_after_run(pop_path, tmp_path):
     import logging
 
-    argv = ["--stage", "B0", "--golden", str(_golden(fixtures, tmp_path)), "--backend", "mock",
+    argv = ["--stage", "B0", "--golden", str(_golden(pop_path, tmp_path)), "--backend", "mock",
             "--interval", "0", "--out", str(tmp_path / "r"), "--log-dir", str(tmp_path / "logs")]
     before = list(logging.getLogger("kosis").handlers)
     run_eval.main(argv)

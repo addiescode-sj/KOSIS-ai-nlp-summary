@@ -1,5 +1,0 @@
-[
-  {"TBL_ID": "FAKE_TBL_003", "TBL_NM": "가상 연령별 인구", "ITM_ID": "T1", "ITM_NM": "가상 인구", "C1": "0", "C1_NM": "계", "C1_OBJ_NM": "연령", "PRD_SE": "Y", "PRD_DE": "2023", "DT": "300", "UNIT_NM": "명"},
-  {"TBL_ID": "FAKE_TBL_003", "TBL_NM": "가상 연령별 인구", "ITM_ID": "T1", "ITM_NM": "가상 인구", "C1": "1", "C1_NM": "0~14세", "C1_OBJ_NM": "연령", "PRD_SE": "Y", "PRD_DE": "2023", "DT": "100", "UNIT_NM": "명"},
-  {"TBL_ID": "FAKE_TBL_003", "TBL_NM": "가상 연령별 인구", "ITM_ID": "T1", "ITM_NM": "가상 인구", "C1": "2", "C1_NM": "15세 이상", "C1_OBJ_NM": "연령", "PRD_SE": "Y", "PRD_DE": "2023", "DT": "200", "UNIT_NM": "명"}
-]

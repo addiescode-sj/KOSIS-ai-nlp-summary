@@ -15,7 +15,7 @@ REQUIRED_META_FIELDS = (
     "fetched_at",
 )
 PERIOD_TYPES = ("Y", "M", "Q", "H")
-INPUT_FORMATS = ("A", "B", "C")  # A: CSV, B: KOSIS JSON, C: Parquet (data/values)
+INPUT_FORMATS = ("parquet",)  # data/values/<org>_<tbl>.parquet
 VALUE_FLAGS = ("ok", "missing", "suppressed", "provisional", "unparsed")
 
 
@@ -61,6 +61,7 @@ class Cell:
     unit: str
     source_ref: str
     dim_codes: dict[str, str] = field(default_factory=dict)
+    item_code: str = ""  # KOSIS item id (T1 ...); the item part of source_ref
     # Derived by preprocessing; value_raw is never changed.
     value: float | None = None
     value_flag: str | None = None

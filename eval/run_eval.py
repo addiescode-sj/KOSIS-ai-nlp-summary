@@ -17,6 +17,7 @@ from eval.scorer import KINDS, SCORING_VERSION, write_jsonl
 from kosis_chat.chatbot import Chatbot
 from kosis_chat.config import PROJECT_ROOT, Settings, load_env, load_settings, resolve_path
 from kosis_chat.data.loader import load_table, sha256_of
+from kosis_chat.data.scope import MODES as SCOPE_MODES
 from kosis_chat.llm.model import BACKENDS, LLMClient, build_client
 
 REQUIRED_ITEM_KEYS = ("id", "kind", "question", "table", "table_sha256")
@@ -94,17 +95,25 @@ def run(
     runs: int | None = None,
     interval: float = 0.0,
     form_path: Path | None = None,
+    scope_mode: str = "oracle",
 ) -> Path:
-    """Execute every golden question `runs` times, waiting `interval` seconds between calls; returns the run directory."""
+    """Execute every golden question `runs` times, waiting `interval` seconds between calls; returns the run directory.
+    scope_mode picks the table part each question gets (oracle: the item's `scope`, auto: from the question, full)."""
     version, items, golden_sha = load_golden(golden_path)
+    if scope_mode not in SCOPE_MODES:
+        raise GoldenError(f"unknown scope mode {scope_mode!r}; expected one of {SCOPE_MODES}")
+    if scope_mode == "oracle":
+        no_scope = [i["id"] for i in items if not isinstance(i.get("scope"), dict)]
+        if no_scope:
+            raise GoldenError(f"--scope oracle needs a `scope` in every item; missing: {', '.join(no_scope)}")
     runs = runs or settings.eval_runs
     client = client or build_client(settings)
     form = form_path.read_text(encoding="utf-8-sig") if form_path else None
 
     log.info(
-        "start: %d questions x %d runs, %d tables, model=%s:%s prompt=%s serialization=%s interval=%.1fs",
+        "start: %d questions x %d runs, %d tables, model=%s:%s prompt=%s serialization=%s scope=%s interval=%.1fs",
         len(items), runs, len({i["table"] for i in items}), settings.backend, settings.model_name,
-        settings.prompt_version, settings.serialization, interval,
+        settings.prompt_version, settings.serialization, scope_mode, interval,
     )
     run_started = time.perf_counter()
     bots: dict[str, Chatbot] = {}
@@ -121,20 +130,18 @@ def run(
         t1 = time.perf_counter()
         table = load_table(table_path)
         t2 = time.perf_counter()
-        bots[name] = Chatbot(table, client=client, settings=settings, form=form)  # clean + serialize
+        bots[name] = Chatbot(table, client=client, settings=settings, form=form, scope_mode=scope_mode)  # clean
         t3 = time.perf_counter()
         data_hashes[name] = actual
         load_timing[name] = {
             "cells": len(table.cells),
-            "table_chars": len(bots[name].table_text),
             "hash_s": round(t1 - t0, 3),
             "load_s": round(t2 - t1, 3),
             "prepare_s": round(t3 - t2, 3),
         }
         log.info(
-            "[load %d/%d] %s: %s cells, %s chars | hash %.2fs, load %.2fs, prepare %.2fs",
-            n, len(table_names), Path(name).name, f"{len(table.cells):,}", f"{len(bots[name].table_text):,}",
-            t1 - t0, t2 - t1, t3 - t2,
+            "[load %d/%d] %s: %s cells | hash %.2fs, load %.2fs, prepare %.2fs",
+            n, len(table_names), Path(name).name, f"{len(table.cells):,}", t1 - t0, t2 - t1, t3 - t2,
         )
     load_total = time.perf_counter() - run_started
     log.info("data load done: %d tables in %.2fs", len(table_names), load_total)
@@ -153,13 +160,14 @@ def run(
             if interval and results:
                 time.sleep(interval)  # stay under per-minute rate limits (HCX 429)
                 waited += interval
-            answer = bot.ask(item["question"])
+            answer = bot.ask(item["question"], item.get("scope"))
             failed = answer.status != "ok"
             log.log(
                 logging.WARNING if failed else logging.INFO,
-                "[call %d/%d] %s %s %.2fs (attempts %d, in %s chars, tokens %s/%s)%s",
+                "[call %d/%d] %s %s %.2fs (attempts %d, scope %s cells / %s chars, tokens %s/%s)%s",
                 len(results) + 1, total_calls, item["id"], answer.status, answer.latency_seconds, answer.attempts,
-                f"{len(bot.table_text):,}", answer.usage.get("promptTokens", "-"), answer.usage.get("completionTokens", "-"),
+                f"{answer.scope.get('cells', 0):,}", f"{answer.scope.get('table_chars', 0):,}",
+                answer.usage.get("promptTokens", "-"), answer.usage.get("completionTokens", "-"),
                 f" {answer.error[:120]}" if failed and answer.error else "",
             )
             results.append(
@@ -173,6 +181,7 @@ def run(
                     "latency_seconds": round(answer.latency_seconds, 3),
                     "attempts": answer.attempts,
                     "usage": answer.usage,
+                    "scope": answer.scope,
                     "automatic_checks": automatic_checks(item, answer.text, bot.table.meta),
                     # A failed call is a deterministic FAIL; everything else waits for a human.
                     "review_status": "confirmed" if failed else "pending",
@@ -196,6 +205,7 @@ def run(
         "scoring_version": SCORING_VERSION,
         "prompt_version": settings.prompt_version,
         "serialization": settings.serialization,
+        "scope_mode": scope_mode,
         # form.txt changes often, so its path, hash and a copy (form.txt in the run dir) are kept with the run.
         "form": {"path": str(form_path), "sha256": sha256_of(form_path)} if form_path else None,
         "model": settings.model_params(),
@@ -272,7 +282,7 @@ def close_logging(handlers: list[logging.Handler]) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m eval.run_eval", description="Run the golden set (calls the model).")
     parser.add_argument("--stage", required=True, help="stage name, e.g. B0")
-    parser.add_argument("--golden", default="eval/golden/v1", help="golden version directory or .jsonl file")
+    parser.add_argument("--golden", default="eval/golden/stat_golden.jsonl", help="golden .jsonl file or a directory of them")
     parser.add_argument("--config", default=None)
     parser.add_argument("--backend", choices=BACKENDS, default=None)
     parser.add_argument("--model", default=None, help="override the HCX model name, e.g. HCX-007")
@@ -284,6 +294,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--interval", type=float, default=1.0, help="seconds to wait between model calls (avoids HTTP 429; default 1)")
     parser.add_argument("--form", default=None, help="text file with answer-format instructions appended to each question")
     parser.add_argument("--serialization", choices=["long", "wide"], default=None, help="table text style (default: model.yaml)")
+    parser.add_argument(
+        "--scope", choices=SCOPE_MODES, default="oracle",
+        help="table part per question: oracle (golden `scope`), auto (from the question), full (default: oracle)",
+    )
     parser.add_argument("--out", default="eval/results")
     parser.add_argument("--log-dir", default="logs", help="folder for the run log file (default: logs/)")
     args = parser.parse_args(argv)
@@ -307,6 +321,7 @@ def main(argv: list[str] | None = None) -> int:
             runs=args.runs,
             interval=args.interval,
             form_path=resolve_path(args.form) if args.form else None,
+            scope_mode=args.scope,
         )
     except Exception:
         log.exception("run failed")

@@ -1,7 +1,0 @@
-{
-  "survey_nm": "가상 인구조사",
-  "org_nm": "가상 기관",
-  "period_type": "Y",
-  "source_url": "https://example.invalid/fake-table-003",
-  "fetched_at": "2026-10-20"
-}

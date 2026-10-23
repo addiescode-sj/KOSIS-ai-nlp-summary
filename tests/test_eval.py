@@ -70,15 +70,16 @@ def test_multiple_runs_report_mean_and_spread():
 
 
 @pytest.fixture
-def golden(fixtures, tmp_path):
-    table = fixtures / "pop_a.csv"
+def golden(pop_path, tmp_path):
+    table = pop_path
     items = [
         {"id": "q1", "kind": "answerable", "question": "2023년 여자 인구는?", "table": str(table),
-         "table_sha256": sha256_of(table), "required_facts": [{"value": 550, "unit": "명", "period": "2023", "dims": {"성별": "여자"}}]},
+         "table_sha256": sha256_of(table), "required_facts": [{"value": 550, "unit": "명", "period": "2023", "dims": {"성별": "여자"}}],
+         "scope": {"items": ["T1"], "periods": ["2023", "2023"]}},
         {"id": "q2", "kind": "not_answerable", "question": "2030년 인구는?", "table": str(table),
-         "table_sha256": sha256_of(table), "refusal_reason": "없는 시점"},
+         "table_sha256": sha256_of(table), "refusal_reason": "없는 시점", "scope": {"items": ["T1"]}},
         {"id": "q3", "kind": "clarify", "question": "인구는?", "table": str(table),
-         "table_sha256": sha256_of(table), "clarify_conditions": ["시점"]},
+         "table_sha256": sha256_of(table), "clarify_conditions": ["시점"], "scope": {}},
     ]
     gdir = tmp_path / "golden" / "v1"
     gdir.mkdir(parents=True)
@@ -91,6 +92,21 @@ def test_golden_hash_mismatch_is_refused(golden, mock_settings, tmp_path):
     path.write_text(path.read_text(encoding="utf-8").replace('"table_sha256": "', '"table_sha256": "0'), encoding="utf-8")
     with pytest.raises(run_eval.GoldenError, match="sha256"):
         run_eval.run(golden, "B0", mock_settings, tmp_path / "results", client=MockClient("x"))
+
+
+def test_oracle_scope_is_required_and_recorded(golden, mock_settings, tmp_path):
+    client = MockClient("x")
+    run_dir = run_eval.run(golden, "B0", mock_settings, tmp_path / "results", client=client)
+    results = scorer.read_jsonl(run_dir / "results.jsonl")
+    assert results[0]["scope"]["mode"] == "oracle" and results[0]["scope"]["cells"] == 3  # T1 x 3 sexes in 2023
+    assert "| 가상 성비 |" not in client.calls[0][1] and "| 2022 |" not in client.calls[0][1]
+    assert json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))["scope_mode"] == "oracle"
+
+    path = golden / "pop_a.jsonl"
+    path.write_text(path.read_text(encoding="utf-8").replace(', "scope": {}', ""), encoding="utf-8")
+    with pytest.raises(run_eval.GoldenError, match="missing: q3"):
+        run_eval.run(golden, "B0", mock_settings, tmp_path / "results2", client=MockClient("x"))
+    assert run_eval.run(golden, "B0", mock_settings, tmp_path / "results3", client=MockClient("x"), scope_mode="auto")
 
 
 def test_round_trip_run_review_score(golden, mock_settings, tmp_path):

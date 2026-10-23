@@ -93,7 +93,7 @@ A  통계 수치만으로는 원인을 판단할 수 없습니다. 연도별 출
 - **실전 1 · B0 베이스라인**: 표 데이터 + 질문 → HCX → 답변이 끝까지 도는 가장 단순한 챗봇(`kosis_chat/`)과
   평가 도구(`eval/`)가 동작한다. HCX(CLOVA Studio) 실제 호출을 확인했다.
 - 튜닝 모델은 **HCX-DASH-002** (HCX-007은 10/22부터 보류). 답변 형식 지시는 `--form <파일>`로 질문마다 붙여 실험한다.
-- 알려진 한계: B0는 표 전체를 프롬프트에 넣으므로 큰 표(예: DT_1JC1502, 1,814행)는 DASH 입력 한도를 넘어 `input_too_long`이 된다.
+- 데이터는 `data/values/*.parquet`(2,364표) 하나로 통일했다(10/23). 큰 표는 통째로 넣지 않고 질문마다 범위를 잘라 넣는다(`--scope oracle|auto|full`, [eval/README.md](eval/README.md) 2장).
 - B0 이후 한 번에 하나씩 바꾸며 B1(전처리) → B3(코드 계산) → B4(숫자 검증)로 올리고, 같은 골든셋으로 `eval-history.md`에 한 줄씩 쌓는다.
 - 최신 상태와 막힌 항목은 [docs/current-state.md](docs/current-state.md)를 본다 (새 세션·새 팀원의 시작점).
 
@@ -106,7 +106,7 @@ cp .env.example .env                       # 키는 .env에만 둔다 (커밋 �
 bash scripts/verify.sh                     # 오프라인 검증: pytest(Mock) + 실데이터 커밋 차단 확인
 
 # API 키 없이 흐름만 확인 (Mock)
-python -m kosis_chat.cli --table tests/fixtures/pop_a.csv --backend mock -q "2023년 여자 인구는?"
+python -m kosis_chat.cli --table data/values/101_DT_1B8000H.parquet --backend mock -q "2023년 서울 출생건수는?"
 
 # 실제 모델로 질문 (.env에 HCX_API_KEY 필요, 기본 백엔드: HCX-007 thinking 끔)
 python -m kosis_chat.cli --table <표 파일> -q "질문"
@@ -131,7 +131,7 @@ python -m kosis_chat.cli --table <표 파일> --model HCX-DASH-002 -q "질문"
 모든 단계가 같은 방식으로 잰다. 한 번에 하나만 바꾸고, 같은 골든셋·데이터·모델로 다시 잰다.
 
 ```bash
-python -m eval.run_eval --stage B0                                   # 골든셋 질문 실행, 답변 저장
+python -m eval.run_eval --stage B0 --golden eval/golden/stat_golden.jsonl   # 골든셋 질문 실행, 답변 저장
 python -m eval.review export|apply --run eval/results/<id>           # 사람이 PASS/PARTIAL/FAIL 판정
 python -m eval.scorer --run eval/results/<id> --append-history       # 집계 → docs/reports/eval-history.md
 ```
@@ -144,7 +144,7 @@ python -m eval.scorer --run eval/results/<id> --append-history       # 집계 �
 kosis_chat/        서비스 코드: data/(입력·전처리·직렬화), llm/(모델 클라이언트·프롬프트), chatbot.py, cli.py
 eval/              평가: run_eval.py, review.py, scorer.py (golden/, results/ 는 gitignore)
 configs/           model.yaml (백엔드·모델 설정)
-tests/             오프라인 테스트 + 가짜 통계표(fixtures)
+tests/             오프라인 테스트 (가짜 Parquet 표는 conftest.py가 만든다)
 docs/
   current-state.md   현재 상태 인계 문서
   plans/             단계별 PLAN·TASKS (B0 베이스라인, 실전 1 설계·전처리 규칙)

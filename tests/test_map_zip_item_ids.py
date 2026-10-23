@@ -43,7 +43,7 @@ def test_zip_item_names_become_meta_codes(tmp_path):
     assert read_ids(data / "values" / "101_Z.parquet") == ["T0", "T1", "T6", "남자 (명)", "미상"]
     assert pq.read_table(data / "values" / "101_Z.parquet").column("item_name").to_pylist()[1] == "1인 (가구)"
     assert read_ids(data / "values" / "101_A.parquet")[1] == "1인 (가구)"  # api 표는 건드리지 않음
-    with (data / "zip_item_map.csv").open(encoding="utf-8-sig") as f:
+    with (data / "build" / "zip_item_map.csv").open(encoding="utf-8-sig") as f:
         status = {r["item_name"]: r["status"] for r in csv.DictReader(f)}
     assert status == {"일반가구_계 (가구)": "mapped", "1인 (가구)": "mapped", "6인이상 (가구)": "mapped",
                       "남자 (명)": "dup", "미상": "nomatch"}
