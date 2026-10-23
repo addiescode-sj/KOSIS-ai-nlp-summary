@@ -30,7 +30,7 @@ logs/
 data/cache/
 
 # data dir
-data/
+/data/
 
 # 전달받은 전체 데이터(10/22, 보안 서약: 레포 밖)
 data_fix/
