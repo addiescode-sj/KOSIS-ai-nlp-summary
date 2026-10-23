@@ -158,6 +158,7 @@ python -m eval.scorer --run eval\results\<실행 폴더>
 ```bat
 python -m eval.harness --suite stat --answers answers.jsonl --stage T1-12
 python -m eval.harness --suite stat --oracle --stage oracle    # 골든 정답을 스스로 채점: 40/40 PASS여야 한다
+python -m eval.harness --suite stat --golden eval/golden --oracle --stage oracle   # 폴더의 *.jsonl 전부 (엣지 문항 포함 62/62)
 ```
 
 - `answers.jsonl`: 한 줄에 `{"question_id": ..., "answer": <StatAnswer JSON>}`를 쓴다. 답이 없는 문항은 `run_failure`가 된다.
@@ -168,4 +169,17 @@ python -m eval.harness --suite stat --oracle --stage oracle    # 골든 정답�
   - 숫자 오류(`unsupported_claim`)는 세 가지다. Parquet과 다른 셀 값, 다시 계산하면 안 맞는 계산 fact, 연결 문장(TextPart) 속 숫자(fact의 시점은 제외).
   - 거절은 `allowed_reasons` 안의 사유여야 PASS다. 되묻기 문항에 답하면 `assumed_condition`, 기본값을 밝히지 않으면 `unstated_default`가 된다.
   - 거절 문구가 충분한지, 되묻기 선택지가 좋은지는 코드로 판정하지 않는다. 리포트의 "사람 확인 필요"로 센다.
-- 결과는 `eval/reports/<시각>-<stage>/`에 저장된다. 지표(수치 정확도·거절률·숫자 오류 건수·kind/type별 분해)는 `report.md`/`report.json`에, 문항별 근거는 `grades.jsonl`(gitignore, 데이터 값 포함)에 남는다.
+- 결과는 `eval/reports/<시각>-<stage>/`에 저장된다. 지표(수치 정확도·거절률·숫자 오류 건수·kind/type/EDA 함정(`trap=`)별 분해)는 `report.md`/`report.json`에, 문항별 근거는 `grades.jsonl`(gitignore, 데이터 값 포함)에 남는다.
+
+## 8. EDA 엣지 문항 (T1-19)
+
+`docs/eda-full.md`의 함정을 겨냥한 문항 22개는 별도 파일 `eval/golden/stat_golden_edge.jsonl`에 있다(문항 id `S-EDG-*`). `--golden eval/golden`으로 폴더를 넘기면 기존 40문항과 함께 읽힌다.
+
+- 정답 숫자는 손으로 쓰지 않는다. `eval/golden/edge_spec.json`에 질문과 셀 좌표(`Cell.ref()`)·계산식만 적고 스크립트가 값을 채운다.
+  ```bat
+  python scripts/build_golden_edge.py
+  python scripts/golden_to_parquet.py --golden eval/golden/stat_golden_edge.jsonl --report eval/golden/scope_report_edge.md
+  ```
+  두 번째 명령이 oracle 범위(`scope`)를 채운다. 지역 외 차원(연령·성별·국적 등)은 `SCOPE_OVERRIDES`의 `S-EDG-*` 항목으로 좁혔다(안 좁히면 최대 104만 자).
+- 새 셀 값의 웹 대조 행은 `eval/golden/verify_checklist_edge.md`에 미확인(`[ ]`)으로 생긴다.
+- 문항마다 `eda_traps` 태그가 있다. 태그 정의와 기대 동작은 `plans/T1-19.md`의 함정 카탈로그를 본다.
