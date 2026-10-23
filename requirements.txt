@@ -4,5 +4,6 @@ python-dotenv>=1.0
 google-genai>=2.3
 pydantic>=2.0
 pyarrow>=15.0
+pandas>=2.0
 # Tests (offline, Mock only)
 pytest>=8.0
