@@ -1,5 +1,9 @@
 # **연구 계획서 · 국가통계 데이터 기반 AI 챗봇 및 맞춤형 통계 시각화 서비스**
 
+> 갱신 2026-10-25 · 액션 아이템: [docs/action-items-20261025.md](docs/action-items-20261025.md)
+>
+> 이전 버전: [10-23](docs/readme-history/README-2026-10-23.md) · [10-21](docs/readme-history/README-2026-10-21.md)
+
 ---
 
 **프로젝트명: 국가통계 데이터 기반 AI 챗봇 및 맞춤형 통계 시각화 서비스 개발**
@@ -68,14 +72,15 @@
 
 ## 단계와 산출물
 
-| | 실전 1 | 실전 2 | 종합 |
-| --- | --- | --- | --- |
-| 기간 | 10/20 ~ 10/28 | 10/28 ~ 11/4 | 11/4 ~ 12/10 |
-| 답하는 질문 | "이 표에서 숫자가 어때?" | "어느 표를 봐야 해?" | "찾아서, 계산해서, 그려줘" |
-| 만드는 것 | 통계 수치 요약 모듈 | 통계표 안내 챗봇 (RAG) | 툴 호출 에이전트 + 시각화 |
-| 핵심 기술 | 조회·계산·요약, 예외 처리 | 검색·순위·답 없음 판정 | 툴 선택, 멀티턴, 차트 |
-| 핵심 지표 | 수치 정확도, 불가 질문 거절률 | Hit@k, MRR, 답 없음 F1 | 툴·파라미터 정확도, 멀티턴 성공률, 비용·지연 |
-| 다음 단계로 넘기는 것 | 조회·계산·검증 모듈 | `search_tables()` 검색 모듈 | 완성 서비스 |
+|                       | Phase 1                                                    | Phase 2                             | Final                                                                          |
+| --------------------- | ---------------------------------------------------------- | ----------------------------------- | ------------------------------------------------------------------------------ |
+| 기간                  | 10/20 ~ 10/28                                              | 10/28 ~ 11/4                        | 11/4 ~ 12/10                                                                   |
+| 답하는 질문           | "이 표에서 숫자가 어때?"                                   | "어느 표를 봐야 해?"                | "찾아서, 계산해서, 그려줘"                                                     |
+| 만드는 것             | 통계 수치 요약 모듈                                        | 통계표 안내 챗봇 (RAG)              | 툴 호출 에이전트 + 시각화                                                      |
+| 핵심 기술             | 조회·계산·요약, 예외 처리                                  | 검색·순위·답 없음 판정              | 툴 선택, 멀티턴, 차트                                                          |
+| 핵심 지표             | 수치 정확도, 불가 질문 거절률, 질의 이해(슬롯 필드 정확도) | Hit@k, MRR, 답 없음 F1              | 툴·파라미터 정확도, 멀티턴 성공률, 비용·지연                                   |
+| 오케스트레이션        | 고정 파이프라인 (LangChain 미사용)                         | LangChain 도입 (검색기·리랭커 조합) | LangGraph StateGraph 위에서 단일 / Plan-and-Execute / 멀티 구성을 비교 후 결정 |
+| 다음 단계로 넘기는 것 | 조회·계산·검증 모듈                                        | `search_tables()` 검색 모듈         | 완성 서비스                                                                    |
 
 ## 동작 예시
 
@@ -90,11 +95,211 @@ A  통계 수치만으로는 원인을 판단할 수 없습니다. 연도별 출
 
 ## 현재 상태 (2026-10-22)
 
-- **실전 1 · B0 베이스라인**: 표 데이터 + 질문 → HCX → 답변이 끝까지 도는 가장 단순한 챗봇(`kosis_chat/`)과
-  평가 도구(`eval/`)가 동작한다. HCX(CLOVA Studio) 실제 호출을 확인했다.
-- 튜닝 모델은 **HCX-DASH-002** (HCX-007은 10/22부터 보류). 답변 형식 지시는 `--form <파일>`로 질문마다 붙여 실험한다.
-- 데이터는 `data/values/*.parquet`(2,364표) 하나로 통일했다(10/23). 큰 표는 통째로 넣지 않고 질문마다 범위를 잘라 넣는다(`--scope oracle|auto|full`, [eval/README.md](eval/README.md) 2장).
-- B0 이후 한 번에 하나씩 바꾸며 B1(전처리) → B3(코드 계산) → B4(숫자 검증)로 올리고, 같은 골든셋으로 `eval-history.md`에 한 줄씩 쌓는다.
+한 방향으로 돈다. **데이터 특성 → 파이프라인 규칙 → 평가 기준 → 평가 결과 분석 → 다음 개선 대상.** 개선은 한 번에 하나만 바꾸고 같은 골든셋으로 "몇 → 몇"을 남긴다.
+
+### 파이프라인 (LLM 담당과 코드 담당을 나눈다)
+
+핵심 기능의 흐름을 먼저 고정하고, LangChain·멀티에이전트는 필요가 측정으로 확인된 시점에 넣는다.
+
+```
+질문 → [통계표 검색] → 메타데이터 조회 → 조회 조건 검증 → 데이터 조회 → Python 계산 → 요약 문장 → 숫자 검증 → 차트
+        Phase 2          ─────────────────────── Phase 1 (현재 구현) ───────────────────────────────          Final
+```
+
+| 단계                                           | 담당                                                  | 구현 위치                                                      | 출력                                 |
+| ---------------------------------------------- | ----------------------------------------------------- | -------------------------------------------------------------- | ------------------------------------ |
+| 질의 분석 (유형·항목·기간·분류 슬롯)           | **LLM** (structured output)                           | `kosis_chat/judge/question.py`, `kosis_chat/llm/structured.py` | `StatQuery`                          |
+| 답변 가능 판정 (8개 불가 사유, 되묻기, 기본값) | 규칙                                                  | `kosis_chat/judge/answerability.py`                            | 진행 / `Refusal` / 되묻기            |
+| 조회·정규화 (단위, 결측 기호, 계·소계)         | 코드                                                  | `src/kosis_ai/normalize.py`, `kosis_chat/data/`                | tidy DataFrame                       |
+| 계산 (값·증감률·비교·구성비·최대최소)          | pandas                                                | `kosis_chat/compute/`                                          | facts (값·단위·시점·분류·원본 셀·식) |
+| 요약 문장                                      | **LLM** (`{f1}` 자리표시자만 씀, 숫자 직접 작성 금지) | `kosis_chat/llm/compose.py`, `kosis_chat/answer/template.py`   | 문장                                 |
+| 숫자 검증 → 실패 시 1회 재생성 → 템플릿 대체   | 코드                                                  | `kosis_chat/answer/verify.py`                                  | 검증된 `StatAnswer`                  |
+| 차트 (Vega-Lite)                               | 코드 (같은 facts 사용)                                | `kosis_chat/answer/chart.py`                                   | 차트 spec                            |
+
+LLM이 하는 일은 **질문 해석과 문장 연결 두 가지뿐**이다. 숫자는 항상 facts에서 오고, 차트도 요약과 같은 facts를 그린다.
+
+### 데이터 특성 → 파이프라인 규칙
+
+EDA([docs/eda-full.md](docs/eda-full.md), 2,364표 전수)에서 발견한 특성을 규칙과 골든셋 함정 태그로 바꾼다.
+
+| 데이터 특성                         | 파이프라인 반영                            | 골든셋 함정 태그                                |
+| ----------------------------------- | ------------------------------------------ | ----------------------------------------------- |
+| 단위 공란 551표                     | 항목명·메타데이터로 단위 복원 (306표 해결) | `unit_missing`                                  |
+| 결측 기호 `-`, `X`, 행 자체 없음    | 기호 보존 + `missing_value` 거절           | `dash_symbol`, `x_symbol`, `structural_missing` |
+| 계·소계와 말단 행 혼재              | 합산·순위 후보에서 합계성 행 제외          | `item_subtotal`, `same_level_mixed`             |
+| 인구총조사 5년 주기                 | 비어 있는 해를 결측이 아니라 `no_period`로 | `census_5y_gap`                                 |
+| 음수 값(순이동 등)                  | 증감률 분모 부호 처리                      | `negative_value`                                |
+| 추계치·실측치 혼재, 월·분기·연 주기 | 수치 성격·주기를 조건 검증에 포함          | (Phase 2에서 추가)                              |
+
+### 평가 체계
+
+| 평가 영역        | 평가 대상                         | 방식                        | 현재 상태                                                   |
+| ---------------- | --------------------------------- | --------------------------- | ----------------------------------------------------------- |
+| 질의 이해        | 유형·항목·기간·분류를 맞게 뽑았나 | 정답 JSON과 **필드별** 비교 | ❌ 없음 → 골든 `required_facts`에서 슬롯 정답을 파생해 추가 |
+| 데이터 정확성    | 올바른 수치를 조회·계산했나       | 원본 Parquet과 자동 대조    | ✅ `eval/grade.py`                                          |
+| 답변 신뢰성      | 수치·단위·출처·해석이 일치하나    | 규칙 검증 + 사람 판정       | △ 규칙은 있으나 라벨 숫자 오탐                              |
+| 답변 불가 판단   | 거절 사유가 타당한가              | 사유별 정답 라벨 비교       | ✅ `allowed_reasons` 비교 (`wrong_reason`)                  |
+| 자연어 품질      | 이해하기 쉬운 설명인가            | 사람 평가 0~2점             | ❌ 없음 → 리뷰 양식에 한 칸 추가                            |
+| (운영) 비용·지연 | LLM·API 호출 수, 토큰, 응답 시간  | 실행 manifest·이벤트 로그   | △ 토큰·지연·HTTP 시도 수만 있음, **단계별 기록 없음**       |
+
+골든셋: 62문항(기본 40 + 엣지 22, 10개 표). 답변 가능 42 : 불가 17 : 되묻기 3 ≈ **2.5 : 1** (권장 기준 60건 이상·3:1에 근접). 정답은 Parquet 원값과 대조하고 오류 주입으로 채점기가 잡는지 확인한다(oracle 62/62, 주입 오류 검출 62/62). 의도대로 되는 질문만이 아니라 **한계라고 정한 부분도 골든셋 문항으로 넣어** 설계가 맞다는 근거로 쓴다.
+
+### 가설과 실험
+
+| ID  | 가설                                                                                   | 실험                                                   | 단계         |
+| --- | -------------------------------------------------------------------------------------- | ------------------------------------------------------ | ------------ |
+| H1  | 계산·렌더링·검증을 코드로 분리하면 근거 없는 수치가 줄어든다                           | B0 vs C, 같은 62문항                                   | Phase 1      |
+| H2  | 규칙 기반 판정은 불필요한 거절을 늘리지 않고 불가 질문을 잡는다                        | 거절률 + 잘못된 거절 동시 측정                         | Phase 1      |
+| H3  | 기간·주기 검증을 표 선정 전에 하면 "월별 질문에 연간 표" 오류가 준다                   | 검색 골든셋의 주기 조건 문항                           | Phase 2      |
+| H4  | 하이브리드 검색 + 리랭킹이 개념어·유사 표 질의에서 BM25보다 낫다                       | BM25 → 임베딩 → 하이브리드 → 리랭커, 질의 유형별 Hit@k | Phase 2      |
+| H5  | 슬롯 추출은 모델에 따라 차이가 크고, 문장 생성은 차이가 작다                           | 같은 슬롯 골든으로 HCX vs 오픈웨이트 후보              | Phase 2 초반 |
+| H6  | 에이전트 구조(단일 / Plan-and-Execute / 멀티)의 이득은 비용·지연 증가보다 작을 수 있다 | 같은 툴·평가셋으로 3종 비교                            | Final        |
+
+## 기술·모델 선택 원칙
+
+**지금 정하는 것과 나중에 정하는 것을 나눈다.** 에이전트·모델 구조는 Phase 1·2 결과(그리고 데이터 특성)를 본 뒤 구체화한다. 근거 없이 구조부터 고르지 않는다.
+
+| 항목           | 지금 결정                                                | 결정 시점·근거                                                                                                                                                                                  |
+| -------------- | -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 수치 처리      | pandas 결정적 계산 + 검증기 (확정)                       | —                                                                                                                                                                                               |
+| 오케스트레이션 | Phase 1은 고정 파이프라인 (LangChain 미사용)             | Phase 2 RAG부터 **LangChain 도입** (문서 로딩·검색기·리랭커 조합)                                                                                                                               |
+| 에이전트 구조  | LangGraph StateGraph (확정)                              | Final T3-07~10에서 단일 / Plan-and-Execute / 멀티 분할을 같은 평가셋으로 비교 후 ADR                                                                                                            |
+| Tracing        | 자체 이벤트 로그(`eval/recording.py`)를 span 단위로 정리 | **OpenTelemetry + Jaeger로 확정** (Langfuse·LangSmith 미사용). Phase 2에서 검색 단계 계측 포함, Final에서 LangGraph 노드 단위 + 내부 API 호출 span. LLM 토큰·비용은 OpenTelemetry에서 별도 계측 |
+| 생성 모델      | HCX-DASH-002 (공식 평가 대상)                            | 유지                                                                                                                                                                                            |
+| 분류·추출 모델 | HCX                                                      | Phase 2 초반, **Gemma 4 31B** 등 오픈웨이트 후보를 슬롯 추출 필드 정확도·JSON 1회 통과율·지연으로 비교. 로컬 실행이면 데이터 반출 문제가 없으나 실행 환경(GPU)과 사용 가능 여부를 먼저 확인     |
+| 문서 파싱 도구 | 미정                                                     | 통계표 설명·주석 문서를 RAG에 쓸 때 PDF → 목차 트리 추출 라이브러리 검토 (멘토 사례: Gemma 계열이 목차 트리 추출을 잘함)                                                                        |
+
+규칙: 어떤 도구·모델이든 **골든셋 수치로 전→후를 보인 뒤** 채택한다. 도구 도입 자체를 성과로 세지 않는다.
+
+## 기술 스택 및 시스템 아키텍처
+
+팀이 확정한 RAG AI 챗봇 기술 스택(Next.js + FastAPI + LangGraph + ChromaDB + OpenTelemetry)을 이 프로젝트의 기준 스택으로 삼는다. 이 프로젝트는 PDF 문서 RAG가 아니라 **통계표 메타데이터 RAG + 수치 계산 파이프라인**이므로, 각 항목이 어느 단계에서 쓰이는지와 이 프로젝트에서 달라지는 점을 함께 적는다.
+
+### 기술 스택
+
+| 영역                | 기술 스택                                                  | 주요 역할                        | 적용 단계 · 이 프로젝트에서의 비고                                                                                    |
+| ------------------- | ---------------------------------------------------------- | -------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| Frontend            | Next.js (App Router), TypeScript                           | 웹 클라이언트·라우팅             | Final. 차트는 백엔드가 준 Vega-Lite spec을 렌더링                                                                     |
+| UI                  | React + Tailwind CSS + shadcn/ui                           | 채팅 인터페이스·대시보드         | Final                                                                                                                 |
+| Chat Streaming      | Vercel AI SDK                                              | 실시간 응답 스트리밍             | Final                                                                                                                 |
+| Backend             | FastAPI (Python)                                           | REST API·스트리밍 응답           | Final. Phase 1·2 모듈(`summarize_stat`, `search_tables`)을 그대로 import                                              |
+| API Validation      | Pydantic                                                   | 요청·응답 검증                   | **Phase 1부터 사용 중** (`src/kosis_ai/schemas.py`, 단계 간 공용 계약)                                                |
+| AI Workflow         | LangGraph (StateGraph)                                     | 파이프라인 노드 구성·상태 관리   | Final. Phase 1 파이프라인 단계를 노드로 옮김 (아래 매핑)                                                              |
+| LLM Integration     | LangChain                                                  | LLM 호출, Prompt, Retriever 연동 | Phase 2부터                                                                                                           |
+| LLM                 | HCX-DASH-002                                               | 근거 기반 답변 생성              | 공식 평가 대상. LangChain 모델 인터페이스 뒤에 두어 교체 가능하게 하고, 슬롯 추출용 Gemma 4 31B는 Phase 2 초반에 비교 |
+| Embedding           | 임베딩 모델 (T2-05에서 후보 비교 후 선정)                  | 문서·질문 벡터 변환              | Phase 2. 같은 검색 골든셋으로 비교                                                                                    |
+| Vector Database     | ChromaDB                                                   | 임베딩 저장·유사도 검색          | Phase 2. 단위는 통계표 1건 = 문서 1건 (표 ID 보존)                                                                    |
+| RAG Pipeline        | LangChain Text Splitters                                   | Chunking·Overlap                 | Phase 2. 표 설명이 길 때만 분할, 조각은 원래 표 ID에 연결                                                             |
+| Reranking           | Cross-Encoder (선택)                                       | 검색 결과 재평가                 | Phase 2 T2-07. 비용·지연과 함께 측정                                                                                  |
+| Document Processing | PyMuPDF                                                    | PDF 텍스트 추출·전처리           | 조건부. 통계표 설명·주석을 PDF로 받을 때만 (현재 수치 데이터는 Parquet)                                               |
+| Observability       | OpenTelemetry                                              | Trace·Span 계측                  | Phase 1 이벤트 로그를 span 단위로 정리해 두고 Final에서 계측                                                          |
+| Workflow Tracing    | LangGraph Events + OpenTelemetry                           | 노드 실행 과정·지연·오류 추적    | Final                                                                                                                 |
+| Trace Storage / UI  | Jaeger                                                     | 분산 Trace 저장·시각화           | Final. LLM 토큰·비용은 Jaeger가 아니라 OpenTelemetry에서 별도 계측                                                    |
+| Evaluation          | Ragas                                                      | 검색·답변 품질 평가              | Phase 2·Final. LangGraph 실시간 요청과 분리해 비동기 평가 작업으로 실행                                               |
+| Evaluation Dataset  | Golden Set (Q&A + Context)                                 | 평가용 정답·근거                 | Phase 1 `stat_golden.jsonl` 62문항 사용 중, Phase 2 검색 골든셋 100건+                                                |
+| Evaluation Metrics  | Context Precision·Recall, Faithfulness, Answer Correctness | RAG 성능 측정                    | Phase 2·Final 안내 답변. **수치 정확도는 Ragas가 아니라 기존 코드 기반 채점기(원본 Parquet 대조)가 기준**             |
+| Database            | PostgreSQL                                                 | 사용자·대화 기록·평가 결과       | Final (대화 상태·평가 결과). Phase 1·2는 파일(jsonl) 기록                                                             |
+| Document Storage    | S3 호환 Object Storage                                     | 업로드 문서 원본                 | 해당 없음 (문서 업로드 기능 없음, 데이터는 제공 Parquet). 업로드를 추가할 때만 도입                                   |
+| Testing             | Pytest, Vitest + React Testing Library                     | 파이프라인·API·UI 테스트         | Pytest는 Phase 1부터, Vitest는 Final                                                                                  |
+| Deployment          | Docker / Docker Compose                                    | 컨테이너화·로컬 통합 환경        | Final. 키·제공 데이터는 이미지 밖에서 주입                                                                            |
+| CI/CD               | GitHub Actions                                             | 테스트·배포 자동화               | Final. 오프라인 검증(`scripts/verify.sh`)부터 연결                                                                    |
+
+### 시스템 아키텍처 (Final 목표)
+
+```
+┌─────────────────────────────────────────────────────────┐
+│ FRONTEND   Next.js + React + TypeScript                 │
+│            Tailwind CSS + shadcn/ui + Vercel AI SDK     │
+│            Chat UI (답변 · 출처 · Vega-Lite 차트)        │
+└───────────────────────┬─────────────────────────────────┘
+                        │ HTTP / Streaming
+                        ▼
+┌─────────────────────────────────────────────────────────┐
+│ BACKEND    FastAPI + Pydantic                           │
+│                                                         │
+│  ┌── LangGraph (StateGraph, 대화 상태 유지) ──────────┐  │
+│  │ Query Processing (질의 분석 · 슬롯)                │  │
+│  │      ↓                                             │  │
+│  │ Retrieval ───────────────► ChromaDB (표 메타데이터)│  │
+│  │      ↓                                             │  │
+│  │ Reranking → 표·조건 선정 (search_tables)           │  │
+│  │      ↓                                             │  │
+│  │ Answerability (규칙 판정 · 거절 · 되묻기)          │  │
+│  │      ↓                                             │  │
+│  │ Fetch & Normalize ───────► Parquet / KOSIS API     │  │
+│  │      ↓                                             │  │
+│  │ Compute (pandas, 코드가 숫자 계산) → facts         │  │
+│  │      ↓                                             │  │
+│  │ Compose (LLM, 자리표시자 문장) ──► LLM API         │  │
+│  │      ↓                                             │  │
+│  │ Verify (숫자 검증 → 재생성 → 템플릿 대체)          │  │
+│  │      ↓                                             │  │
+│  │ Chart (make_chart, 같은 facts)                     │  │
+│  └────────────────────────────────────────────────────┘  │
+│        │                              │                  │
+│   OpenTelemetry                    Ragas (비동기 평가)    │
+└────────┼──────────────────────────────┼─────────────────┘
+         ▼                              ▼
+   ┌───────────┐                 ┌─────────────┐
+   │ Jaeger    │                 │ PostgreSQL  │
+   │ Trace/Span│                 │ Chat History│
+   │ Latency   │                 │ Eval Results│
+   │ Errors    │                 │ Golden Set  │
+   └───────────┘                 └─────────────┘
+```
+
+Phase 1의 단계 함수가 그대로 LangGraph 노드가 된다. 같은 함수를 Phase 2·Final이 import하므로, 노드 단위 입출력은 지금의 Pydantic 계약을 유지한다.
+
+| Phase 1 구현 (`kosis_chat/`)           | Final LangGraph 노드  | 비고                             |
+| -------------------------------------- | --------------------- | -------------------------------- |
+| `judge/question.py`                    | Query Processing      | LLM structured output            |
+| (Phase 2) 검색기                       | Retrieval · Reranking | `search_tables`                  |
+| `judge/answerability.py`               | Answerability         | 규칙, LLM 호출 없음              |
+| `data/`, `src/kosis_ai/normalize.py`   | Fetch & Normalize     | 코드                             |
+| `compute/`                             | Compute               | pandas, 숫자의 유일한 출처       |
+| `llm/compose.py`, `answer/template.py` | Compose               | LLM은 문장만                     |
+| `answer/verify.py`                     | Verify                | 실패 시 재생성 1회 → 템플릿 대체 |
+| `answer/chart.py`                      | Chart                 | `make_chart`                     |
+
+### 설계 원칙
+
+| 설계 영역          | 확정 방향                                                                                                                   |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------------- |
+| Frontend / Backend | Next.js와 FastAPI를 독립적으로 구성                                                                                         |
+| 워크플로우         | LangGraph StateGraph 기반 노드 설계. 에이전트 분할 방식(단일 / Plan-and-Execute / 멀티)은 같은 평가셋으로 비교 후 결정 (H6) |
+| Vector Search      | ChromaDB                                                                                                                    |
+| Observability      | Langfuse·LangSmith 대신 OpenTelemetry + Jaeger                                                                              |
+| Tracing 단위       | LangGraph 노드 단위 + 내부 API 호출(KOSIS, LLM) span                                                                        |
+| Evaluation         | Golden Set 기반 평가. 수치는 코드 채점, 검색·답변 품질은 Ragas, 사람 판정은 자연어 품질 0~2점                               |
+| 실험·최적화        | Chunk Size, Overlap, Top-K, Reranking 성능 비교 (Phase 2)                                                                   |
+| 데이터 관리        | Vector는 ChromaDB, 관계형 데이터는 PostgreSQL                                                                               |
+| 서비스 연동        | FastAPI → Next.js 스트리밍 응답                                                                                             |
+| 배포               | Docker 기반 컨테이너 배포                                                                                                   |
+
+이 스택은 "무엇을 만들까"의 기준이고 "언제 넣을까"는 위 표의 적용 단계를 따른다. 각 도구는 위 선택 원칙대로 **골든셋 수치로 전→후를 보인 뒤** 채택한다.
+
+## 현재 상태 (2026-10-25)
+
+- **Phase 1 · 계산 파이프라인 C**: 규칙 판정 → pandas 계산 → LLM 문장(자리표시자) → 숫자 검증 → 템플릿 대체 → Vega-Lite 차트까지 동작한다(`kosis_chat/pipeline.py`). B0 베이스라인(표 직렬화 + LLM 직접 답변)도 같은 하네스에서 돈다.
+- 튜닝 모델은 **HCX-DASH-002** (HCX-007은 10/22부터 보류). 데이터는 `data/values/*.parquet`(2,364표) 하나로 통일했고, 큰 표는 질문마다 범위를 잘라 넣는다(`--scope oracle|auto|full`, [eval/README.md](eval/README.md) 2장).
+- 골든셋 62문항(기본 40 + 엣지 22), 자동 채점(`eval/grade.py`)과 결과 뷰어(`view.html`)가 있다.
+
+C 파이프라인 · 기본 40문항 자동 채점 결과 (사람 판정 전):
+
+| 지표                                       | 값                       |
+| ------------------------------------------ | ------------------------ |
+| 수치 정확도 (answerable + default_allowed) | 27/28 (96%)              |
+| 답변 불가 거절 (허용 사유)                 | 10/10, 잘못된 거절 0     |
+| answerable 문항 PASS                       | 14/25                    |
+| 모델 JSON 1회 통과                         | 12/29 (17건 형식 재시도) |
+| 실행 실패                                  | 0                        |
+
+분석과 다음 개선 방향 (세부 일정은 [액션 아이템](docs/action-items-20261025.md)):
+
+- **계산은 거의 맞는데 문항이 떨어진다.** answerable FAIL 11건 중 **10건이 '1인 가구', '65세' 같은 라벨 속 숫자를 검증기가 근거 없는 수치로 오판**한 것이다. 진짜 오류는 `wrong_dims` 1, `assumed_condition` 1, 되묻기 실패 1건뿐이다. → 다음 개선 1순위는 모델이 아니라 **검증기의 라벨 숫자 처리**다.
+- **HCX의 구조화 출력이 불안정하다** (1회 통과 12/29). 형식 재시도는 지연·비용을 늘린다. → 슬롯 추출 모델 비교의 근거가 된다.
+- **실패가 어느 단계에서 났는지를 사람이 추정한다.** 이벤트 로그가 HTTP·LLM 호출 단위라서 판정·계산·검증 단계 기록이 없다. → 단계별 로그가 먼저다.
+- B0와 같은 62문항 비교가 아직 없다. → Phase 1 제출 전에 "B0 → C" 한 줄을 확정한다.
 - 최신 상태와 막힌 항목은 [docs/current-state.md](docs/current-state.md)를 본다 (새 세션·새 팀원의 시작점).
 
 ## 빠르게 실행해 보기
