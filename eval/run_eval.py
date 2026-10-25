@@ -8,19 +8,25 @@ import hashlib
 import json
 import logging
 import re
-import subprocess
 import sys
 import time
 from pathlib import Path
+from dataclasses import replace
 
-from eval.scorer import KINDS, SCORING_VERSION, write_jsonl
-from kosis_chat.chatbot import Chatbot
+from eval.scorer import KINDS, SCORING_VERSION
+from eval.recording import RecordingClient, RunRecorder, source_snapshot
+from eval.audit_report import save_reports
+from kosis_chat.chatbot import JUDGE_MODES, Chatbot
 from kosis_chat.config import PROJECT_ROOT, Settings, load_env, load_settings, resolve_path
+from kosis_chat.contract import org_id_from_table_path, to_stat_answer
 from kosis_chat.data.loader import load_table, sha256_of
 from kosis_chat.data.scope import MODES as SCOPE_MODES
-from kosis_chat.llm.model import BACKENDS, LLMClient, build_client
+from kosis_chat.llm import prompts
+from kosis_chat.llm.model import BACKENDS, STATUS_FORMAT_ERROR, LLMClient, build_client
+from kosis_chat.pipeline import StatPipeline
 
 REQUIRED_ITEM_KEYS = ("id", "kind", "question", "table", "table_sha256")
+PIPELINES = ("chatbot", "stat")  # stat: numbers by code, sentences by the model (kosis_chat/pipeline.py)
 log = logging.getLogger("kosis.eval")
 LOG_FORMAT = "%(asctime)s %(levelname)-7s %(message)s"
 _NUMBER = re.compile(r"\d[\d,]*(?:\.\d+)?")
@@ -78,14 +84,6 @@ def automatic_checks(item: dict, answer_text: str, table_meta) -> dict:
     }
 
 
-def _git_commit() -> str:
-    try:
-        out = subprocess.run(["git", "rev-parse", "HEAD"], cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=10)
-        return out.stdout.strip() or "unknown"
-    except (OSError, subprocess.SubprocessError):
-        return "unknown"
-
-
 def run(
     golden_path: Path,
     stage: str,
@@ -96,33 +94,54 @@ def run(
     interval: float = 0.0,
     form_path: Path | None = None,
     scope_mode: str = "oracle",
+    answer_format: str = "text",
+    judge_mode: str = "off",
+    pipeline: str = "chatbot",
 ) -> Path:
     """Execute every golden question `runs` times, waiting `interval` seconds between calls; returns the run directory.
-    scope_mode picks the table part each question gets (oracle: the item's `scope`, auto: from the question, full)."""
+    scope_mode picks the table part each question gets (oracle: the item's `scope`, auto: from the question, full).
+    judge_mode rules runs the answerability rules (kosis_chat/judge, T1-08) before the model; off leaves the model alone.
+    pipeline stat answers with kosis_chat.pipeline (rules always on, JSON replies); scope_mode then applies only to the
+    questions it hands to the compact-v2 chatbot."""
+    if pipeline not in PIPELINES:
+        raise GoldenError(f"unknown pipeline {pipeline!r}; expected one of {PIPELINES}")
+    if pipeline == "stat":
+        answer_format, judge_mode = "json", "rules"
+    if interval < 0:
+        raise ValueError("interval cannot be negative")
+    selected = settings.prompt_version if answer_format == "text" or settings.prompt_version in prompts.STRUCTURED_PROMPT_VERSIONS else None
+    settings = replace(settings, prompt_version=prompts.resolve_answer_prompt(answer_format, selected))
     version, items, golden_sha = load_golden(golden_path)
+    if judge_mode not in JUDGE_MODES:
+        raise GoldenError(f"unknown judge mode {judge_mode!r}; expected one of {JUDGE_MODES}")
     if scope_mode not in SCOPE_MODES:
         raise GoldenError(f"unknown scope mode {scope_mode!r}; expected one of {SCOPE_MODES}")
     if scope_mode == "oracle":
         no_scope = [i["id"] for i in items if not isinstance(i.get("scope"), dict)]
         if no_scope:
             raise GoldenError(f"--scope oracle needs a `scope` in every item; missing: {', '.join(no_scope)}")
-    runs = runs or settings.eval_runs
+    runs = settings.eval_runs if runs is None else runs
+    if not isinstance(runs, int) or isinstance(runs, bool) or runs < 1:
+        raise GoldenError("runs must be a positive integer")
     client = client or build_client(settings)
     form = form_path.read_text(encoding="utf-8-sig") if form_path else None
 
     log.info(
-        "start: %d questions x %d runs, %d tables, model=%s:%s prompt=%s serialization=%s scope=%s interval=%.1fs",
+        "start: %d questions x %d runs, %d tables, model=%s:%s prompt=%s serialization=%s scope=%s judge=%s interval=%.1fs",
         len(items), runs, len({i["table"] for i in items}), settings.backend, settings.model_name,
-        settings.prompt_version, settings.serialization, scope_mode, interval,
+        settings.prompt_version, settings.serialization, scope_mode, judge_mode, interval,
     )
     run_started = time.perf_counter()
-    bots: dict[str, Chatbot] = {}
+    bots: dict[str, Chatbot | StatPipeline] = {}
     data_hashes: dict[str, str] = {}
     load_timing: dict[str, dict] = {}
     table_names = list(dict.fromkeys(i["table"] for i in items))
     for n, name in enumerate(table_names, start=1):
         table_path = resolve_path(name)
         t0 = time.perf_counter()
+        expected_hashes = {item["table_sha256"] for item in items if item["table"] == name}
+        if len(expected_hashes) != 1:
+            raise GoldenError(f"{name}: conflicting hashes across golden questions")
         actual = sha256_of(table_path) if table_path.exists() else "missing"
         if actual != next(i["table_sha256"] for i in items if i["table"] == name):
             expected = next(i["table_sha256"] for i in items if i["table"] == name)
@@ -130,7 +149,16 @@ def run(
         t1 = time.perf_counter()
         table = load_table(table_path)
         t2 = time.perf_counter()
-        bots[name] = Chatbot(table, client=client, settings=settings, form=form, scope_mode=scope_mode)  # clean
+        if pipeline == "stat":
+            bots[name] = StatPipeline(
+                table, client=client, settings=settings, org_id=org_id_from_table_path(name, table.meta.tbl_id),
+                retry_interval=interval, fallback_scope=scope_mode,
+            )  # clean + judge index
+        else:
+            bots[name] = Chatbot(
+                table, client=client, settings=settings, prompt_version=settings.prompt_version, form=form,
+                scope_mode=scope_mode, answer_format=answer_format, retry_interval=interval, judge_mode=judge_mode,
+            )  # clean (+ judge index)
         t3 = time.perf_counter()
         data_hashes[name] = actual
         load_timing[name] = {
@@ -147,65 +175,29 @@ def run(
     log.info("data load done: %d tables in %.2fs", len(table_names), load_total)
 
     started = dt.datetime.now().astimezone()
-    run_id = f"{started:%Y%m%d-%H%M%S}-{stage}"
+    run_id = f"{started:%Y%m%d-%H%M%S-%f}-{stage}"
     run_dir = out_root / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
-
     results = []
     waited = 0.0
     total_calls = runs * len(items)
-    for run_index in range(runs):
-        for item in items:
-            bot = bots[item["table"]]
-            if interval and results:
-                time.sleep(interval)  # stay under per-minute rate limits (HCX 429)
-                waited += interval
-            answer = bot.ask(item["question"], item.get("scope"))
-            failed = answer.status != "ok"
-            log.log(
-                logging.WARNING if failed else logging.INFO,
-                "[call %d/%d] %s %s %.2fs (attempts %d, scope %s cells / %s chars, tokens %s/%s)%s",
-                len(results) + 1, total_calls, item["id"], answer.status, answer.latency_seconds, answer.attempts,
-                f"{answer.scope.get('cells', 0):,}", f"{answer.scope.get('table_chars', 0):,}",
-                answer.usage.get("promptTokens", "-"), answer.usage.get("completionTokens", "-"),
-                f" {answer.error[:120]}" if failed and answer.error else "",
-            )
-            results.append(
-                {
-                    "question_id": item["id"],
-                    "kind": item["kind"],
-                    "run_index": run_index,
-                    "call_status": answer.status,
-                    "call_error": answer.error,
-                    "raw_answer": answer.text,
-                    "latency_seconds": round(answer.latency_seconds, 3),
-                    "attempts": answer.attempts,
-                    "usage": answer.usage,
-                    "scope": answer.scope,
-                    "automatic_checks": automatic_checks(item, answer.text, bot.table.meta),
-                    # A failed call is a deterministic FAIL; everything else waits for a human.
-                    "review_status": "confirmed" if failed else "pending",
-                    "final_verdict": "FAIL" if failed else None,
-                    "error_types": ["run_failure"] if failed else [],
-                    "review_note": "",
-                    "reviewer": "auto:run_failure" if failed else "",
-                }
-            )
-
     timing = _timing_summary(results, load_timing, load_total, waited, time.perf_counter() - run_started)
-    _log_timing(timing, results)
     manifest = {
         "run_id": run_id,
         "stage": stage,
         "started_at": started.isoformat(timespec="seconds"),
-        "git_commit": _git_commit(),
+        "git_commit": "unknown",  # Local Git commands are prohibited in the OneDrive checkout.
         "golden_version": version,
         "golden_sha256": golden_sha,
         "data_sha256": data_hashes,
         "scoring_version": SCORING_VERSION,
-        "prompt_version": settings.prompt_version,
+        "prompt_version": next(iter(bots.values())).prompt_version if bots else settings.prompt_version,
+        "pipeline": pipeline,
+        "answer_format": answer_format,
+        "interval_seconds": interval,
         "serialization": settings.serialization,
         "scope_mode": scope_mode,
+        "judge_mode": judge_mode,
         # form.txt changes often, so its path, hash and a copy (form.txt in the run dir) are kept with the run.
         "form": {"path": str(form_path), "sha256": sha256_of(form_path)} if form_path else None,
         "model": settings.model_params(),
@@ -215,13 +207,105 @@ def run(
         "pretest": settings.backend == "mock",
         "timing": timing,
     }
-    write_jsonl(run_dir / "results.jsonl", results)
-    if form is not None:
-        (run_dir / "form.txt").write_text(form, encoding="utf-8")
-    (run_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-    (run_dir / "golden.jsonl").write_text(
-        "".join(json.dumps(i, ensure_ascii=False) + "\n" for i in items), encoding="utf-8"
-    )
+    recorder = RunRecorder(run_dir)
+    wrapped = RecordingClient(client, recorder)
+    manifest["transport_trace"] = wrapped.transport_trace
+    manifest["decision_metadata"] = next(iter(bots.values())).decision_metadata if bots else {}
+    for bot in bots.values():
+        bot.client = wrapped
+
+    def finish(state: str, error: BaseException | None = None) -> None:
+        manifest["status"] = state
+        manifest["finished_at"] = dt.datetime.now().astimezone().isoformat(timespec="seconds")
+        manifest["timing"] = _timing_summary(results, load_timing, load_total, waited, time.perf_counter() - run_started)
+        if error is not None:
+            manifest["failure"] = {"type": type(error).__name__, "message": str(error)}
+        current = {path: value["sha256"] for path, value in source_snapshot(PROJECT_ROOT).items()}
+        manifest["source_changed_during_run"] = sorted(path for path in set(current) | set(manifest.get("source_fingerprints", {}))
+                                                       if current.get(path) != manifest.get("source_fingerprints", {}).get(path))
+        recorder.context = {}
+        recorder.event({"type": "run_ended", "status": state, "recorded_rows": recorder.rows})
+        recorder.status(manifest)
+        save_reports(run_dir)
+
+    try:
+        bot = next(iter(bots.values()), None)
+        system = bot.system_prompt if bot else prompts.get_system_prompt(settings.prompt_version)
+        schema = bot.answer_model.model_json_schema() if bot and answer_format == "json" else None
+        recorder.initialize(manifest, items, form, PROJECT_ROOT, system, schema)
+        wrapped.attach()
+        for run_index in range(runs):
+            for item in items:
+                recorder.begin_question(item["id"], run_index)
+                bot = bots[item["table"]]
+                if interval and results and not results[-1]["judge"].get("final"):  # a rule verdict sent no call
+                    time.sleep(interval)  # stay under per-minute rate limits (HCX 429)
+                    waited += interval
+                answer = bot.ask(item["question"], item.get("scope"))
+                try:
+                    stat_answer = to_stat_answer(item["question"], answer, org_id=org_id_from_table_path(item["table"], bot.table.meta.tbl_id))
+                except ValueError as exc:
+                    detail = f"StatAnswer validation: {exc}"
+                    recorder.event({"type": "contract_validation_error", "error": detail})
+                    answer = replace(answer, status=STATUS_FORMAT_ERROR, error=detail, format_errors=[*answer.format_errors, detail])
+                    stat_answer = None
+                failed = answer.status != "ok"
+                log.log(
+                    logging.WARNING if failed else logging.INFO,
+                    "[call %d/%d] %s %s %.2fs (attempts %d, scope %s cells / %s chars, tokens %s/%s)%s",
+                    len(results) + 1, total_calls, item["id"], answer.status, answer.latency_seconds, answer.attempts,
+                    f"{answer.scope.get('cells', 0):,}", f"{answer.scope.get('table_chars', 0):,}",
+                    answer.usage.get("promptTokens", "-"), answer.usage.get("completionTokens", "-"),
+                    f" {answer.error[:120]}" if failed and answer.error else "",
+                )
+                results.append(
+                    {
+                        "question_id": item["id"],
+                        "kind": item["kind"],
+                        "run_index": run_index,
+                        "call_status": answer.status,
+                        "call_error": answer.error,
+                        "raw_answer": answer.text,
+                        "decision_metadata": answer.decision_metadata,
+                        "raw_responses": answer.raw_responses,
+                        "format_errors": answer.format_errors,
+                        "retry_wait_seconds": round(answer.retry_wait_seconds, 3),
+                        # Rule verdict (T1-08): rule, outcome, final (model skipped), reason, default_applied. {} when off.
+                        "judge": answer.judge,
+                        # The same answer in the shared contract (src/kosis_ai/schemas.py); None when the call failed.
+                        "stat_answer": stat_answer.model_dump(mode="json") if stat_answer else None,
+                        # Vega-Lite chart built from the computed facts (--pipeline stat); None otherwise.
+                        "chart": answer.chart,
+                        "latency_seconds": round(answer.latency_seconds, 3),
+                        "attempts": answer.attempts,
+                        "usage": answer.usage,
+                        "scope": answer.scope,
+                        "automatic_checks": automatic_checks(
+                            item, stat_answer.text if answer_format == "json" and stat_answer else ("" if answer_format == "json" else answer.text), bot.table.meta,
+                        ),
+                        "raw_automatic_checks": automatic_checks(item, answer.text, bot.table.meta),
+                        "final_automatic_checks": automatic_checks(item, stat_answer.text if stat_answer else "", bot.table.meta),
+                        # A failed call is a deterministic FAIL; everything else waits for a human.
+                        "review_status": "confirmed" if failed else "pending",
+                        "final_verdict": "FAIL" if failed else None,
+                        "error_types": ["run_failure"] if failed else [],
+                        "review_note": "",
+                        "reviewer": "auto:run_failure" if failed else "",
+                    }
+                )
+                recorder.append_result(results[-1])
+                recorder.status(manifest)
+    
+        finish("completed")
+    except (Exception, KeyboardInterrupt) as exc:
+        try:
+            finish("interrupted" if isinstance(exc, KeyboardInterrupt) else "failed", exc)
+        except Exception:
+            log.exception("could not finalize audit artifacts; preserving the original run exception")
+        raise
+    finally:
+        wrapped.restore()
+    _log_timing(manifest["timing"], results)
     log.info("saved: %s", run_dir)
     return run_dir
 
@@ -234,7 +318,10 @@ def _timing_summary(results: list[dict], load_timing: dict, load_total: float, w
         "data_load_s": round(load_total, 2),
         "api_calls_s": round(calls, 2),
         "interval_wait_s": round(waited, 2),
+        "format_retry_wait_s": round(sum(r.get("retry_wait_seconds", 0.0) for r in results), 2),
         "calls": len(results),
+        "http_attempts": sum(r["attempts"] for r in results),
+        "format_retry_calls": sum(max(0, len(r.get("raw_responses", [])) - 1) for r in results),
         "call_avg_s": round(calls / len(results), 2) if results else None,
         "call_max_s": round(max(latencies), 2) if latencies else None,
         "retried_calls": sum(1 for r in results if r["attempts"] > 1),
@@ -247,8 +334,8 @@ def _log_timing(timing: dict, results: list[dict]) -> None:
     for r in results:
         statuses[r["call_status"]] = statuses.get(r["call_status"], 0) + 1
     log.info(
-        "done: total %.1fs = data load %.1fs + API calls %.1fs + interval wait %.1fs (+ other)",
-        timing["total_s"], timing["data_load_s"], timing["api_calls_s"], timing["interval_wait_s"],
+        "done: total %.1fs = data load %.1fs + call/validation %.1fs + interval wait %.1fs + format retry wait %.1fs (+ other)",
+        timing["total_s"], timing["data_load_s"], timing["api_calls_s"], timing["interval_wait_s"], timing["format_retry_wait_s"],
     )
     log.info(
         "calls: %d, avg %ss, max %ss, retried %d, status %s",
@@ -285,6 +372,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--golden", default="eval/golden/stat_golden.jsonl", help="golden .jsonl file or a directory of them")
     parser.add_argument("--config", default=None)
     parser.add_argument("--backend", choices=BACKENDS, default=None)
+    parser.add_argument("--answer-format", choices=["text", "json"], default="text")
+    parser.add_argument("--prompt-version", choices=sorted(prompts.SYSTEM_PROMPTS), default=None)
     parser.add_argument("--model", default=None, help="override the HCX model name, e.g. HCX-007")
     parser.add_argument(
         "--thinking", choices=["none", "low", "medium", "high"], default=None, help="override thinking effort (HCX-007 only)"
@@ -298,14 +387,30 @@ def main(argv: list[str] | None = None) -> int:
         "--scope", choices=SCOPE_MODES, default="oracle",
         help="table part per question: oracle (golden `scope`), auto (from the question), full (default: oracle)",
     )
+    parser.add_argument(
+        "--judge", choices=JUDGE_MODES, default="off",
+        help="rules: answerability rules before the model (refuse/ask back without a call); off: model only (default)",
+    )
+    parser.add_argument(
+        "--pipeline", choices=PIPELINES, default="chatbot",
+        help="stat: numbers computed by code, the model writes the sentence (forces --answer-format json, --judge rules)",
+    )
     parser.add_argument("--out", default="eval/results")
     parser.add_argument("--log-dir", default="logs", help="folder for the run log file (default: logs/)")
     args = parser.parse_args(argv)
 
+    try:
+        version = (
+            prompts.resolve_answer_prompt(args.answer_format, args.prompt_version)
+            if args.prompt_version else None
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
     load_env()
     settings = load_settings(
         args.config,
         backend=args.backend,
+        prompt_version=version,
         model_name=args.model,
         thinking_level=args.thinking,
         max_tokens=args.max_tokens,
@@ -322,6 +427,9 @@ def main(argv: list[str] | None = None) -> int:
             interval=args.interval,
             form_path=resolve_path(args.form) if args.form else None,
             scope_mode=args.scope,
+            answer_format=args.answer_format,
+            judge_mode=args.judge,
+            pipeline=args.pipeline,
         )
     except Exception:
         log.exception("run failed")

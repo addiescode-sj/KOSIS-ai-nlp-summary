@@ -2,7 +2,22 @@
 
 from __future__ import annotations
 
+import re
+
 from kosis_chat.data.schema import TableInput
+
+# "65975.0000" -> "65975", "12.5000" -> "12.5": ZIP-built tables store numbers with four decimals.
+_TRAILING_ZEROS = re.compile(r"^(-?\d[\d,]*)\.(\d*?)0+$")
+
+
+def display_value(value_raw: str) -> str:
+    """The raw value as shown to the model: trailing decimal zeros dropped, symbols (-, X, *) and p/e marks kept."""
+    text = value_raw.strip()
+    match = _TRAILING_ZEROS.match(text)
+    if not match:
+        return text
+    whole, decimals = match.groups()
+    return f"{whole}.{decimals}" if decimals else whole
 
 
 def _escape(text: str) -> str:
@@ -38,7 +53,7 @@ def serialize(table: TableInput, style: str = "long") -> str:
 
 
 def to_markdown(table: TableInput) -> str:
-    """Values are shown exactly as received (value_raw) so the model quotes the source, not our parsing."""
+    """Values are shown as received (value_raw, minus trailing decimal zeros) so the model quotes the source, not our parsing."""
     dims = table.dim_names
     header = ["항목", *dims, "시점", "값", "단위"]
     lines = [
@@ -48,7 +63,7 @@ def to_markdown(table: TableInput) -> str:
         "| " + " | ".join("---" for _ in header) + " |",
     ]
     for c in table.cells:
-        row = [c.item, *(c.dims.get(d, "") for d in dims), c.period_raw, c.value_raw.strip(), c.unit]
+        row = [c.item, *(c.dims.get(d, "") for d in dims), c.period_raw, display_value(c.value_raw), c.unit]
         lines.append("| " + " | ".join(_escape(v) for v in row) + " |")
     return "\n".join(lines)
 
@@ -61,7 +76,7 @@ def to_wide_markdown(table: TableInput, max_period_columns: int = MAX_PERIOD_COL
     units: dict[tuple[str, ...], list[str]] = {}
     for c in table.cells:
         key = (c.item, *(c.dims.get(d, "") for d in dims))
-        rows.setdefault(key, {})[c.period_raw] = c.value_raw.strip()
+        rows.setdefault(key, {})[c.period_raw] = display_value(c.value_raw)
         if c.unit not in units.setdefault(key, []):
             units[key].append(c.unit)
     all_units = {u for us in units.values() for u in us}

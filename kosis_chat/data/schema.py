@@ -16,7 +16,7 @@ REQUIRED_META_FIELDS = (
 )
 PERIOD_TYPES = ("Y", "M", "Q", "H")
 INPUT_FORMATS = ("parquet",)  # data/values/<org>_<tbl>.parquet
-VALUE_FLAGS = ("ok", "missing", "suppressed", "provisional", "unparsed")
+VALUE_FLAGS = ("ok", "missing", "suppressed", "flagged", "provisional", "unparsed")
 
 
 @dataclass(frozen=True)
@@ -62,6 +62,9 @@ class Cell:
     source_ref: str
     dim_codes: dict[str, str] = field(default_factory=dict)
     item_code: str = ""  # KOSIS item id (T1 ...); the item part of source_ref
+    # What the Parquet build read from value_raw: value_kind (ok, blank, dash, x_secret, asterisk, ...) and the number.
+    value_kind: str | None = None
+    source_value: float | None = None
     # Derived by preprocessing; value_raw is never changed.
     value: float | None = None
     value_flag: str | None = None
