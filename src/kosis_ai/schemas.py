@@ -149,6 +149,12 @@ class StatQuery(BaseModel):
     periods: list[str] = Field(default_factory=list)
     filters: dict[str, str] = Field(default_factory=dict)
     ambiguity: str | None = None  # what is unclear; None when the question is fully specified
+    # Optional, for questions one item and one label per category cannot state (C pipeline, 2026-10-24):
+    items: list[str] = Field(default_factory=list)  # items asked together, e.g. 1인·2인·3인 for "3인 이하 가구"
+    targets: list[dict[str, str]] = Field(default_factory=list)  # compare: the two sides, e.g. [{"행정구역별": "부산광역시"}, ...]
+    reference: int | None = None  # compare: index in targets of the side named as the reference ("전국보다")
+    over: dict[str, list[str]] = Field(default_factory=dict)  # extreme: category ranked over -> its labels
+    pick: Literal["max", "min"] | None = None  # extreme: highest or lowest
 
 
 class Fact(BaseModel):

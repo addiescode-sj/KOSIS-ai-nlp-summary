@@ -68,7 +68,7 @@ def _build_meta(meta: dict, digest: str) -> TableMeta:
 
 # KOSIS period codes in the Parquet prd_se column -> TableMeta.period_type.
 _PRD_SE = {"Y": "Y", "A": "Y", "M": "M", "Q": "Q", "H": "H"}
-_PARQUET_COLUMNS = ["tbl_id", "prd_se", "period", "item_id", "item_name", "unit", "value_raw"] + [
+_PARQUET_COLUMNS = ["tbl_id", "prd_se", "period", "item_id", "item_name", "unit", "value_raw", "value", "value_kind"] + [
     f"dim{i}_{part}" for i in range(1, 9) for part in ("name", "code", "label")
 ]
 
@@ -148,6 +148,8 @@ def _load_parquet(path: Path) -> TableInput:
                 item_code=str(r["item_id"] or ""),
                 period_raw=str(r["period"]).strip(),
                 value_raw=str(r["value_raw"] if r["value_raw"] is not None else ""),
+                value_kind=r["value_kind"],
+                source_value=r["value"],
                 unit=unit,
                 unit_source=unit_source,
                 source_ref=f"{table_meta.tbl_id}|{r['item_id']}|{code_part}|{r['period']}",
