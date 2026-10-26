@@ -1,0 +1,176 @@
+{
+  "stage": "T1-25-oracle-all",
+  "started_at": "2026-10-26T11:50:38+09:00",
+  "golden_version": "golden",
+  "golden_sha256": "504a00eff236512d96d519e84c1fc8cc49f3164762ef259229989d26b4096c26",
+  "questions": 90,
+  "answers": "oracle",
+  "summary": {
+    "scoring_version": "baseline-scoring-v1",
+    "total": 90,
+    "confirmed": 90,
+    "pending": 0,
+    "provisional": false,
+    "by_kind": {
+      "answerable": {
+        "total": 62,
+        "confirmed": 62,
+        "pass": 62,
+        "partial": 0,
+        "fail": 0,
+        "pass_rate": 1.0
+      },
+      "not_answerable": {
+        "total": 20,
+        "confirmed": 20,
+        "pass": 20,
+        "partial": 0,
+        "fail": 0,
+        "pass_rate": 1.0
+      },
+      "clarify": {
+        "total": 3,
+        "confirmed": 3,
+        "pass": 3,
+        "partial": 0,
+        "fail": 0,
+        "pass_rate": 1.0
+      },
+      "default_allowed": {
+        "total": 5,
+        "confirmed": 5,
+        "pass": 5,
+        "partial": 0,
+        "fail": 0,
+        "pass_rate": 1.0
+      }
+    },
+    "unsupported_claims": 0,
+    "run_failures": 0,
+    "error_types": {},
+    "runs": 1,
+    "overall_pass_rate_per_run": {
+      "mean": 1.0,
+      "min": 1.0,
+      "max": 1.0
+    },
+    "numeric_accuracy": {
+      "hits": 67,
+      "total": 67,
+      "rate": 1.0
+    },
+    "refusal_rate": {
+      "hits": 20,
+      "total": 20,
+      "rate": 1.0
+    },
+    "false_refusals": 0,
+    "number_errors": 0,
+    "by_type": {
+      "compare": {
+        "PASS": 18
+      },
+      "extreme": {
+        "PASS": 5
+      },
+      "none": {
+        "PASS": 3
+      },
+      "share": {
+        "PASS": 10
+      },
+      "trend": {
+        "PASS": 26
+      },
+      "value": {
+        "PASS": 28
+      }
+    },
+    "by_trap": {
+      "asterisk_symbol": {
+        "PASS": 3
+      },
+      "census_5y_gap": {
+        "PASS": 3
+      },
+      "dash_symbol": {
+        "PASS": 2
+      },
+      "decimal_restore": {
+        "PASS": 1
+      },
+      "fake_paren_unit": {
+        "PASS": 1
+      },
+      "item_subtotal": {
+        "PASS": 5
+      },
+      "label_reuse": {
+        "PASS": 4
+      },
+      "latest_period": {
+        "PASS": 2
+      },
+      "mixed_units": {
+        "PASS": 3
+      },
+      "negative_value": {
+        "PASS": 4
+      },
+      "no_total_dim": {
+        "PASS": 4
+      },
+      "projection_year": {
+        "PASS": 8
+      },
+      "same_level_mixed": {
+        "PASS": 3
+      },
+      "structural_missing": {
+        "PASS": 2
+      },
+      "sub_annual_period": {
+        "PASS": 4
+      },
+      "unit_missing": {
+        "PASS": 22
+      },
+      "x_symbol": {
+        "PASS": 1
+      }
+    },
+    "by_op": {
+      "AVG": {
+        "PASS": 3
+      },
+      "GAP": {
+        "PASS": 3
+      },
+      "GRW": {
+        "PASS": 3
+      },
+      "MON": {
+        "PASS": 2
+      },
+      "PAVG": {
+        "PASS": 3
+      },
+      "PRD": {
+        "PASS": 3
+      },
+      "REF": {
+        "PASS": 4
+      },
+      "SHR": {
+        "PASS": 3
+      },
+      "SUM": {
+        "PASS": 2
+      },
+      "VSA": {
+        "PASS": 2
+      }
+    },
+    "needs_review": 23
+  }
+}
