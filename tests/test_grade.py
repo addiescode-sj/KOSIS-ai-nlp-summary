@@ -133,6 +133,15 @@ def test_report_breaks_down_by_eda_trap(table, tmp_path):
     assert "| trap=label_reuse | 0 | 0 | 2 |" in (run_dir / "report.md").read_text(encoding="utf-8")
 
 
+def test_report_breaks_down_complex_items_by_id_op(table, tmp_path):
+    items = [_item(table, id="S-CX-AVG-01"), _item(table, id="S-CX-AVG-02"), _item(table, id="S-EDG-01")]
+    summary = summarize(grade_all(items, {"S-CX-AVG-01": oracle_answer(items[0])}))
+    assert summary["by_op"] == {"AVG": {"PASS": 1, "FAIL": 1}}  # S-EDG-01 has no op
+    run_dir = save_report(grade_all(items, {}), {"stage": "t", "started_at": "now", "golden_version": "v",
+                          "golden_sha256": "0" * 64, "questions": 3, "answers": "x"}, tmp_path)
+    assert "| op=AVG | 0 | 0 | 2 |" in (run_dir / "report.md").read_text(encoding="utf-8")
+
+
 def test_oracle_passes_and_golden_checks_run(table, tmp_path):
     item = _item(table)
     golden = tmp_path / "g.jsonl"
