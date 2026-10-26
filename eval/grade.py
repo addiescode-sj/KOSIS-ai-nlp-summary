@@ -14,7 +14,8 @@ from pydantic import BaseModel, Field
 
 from eval.golden import GoldenItem
 from eval.scorer import decide_verdict
-from kosis_ai.schemas import Cell, Fact, StatAnswer, TextPart
+from kosis_chat.judge.question import ITEM_AXIS, is_total, squash
+from kosis_ai.schemas import Cell, Fact, StatAnswer, StatQuery, TextPart
 
 FACT_ERRORS = ("wrong_value", "wrong_unit", "wrong_period", "wrong_dims")
 # Judgements code cannot make; they stay with a human reviewer.
@@ -22,6 +23,10 @@ NEEDS_REVIEW = {"not_answerable": "insufficient_reason", "clarify": "missing_cla
 _NUMBER = re.compile(r"\d[\d,]*(?:\.\d+)?")
 _IDENT = re.compile(r"[A-Za-z_]\w*")
 _OPS = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul, ast.Div: operator.truediv}
+SLOT_FIELDS = ("type", "items", "dims", "periods", "ranked")
+PERIOD_AXIS = "시점"
+_UNIT_PAREN = re.compile(r"\s*\([^()]*\)\s*$")
+_SINGLE_AXES: dict[int, tuple[dict, set[str]]] = {}
 
 
 class Grade(BaseModel):
@@ -35,6 +40,9 @@ class Grade(BaseModel):
     number_errors: int = 0  # numbers in the answer with no support in the data (counted as unsupported_claim)
     needs_review: list[str] = Field(default_factory=list)
     details: list[str] = Field(default_factory=list)
+    # T1-23 slot checks per field (None = not graded for this question); never changes the verdict
+    slots: dict[str, bool | None] = Field(default_factory=dict)
+    slot_recording_limit: bool = False  # the gold needs 2+ labels on an axis StatQuery.filters cannot hold
 
 
 def evaluate(expr: str, values: dict[str, float]) -> float:
@@ -146,6 +154,93 @@ def count_unsupported(answer: StatAnswer, cells: dict[str, Cell], details: list[
     return count
 
 
+def _norm(label: str) -> str:
+    return squash(_UNIT_PAREN.sub("", label))
+
+
+def _single_label_axes(cells: dict[str, Cell]) -> set[str]:
+    """Axes with one label in the whole table (DT_1B8000F's item 'T1'): no slot to extract."""
+    cached = _SINGLE_AXES.get(id(cells))
+    if cached is None or cached[0] is not cells:
+        labels: dict[str, set[str]] = {}
+        for c in cells.values():
+            labels.setdefault(ITEM_AXIS, set()).add(c.item_name)
+            for d in c.dims:
+                labels.setdefault(d.name, set()).add(d.label)
+        cached = (cells, {a for a, ls in labels.items() if len(ls) == 1})
+        _SINGLE_AXES[id(cells)] = cached
+    return cached[1]
+
+
+def _is_item_axis(axis: str) -> bool:
+    return axis == ITEM_AXIS or "항목" in axis  # DT_1B8000F keeps its items in '기본항목별'
+
+
+def _query_empty(q: StatQuery | None) -> bool:
+    return q is None or not (q.type or q.item or q.items or q.periods or q.filters or q.targets or q.over)
+
+
+def slot_checks(item: GoldenItem, answer: StatAnswer, cells: dict[str, Cell]) -> tuple[dict[str, bool | None], bool]:
+    """Compare the parsed question (answer.query) with slots taken from the golden required cells.
+
+    Gold: labels per axis and the first/last period of the required cells. Axes with one label in the table are
+    dropped on both sides; total labels too, except in compare questions where '전국' can be the named reference.
+    In extreme questions the axis whose winning label the question does not name is the ranked axis, checked
+    against query.over (to_query leaves over empty when periods are ranked).
+    """
+    gold_cells = [cells[f.source_ref] for f in item.required_facts if f.source_ref and f.source_ref in cells]
+    if not gold_cells:
+        return {}, False
+    single = _single_label_axes(cells)
+    keep_totals = item.type == "compare"
+    question = squash(item.question)
+
+    def clean(axes: dict[str, set[str]]) -> dict[str, set[str]]:
+        out = {a: {_norm(x) for x in ls if keep_totals or not is_total(x)} for a, ls in axes.items() if a not in single}
+        return {a: ls for a, ls in out.items() if ls}
+
+    gold: dict[str, set[str]] = {}
+    for c in gold_cells:
+        gold.setdefault(ITEM_AXIS, set()).add(c.item_name)
+        for d in c.dims:
+            gold.setdefault(d.name, set()).add(d.label)
+    gold = clean(gold)
+    periods = sorted(c.period for c in gold_cells)
+    ranked = None
+    if item.type == "extreme":
+        # ponytail: label-not-in-question heuristic; aliases in filter labels (제주도) can misplace it
+        ranked = next((a for a, ls in gold.items() if not any(x in question for x in ls)), None)
+        if ranked is None and periods[-1][:4] not in question:
+            ranked = PERIOD_AXIS
+        gold.pop(ranked, None)
+    limit = not keep_totals and any(len(ls) > 1 for a, ls in gold.items() if not _is_item_axis(a))
+
+    q = answer.query
+    graded = ["type", "items", "dims"] + ([] if ranked == PERIOD_AXIS else ["periods"]) + (["ranked"] if item.type == "extreme" else [])
+    checks: dict[str, bool | None] = dict.fromkeys(SLOT_FIELDS)
+    if _query_empty(q):
+        return checks | dict.fromkeys(graded, False), limit
+    pred: dict[str, set[str]] = {}
+    if q.item:
+        pred.setdefault(ITEM_AXIS, set()).add(q.item)
+    pred.setdefault(ITEM_AXIS, set()).update(q.items)
+    for axis, label in q.filters.items():
+        pred.setdefault(axis, set()).add(label)
+    for side in q.targets:
+        for axis, label in side.items():
+            pred.setdefault(axis, set()).add(label)
+    pred = clean(pred)
+    pred.pop(ranked, None)
+    checks["type"] = q.type == item.type
+    checks["items"] = {a: ls for a, ls in gold.items() if _is_item_axis(a)} == {a: ls for a, ls in pred.items() if _is_item_axis(a)}
+    checks["dims"] = {a: ls for a, ls in gold.items() if not _is_item_axis(a)} == {a: ls for a, ls in pred.items() if not _is_item_axis(a)}
+    if "periods" in graded:
+        checks["periods"] = bool(q.periods) and (min(q.periods), max(q.periods)) == (periods[0], periods[-1])
+    if "ranked" in graded:
+        checks["ranked"] = (next(iter(q.over)) if q.over else (PERIOD_AXIS if q.pick else None)) == ranked
+    return checks, limit
+
+
 def grade(item: GoldenItem, answer: StatAnswer, cells: dict[str, Cell]) -> Grade:
     """cells: Parquet cells of the item's table keyed by source_ref (eval.golden.read_cells)."""
     details: list[str] = []
@@ -178,6 +273,7 @@ def grade(item: GoldenItem, answer: StatAnswer, cells: dict[str, Cell]) -> Grade
 
     verdict = decide_verdict(item.kind, errors)
     review = [NEEDS_REVIEW[item.kind]] if item.kind in NEEDS_REVIEW and verdict != "FAIL" else []
+    slots, limit = slot_checks(item, answer, cells) if item.kind in ("answerable", "default_allowed") else ({}, False)
     return Grade(
         question_id=item.id,
         kind=item.kind,
@@ -189,4 +285,6 @@ def grade(item: GoldenItem, answer: StatAnswer, cells: dict[str, Cell]) -> Grade
         number_errors=number_errors,
         needs_review=review,
         details=details,
+        slots=slots,
+        slot_recording_limit=limit,
     )

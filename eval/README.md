@@ -169,6 +169,12 @@ python -m eval.harness --suite stat --golden eval/golden --oracle --stage oracle
   - 숫자 오류(`unsupported_claim`)는 세 가지다. Parquet과 다른 셀 값, 다시 계산하면 안 맞는 계산 fact, 연결 문장(TextPart) 속 숫자(fact의 시점은 제외).
   - 거절은 `allowed_reasons` 안의 사유여야 PASS다. 되묻기 문항에 답하면 `assumed_condition`, 기본값을 밝히지 않으면 `unstated_default`가 된다.
   - 거절 문구가 충분한지, 되묻기 선택지가 좋은지는 코드로 판정하지 않는다. 리포트의 "사람 확인 필요"로 센다.
+- 슬롯 정확도(T1-23, 질의 이해): 답의 `query`(StatQuery)를 골든 정답 셀에서 뽑은 슬롯과 비교한다. 판정(PASS/FAIL)에는 영향이 없는 별도 지표다.
+  - 필드: 질문 유형, 항목, 분류(축별 라벨 집합), 기간(정답 셀 시점의 처음·끝 = 예측 시점의 처음·끝), 순위 축(최대최소만, `query.over`).
+  - 표에서 라벨이 하나뿐인 축은 양쪽에서 뺀다. 합계 라벨(전국·계 등)은 비교 문항이 아닐 때만 뺀다("전국보다"의 전국은 채점).
+  - 대상은 answerable·default_allowed. 실행 실패나 빈 query(예비 챗봇)는 모든 필드 틀림이다.
+  - 한 축에 라벨이 여러 개 필요한데 비교 문항이 아니면 StatQuery가 담지 못한다. 리포트에 "슬롯 기록 한계"로 따로 적는다.
+  - `grade_run`은 경로별(rules / llm_fill / fallback_chatbot) "모두 맞음" 비율도 적는다. oracle 실행은 query가 없어 슬롯 행을 출력하지 않는다.
 - 결과는 `eval/reports/<시각>-<stage>/`에 저장된다. 지표(수치 정확도·거절률·숫자 오류 건수·kind/type/EDA 함정(`trap=`)별 분해)는 `report.md`/`report.json`에, 문항별 근거는 `grades.jsonl`(gitignore, 데이터 값 포함)에 남는다.
 
 ## 8. EDA 엣지 문항 (T1-19)

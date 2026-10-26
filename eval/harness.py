@@ -17,7 +17,7 @@ from collections import Counter
 from pathlib import Path
 
 from eval.golden import GoldenItem, load_items, read_cells, read_source
-from eval.grade import FACT_ERRORS, Grade, grade
+from eval.grade import FACT_ERRORS, SLOT_FIELDS, Grade, grade
 from eval.scorer import aggregate, read_jsonl, write_jsonl
 from kosis_ai.schemas import FactPart, Refusal, StatAnswer, StatResult
 
@@ -63,6 +63,20 @@ def _rate(hits: int, total: int) -> dict:
     return {"hits": hits, "total": total, "rate": hits / total if total else None}
 
 
+def slot_summary(grades: list[Grade]) -> dict:
+    """T1-23 field accuracy over answerable/default_allowed questions; a failed run counts as every field wrong."""
+    rows = []
+    for g in grades:
+        if g.kind not in ("answerable", "default_allowed"):
+            continue
+        slots = g.slots or {f: False for f in ("type", "items", "dims", "periods")} | ({"ranked": False} if g.type == "extreme" else {})
+        rows.append((g, slots))
+    out = {f: _rate(sum(1 for _, s in rows if s.get(f)), sum(1 for _, s in rows if s.get(f) is not None)) for f in SLOT_FIELDS}
+    out["all"] = _rate(sum(1 for _, s in rows if all(v for v in s.values() if v is not None)), len(rows))
+    out["recording_limit"] = [g.question_id for g, _ in rows if g.slot_recording_limit]
+    return out
+
+
 def summarize(grades: list[Grade]) -> dict:
     """T1-04 metrics on top of scorer.aggregate (same verdict table as human review)."""
     rows = [{"kind": g.kind, "review_status": "confirmed", "final_verdict": g.verdict, "error_types": g.error_types,
@@ -91,6 +105,7 @@ def summarize(grades: list[Grade]) -> dict:
         "by_trap": {t: dict(c) for t, c in sorted(by_trap.items())},
         "by_op": {t: dict(c) for t, c in sorted(by_op.items())},
         "needs_review": sum(1 for g in grades if g.needs_review),
+        "slots": slot_summary(grades),
     }
 
 
@@ -113,6 +128,17 @@ def render_markdown(summary: dict, meta: dict) -> str:
         f"| 숫자 오류 건수 | {summary['number_errors']} |",
         f"| 실행 실패 | {summary['run_failures']} |",
         f"| 사람 확인 필요 | {summary['needs_review']} |",
+    ]
+    if meta["answers"] != "oracle":  # oracle answers carry no StatQuery, so slots would read 0%
+        lines += [
+            f"| 슬롯: 질문 유형 | {_pct(summary['slots']['type'])} |",
+            f"| 슬롯: 항목 | {_pct(summary['slots']['items'])} |",
+            f"| 슬롯: 분류 | {_pct(summary['slots']['dims'])} |",
+            f"| 슬롯: 기간 | {_pct(summary['slots']['periods'])} |",
+            f"| 슬롯: 순위 축 (최대최소) | {_pct(summary['slots']['ranked'])} |",
+            f"| 슬롯: 모두 맞음 | {_pct(summary['slots']['all'])} |",
+        ]
+    lines += [
         "",
         "| 분해 | PASS | PARTIAL | FAIL |",
         "| --- | --- | --- | --- |",
@@ -126,6 +152,8 @@ def render_markdown(summary: dict, meta: dict) -> str:
         lines.append(f"| trap={t} | {c.get('PASS', 0)} | {c.get('PARTIAL', 0)} | {c.get('FAIL', 0)} |")
     for t, c in summary["by_op"].items():
         lines.append(f"| op={t} | {c.get('PASS', 0)} | {c.get('PARTIAL', 0)} | {c.get('FAIL', 0)} |")
+    if summary["slots"]["recording_limit"] and meta["answers"] != "oracle":
+        lines += ["", "슬롯 기록 한계(StatQuery.filters가 한 축의 라벨 여러 개를 못 담음): " + ", ".join(summary["slots"]["recording_limit"])]
     if summary["error_types"]:
         lines += ["", "오류 유형: " + ", ".join(f"{k} {v}" for k, v in summary["error_types"].items())]
     return "\n".join(lines) + "\n"

@@ -19,7 +19,7 @@ from pathlib import Path
 
 from eval.golden import load_items, read_cells
 from eval.grade import grade
-from eval.harness import _failed, save_report
+from eval.harness import _failed, save_report, slot_summary
 from eval.regress import grader_sha256
 from eval.scorer import read_jsonl
 
@@ -73,12 +73,18 @@ def main(argv: list[str] | None = None) -> int:
         "answers": str(run), "grader_sha256": grader_sha256(), "pipeline": manifest.get("pipeline", "chatbot"), "prompt_version": manifest.get("prompt_version"),
         "routes": dict(routes), "label_digit_numbers": label_only, "label_digit_only_fails": label_only_fails, "grader_errors": grader_errors,
     }
+    by_route: dict[str, list] = {}
+    for g in grades:
+        route = ((rows.get(g.question_id) or {}).get("decision_metadata") or {}).get("route", "-")
+        by_route.setdefault(route, []).append(g)
+    meta["slots_by_route"] = {r: slot_summary(gs)["all"] for r, gs in sorted(by_route.items())}
     out = save_report(grades, meta, run / "grades")
     extra = [
         "", f"- 파이프라인: {meta['pipeline']} · 프롬프트: {meta['prompt_version']}",
         "- 답한 경로(route/compose): " + ", ".join(f"{k} {v}" for k, v in sorted(routes.items())),
         f"- 숫자 오류 중 라벨 속 숫자('1인' 등)만인 것: {label_only}건",
         f"- 라벨 숫자만 때문에 FAIL인 문항: {len(label_only_fails)}개 {', '.join(label_only_fails)}",
+        "- 슬롯 모두 맞음, 경로별: " + ", ".join(f"{r} {v['hits']}/{v['total']}" for r, v in meta["slots_by_route"].items() if v["total"]),
     ] + ([f"- 채점기 오류(집계 제외): {e}" for e in grader_errors] or [])
     with (out / "report.md").open("a", encoding="utf-8") as f:
         f.write("\n".join(extra) + "\n")
