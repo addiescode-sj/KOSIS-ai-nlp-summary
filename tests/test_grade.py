@@ -11,7 +11,7 @@ import pytest
 from eval.golden import GoldenError, GoldenItem, load_items, read_cells
 from eval.grade import evaluate, grade
 from eval.harness import grade_all, oracle_answer, save_report, summarize
-from kosis_ai.schemas import Fact, FactPart, Refusal, Source, StatAnswer, StatResult, TextPart
+from kosis_ai.schemas import Fact, FactPart, Refusal, Source, StatAnswer, StatQuery, StatResult, TextPart
 from tests.conftest import write_table
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -140,6 +140,60 @@ def test_report_breaks_down_complex_items_by_id_op(table, tmp_path):
     run_dir = save_report(grade_all(items, {}), {"stage": "t", "started_at": "now", "golden_version": "v",
                           "golden_sha256": "0" * 64, "questions": 3, "answers": "x"}, tmp_path)
     assert "| op=AVG | 0 | 0 | 2 |" in (run_dir / "report.md").read_text(encoding="utf-8")
+
+
+# --- T1-23 slots: gold from the required cells, compared with answer.query ---
+
+def _slots(table, cells, item_kw=None, **query):
+    item = _item(table, **(item_kw or {}))
+    q = StatQuery(question="q", **query) if query else None
+    return grade(item, _answer(query=q), cells).slots
+
+
+def test_slots_all_right_for_the_query_the_gold_implies(table, cells):
+    # item axis has one label in the table ('가상 인구') -> not a slot; 성별 남자/여자 are the compare targets
+    slots = _slots(table, cells, type="compare", periods=["2023"], targets=[{"성별": "남자"}, {"성별": "여자"}])
+    assert slots == {"type": True, "items": True, "dims": True, "periods": True, "ranked": None}
+
+
+@pytest.mark.parametrize(("wrong", "field"), [
+    ({"type": "value"}, "type"),
+    ({"periods": ["2022"]}, "periods"),
+    ({"targets": [{"성별": "남자"}, {"성별": "계"}]}, "dims"),
+])
+def test_each_wrong_slot_fails_only_its_field(table, cells, wrong, field):
+    query = {"type": "compare", "periods": ["2023"], "targets": [{"성별": "남자"}, {"성별": "여자"}]} | wrong
+    slots = _slots(table, cells, **query)
+    assert [f for f, ok in slots.items() if ok is False] == [field]
+
+
+def test_empty_query_is_every_field_wrong_and_verdict_unchanged(table, cells):
+    item = _item(table)
+    graded = grade(item, _answer(query=StatQuery(question="q")), cells)
+    assert graded.verdict == "PASS"  # slots never change the verdict
+    assert graded.slots == {"type": False, "items": False, "dims": False, "periods": False, "ranked": None}
+
+
+def test_totals_drop_outside_compare_and_trend_periods_use_ends(table, cells):
+    # value of 남자 2022~2023 trend: the '계' filter the pipeline fills in is not a slot
+    kw = {"type": "trend", "required_facts": [Fact(id="f1", value=480, period="2022", source_ref="GRADE_TBL|T1|1|2022"),
+                                              Fact(id="f2", value=500, period="2023", source_ref="GRADE_TBL|T1|1|2023")]}
+    slots = _slots(table, cells, kw, type="trend", periods=["2022", "2023"], filters={"성별": "남자"})
+    assert slots["dims"] and slots["periods"]
+
+
+def test_extreme_ranked_axis_is_checked_against_over(table, cells):
+    kw = {"type": "extreme", "question": "2023년 가장 많은 성별은?",
+          "required_facts": [Fact(id="f1", value=550, period="2023", source_ref="GRADE_TBL|T1|2|2023")]}
+    assert _slots(table, cells, kw, type="extreme", periods=["2023"], over={"성별": []}, pick="max")["ranked"] is True
+    assert _slots(table, cells, kw, type="extreme", periods=["2023"], pick="max")["ranked"] is False  # read as periods
+
+
+def test_failed_run_counts_as_every_slot_wrong(table):
+    items = [_item(table, id="a"), _item(table, id="b")]
+    summary = summarize(grade_all(items, {"a": _answer(query=StatQuery(question="q", type="compare", periods=["2023"],
+                                                                         targets=[{"성별": "남자"}, {"성별": "여자"}]))}))
+    assert summary["slots"]["all"] == {"hits": 1, "total": 2, "rate": 0.5}
 
 
 def test_oracle_passes_and_golden_checks_run(table, tmp_path):
