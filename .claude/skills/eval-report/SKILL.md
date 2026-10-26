@@ -25,13 +25,16 @@ mock 점검: `--backend mock --interval 0`, `--model` 생략.
 uv run python -m eval.grade_run --run eval/results/<run_id>
 uv run python -m eval.view_run  --run eval/results/<run_id>
 open eval/results/<run_id>/view.html
+uv run python -m eval.regress --run eval/results/<run_id>   # 회귀 게이트: exit 1 = 회귀 있음, 2 = 비교 거부
 ```
+regress는 view_run 뒤에 실행한다. 회귀가 있어도 view.html로 확인할 수 있게 하기 위해서다. 기준선(`eval/baselines/stat.json`)이 없으면 이 단계를 건너뛴다.
 view.html은 Vega를 CDN에서 불러오므로 인터넷이 필요하다.
 
 ## 3. 사용자에게 보고할 것
 - PASS/FAIL 수 (`grades/*/grades.jsonl`의 `verdict`) 와 실행 조건(backend, model, 문항 수).
 - FAIL 사유 분류. 특히 '1인'·'1985년생' 같은 **라벨 속 숫자 오탐**과 **진짜 오류**를 구분한다.
 - PASS인데 틀린 답 (추세 표현, 단위 중복 등)과 `fallback_chatbot` 경로로 샌 문항.
+- 회귀 결과(`regress.md`): Regression 문항 수, 원인 단계, 바뀐 평가 조건.
 - mock 결과면 반드시 "모델 성능이 아님"을 명시한다.
 
 ## 주의

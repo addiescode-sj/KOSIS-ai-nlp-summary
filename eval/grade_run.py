@@ -20,6 +20,7 @@ from pathlib import Path
 from eval.golden import load_items, read_cells
 from eval.grade import grade
 from eval.harness import _failed, save_report
+from eval.regress import grader_sha256
 from eval.scorer import read_jsonl
 
 from kosis_ai.schemas import StatAnswer  # isort: skip
@@ -66,7 +67,7 @@ def main(argv: list[str] | None = None) -> int:
         "stage": f"{manifest.get('stage', 'run')}-graded",
         "started_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
         "golden_version": version, "golden_sha256": golden_sha, "questions": len(items),
-        "answers": str(run), "pipeline": manifest.get("pipeline", "chatbot"), "prompt_version": manifest.get("prompt_version"),
+        "answers": str(run), "grader_sha256": grader_sha256(), "pipeline": manifest.get("pipeline", "chatbot"), "prompt_version": manifest.get("prompt_version"),
         "routes": dict(routes), "label_digit_numbers": label_only, "label_digit_only_fails": label_only_fails, "grader_errors": grader_errors,
     }
     out = save_report(grades, meta, run / "grades")

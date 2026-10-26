@@ -183,3 +183,26 @@ python -m eval.harness --suite stat --golden eval/golden --oracle --stage oracle
   두 번째 명령이 oracle 범위(`scope`)를 채운다. 지역 외 차원(연령·성별·국적 등)은 `SCOPE_OVERRIDES`의 `S-EDG-*` 항목으로 좁혔다(안 좁히면 최대 104만 자).
 - 새 셀 값의 웹 대조 행은 `eval/golden/verify_checklist_edge.md`에 미확인(`[ ]`)으로 생긴다.
 - 문항마다 `eda_traps` 태그가 있다. 태그 정의와 기대 동작은 `plans/T1-19.md`의 함정 카탈로그를 본다.
+
+## 9. 회귀 테스트 게이트 (T1-24)
+
+수정(프롬프트·규칙·검증기·모델)을 할 때마다 같은 골든셋으로 다시 돌리고, 기준선과 **문항별로** 비교한다.
+합계가 올라도 기존에 맞던 문항이 틀리게 바뀌었으면(Regression) 실패로 본다.
+
+```
+run_eval → grade_run → view_run → regress
+```
+
+```bash
+uv run python -m eval.regress --run eval/results/<run_id>            # eval/baselines/stat.json과 비교
+uv run python -m eval.regress --run eval/results/<run_id> --accept   # 이 실행을 기준선으로 고정 (커밋)
+uv run python -m eval.regress --run eval/results/<새> --base eval/results/<이전>   # 로컬 실행 둘을 비교
+```
+
+- 판정 순위는 PASS > PARTIAL > FAIL이다. 순위가 내려가면 Regression, 올라가면 Improvement로 센다.
+- 종료 코드: 0 = 회귀 없음, 1 = 회귀 있음, 2 = 비교 거부. 골든·scoring_version·채점기(`eval/grade.py`, `eval/scorer.py`) 해시 중 하나라도 다르면 비교를 거부한다.
+  채점기가 바뀌면 판정이 달라져도 모델 회귀가 아니기 때문이다. 이때는 기준 실행을 `grade_run`으로 다시 채점한 뒤 `--accept`한다.
+- 모델·temperature·프롬프트·scope·직렬화·데이터 해시가 다르면 리포트 맨 위에 "바뀐 평가 조건"으로 표시한다. 실험에서 바꾼 것이 하나뿐인지 여기서 확인한다.
+- 회귀 문항마다 새로 생긴 오류와 원인 단계(1 판정 / 2 분석 / 3 계산 / 4-5 문장·검증 / 실행), 경로(route/compose) 변화를 적는다. 거절 판단 회귀(false_refusal·missed_refusal)는 리포트 위쪽에 따로 모아 보여 준다.
+- 결과 파일: `<run>/grades/<최신>/regress.md`, `regress.json`
+- `eval/baselines/stat.json`에는 문항별 판정·오류 유형·경로·평가 조건만 들어 있다. 셀 값과 답변 문장은 넣지 않으므로 커밋한다. 기준선은 회귀를 확인한 뒤 의도적으로 올릴 때만 `--accept`한다.
