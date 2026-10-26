@@ -21,12 +21,14 @@ from kosis_chat.config import PROJECT_ROOT, Settings, load_env, load_settings, r
 from kosis_chat.contract import org_id_from_table_path, to_stat_answer
 from kosis_chat.data.loader import load_table, sha256_of
 from kosis_chat.data.scope import MODES as SCOPE_MODES
-from kosis_chat.llm import prompts
+from kosis_chat.llm import prompts, raw_prompt
 from kosis_chat.llm.model import BACKENDS, STATUS_FORMAT_ERROR, LLMClient, build_client
 from kosis_chat.pipeline import StatPipeline
+from kosis_chat.raw import RawRunner
 
 REQUIRED_ITEM_KEYS = ("id", "kind", "question", "table", "table_sha256")
-PIPELINES = ("chatbot", "stat")  # stat: numbers by code, sentences by the model (kosis_chat/pipeline.py)
+PIPELINES = ("chatbot", "stat", "raw")  # stat: numbers by code, sentences by the model (kosis_chat/pipeline.py)
+# raw: table text + question in one call, the reply kept as written (kosis_chat/raw.py), no rules, retries or grading
 log = logging.getLogger("kosis.eval")
 LOG_FORMAT = "%(asctime)s %(levelname)-7s %(message)s"
 _NUMBER = re.compile(r"\d[\d,]*(?:\.\d+)?")
@@ -102,11 +104,17 @@ def run(
     scope_mode picks the table part each question gets (oracle: the item's `scope`, auto: from the question, full).
     judge_mode rules runs the answerability rules (kosis_chat/judge, T1-08) before the model; off leaves the model alone.
     pipeline stat answers with kosis_chat.pipeline (rules always on, JSON replies); scope_mode then applies only to the
-    questions it hands to the compact-v2 chatbot."""
+    questions it hands to the compact-v2 chatbot. pipeline raw sends the scope_mode table part and the question in
+    one call (prompt raw-v2) with no rules, retries, format checks or post-processing; its free-text replies are
+    read with eval.view_raw / eval.compare_runs, not graded."""
     if pipeline not in PIPELINES:
         raise GoldenError(f"unknown pipeline {pipeline!r}; expected one of {PIPELINES}")
     if pipeline == "stat":
         answer_format, judge_mode = "json", "rules"
+    if pipeline == "raw":
+        if form_path is not None:  # raw sends only raw-v2, the table and the question
+            raise GoldenError("--form is not used by --pipeline raw")
+        answer_format, judge_mode = "text", "off"
     if interval < 0:
         raise ValueError("interval cannot be negative")
     selected = settings.prompt_version if answer_format == "text" or settings.prompt_version in prompts.STRUCTURED_PROMPT_VERSIONS else None
@@ -129,10 +137,11 @@ def run(
     log.info(
         "start: %d questions x %d runs, %d tables, model=%s:%s prompt=%s serialization=%s scope=%s judge=%s interval=%.1fs",
         len(items), runs, len({i["table"] for i in items}), settings.backend, settings.model_name,
-        settings.prompt_version, settings.serialization, scope_mode, judge_mode, interval,
+        raw_prompt.VERSION if pipeline == "raw" else settings.prompt_version, settings.serialization, scope_mode,
+        judge_mode, interval,
     )
     run_started = time.perf_counter()
-    bots: dict[str, Chatbot | StatPipeline] = {}
+    bots: dict[str, Chatbot | StatPipeline | RawRunner] = {}
     data_hashes: dict[str, str] = {}
     load_timing: dict[str, dict] = {}
     table_names = list(dict.fromkeys(i["table"] for i in items))
@@ -154,6 +163,10 @@ def run(
                 table, client=client, settings=settings, org_id=org_id_from_table_path(name, table.meta.tbl_id),
                 retry_interval=interval, fallback_scope=scope_mode,
             )  # clean + judge index
+        elif pipeline == "raw":
+            bots[name] = RawRunner(
+                table, client=client, settings=settings, scope_mode=scope_mode,
+            )  # no clean, no judge index
         else:
             bots[name] = Chatbot(
                 table, client=client, settings=settings, prompt_version=settings.prompt_version, form=form,
@@ -231,7 +244,7 @@ def run(
     try:
         bot = next(iter(bots.values()), None)
         system = bot.system_prompt if bot else prompts.get_system_prompt(settings.prompt_version)
-        schema = bot.answer_model.model_json_schema() if bot and answer_format == "json" else None
+        schema = bot.answer_model.model_json_schema() if bot and bot.answer_model and answer_format == "json" else None
         recorder.initialize(manifest, items, form, PROJECT_ROOT, system, schema)
         wrapped.attach()
         for run_index in range(runs):
@@ -242,8 +255,8 @@ def run(
                     time.sleep(interval)  # stay under per-minute rate limits (HCX 429)
                     waited += interval
                 answer = bot.ask(item["question"], item.get("scope"))
-                try:
-                    stat_answer = to_stat_answer(item["question"], answer, org_id=org_id_from_table_path(item["table"], bot.table.meta.tbl_id))
+                try:  # raw replies stay as written (raw_answer), never turned into a StatAnswer
+                    stat_answer = None if pipeline == "raw" else to_stat_answer(item["question"], answer, org_id=org_id_from_table_path(item["table"], bot.table.meta.tbl_id))
                 except ValueError as exc:
                     detail = f"StatAnswer validation: {exc}"
                     recorder.event({"type": "contract_validation_error", "error": detail})
@@ -393,7 +406,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--pipeline", choices=PIPELINES, default="chatbot",
-        help="stat: numbers computed by code, the model writes the sentence (forces --answer-format json, --judge rules)",
+        help="stat: numbers computed by code, the model writes the sentence (forces --answer-format json, --judge rules); "
+        "raw: table + question in one call, the reply kept as written and not graded (forces --answer-format text, --judge off)",
     )
     parser.add_argument("--out", default="eval/results")
     parser.add_argument("--log-dir", default="logs", help="folder for the run log file (default: logs/)")

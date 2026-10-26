@@ -40,6 +40,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     run = Path(args.run)
     manifest = json.loads((run / "manifest.json").read_text(encoding="utf-8"))
+    if manifest.get("pipeline") == "raw":  # free-text replies with no facts: read them with eval.view_raw instead
+        print("raw runs are not graded; use python -m eval.view_raw or python -m eval.compare_runs", file=sys.stderr)
+        return 2
     version, items, golden_sha = load_items(run / "golden.jsonl")
     rows = {r["question_id"]: r for r in read_jsonl(run / "results.jsonl") if r["run_index"] == args.run_index}
     grades, grader_errors, routes, label_only, label_only_fails = [], [], Counter(), 0, []
