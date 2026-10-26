@@ -218,3 +218,20 @@ uv run python -m eval.regress --run eval/results/<새> --base eval/results/<이�
   ```
 - 고도화 전후 측정: `run_eval --golden eval/golden/stat_golden_complex.jsonl` → `grade_run` → 리포트의 `op=` 행 비교. 고도화 전 기준선(mock)은 PASS 1/28이다(`plans/T1-25.md`).
 - 연속 증감·처음 기준을 넘은 해·전년 대비 증감 최대는 넣지 않았다. 지금 채점기로는 정답 연도·횟수를 채점할 수 없기 때문이다.
+
+## 11. raw 모드 (`--pipeline raw`, 모델 단독 출력 보기)
+
+규칙·분석·계산·형식 검사·재요청·출처 정리를 모두 빼고, 프롬프트 `raw-v2` + 표 데이터 + 질문만 모델에 한 번 보낸다(`kosis_chat/raw.py`, `kosis_chat/llm/raw_prompt.py`).
+모델은 자유 문장으로 답하고(답변/거절/되묻기도 모델이 정함), 응답은 고치거나 검사하지 않고 그대로 `raw_answer`에 남는다. **채점하지 않는다.** 사람이 읽고 파이프라인 답과 나란히 본다.
+
+```bash
+python -m eval.run_eval --stage raw-dash --backend hcx --model HCX-DASH-002 --pipeline raw --scope oracle --serialization wide --interval 5
+python -m eval.view_raw --run eval/results/<raw_run>                       # <raw_run>/raw_view.html
+python -m eval.compare_runs --raw_path eval/results/<raw_run> --pipe_path eval/results/<파이프라인 실행>   # <raw_run>/compare_<파이프라인 실행>.html
+```
+
+- 표는 챗봇과 같은 방식으로 자르고(`--scope`) 직렬화한다(`--serialization`). 문항마다 모델에 보낸 표 글자의 해시가 결과 행 `scope.table_text_sha256`에 남는다. 같은 조건으로 모델만 바꿔 돌리면 두 raw 실행의 입력이 같은지 이 해시로 확인할 수 있다.
+- `--answer-format text --judge off`를 자동으로 쓰고, `--prompt-version`은 쓰지 않는다. `--form`은 거부한다.
+- `view_raw`: 문항마다 질문, 모델 답 원문, 시간·토큰, 모델에 보낸 입력(표 + 질문, 접힘)을 보여 준다. 그래프·채점 없음, 인터넷 불필요.
+- `compare_runs`: 먼저 두 실행의 `golden.jsonl` 질문(id와 질문 글)이 같은지 확인하고, 다르면 차이를 출력하고 멈춘다(종료 코드 2). 같으면 문항마다 왼쪽에 AI 답(raw), 오른쪽에 파이프라인 답(`stat_answer.text`, 텍스트 챗봇이면 `raw_answer`)과 결과(answered/refused/clarify), 경로, 사실 목록(접힘)을 놓는다. 중간에 멈춘 실행의 빠진 문항은 "실행 안 됨"으로 표시한다.
+- `grade_run`은 raw 실행을 채점하지 않고 종료 코드 2로 끝난다. `view_run`도 쓸 수 있지만 판정은 모두 `-`이다.
