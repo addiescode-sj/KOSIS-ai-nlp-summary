@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import re
 import sys
 from collections import Counter
 from pathlib import Path
@@ -21,6 +22,8 @@ from eval.scorer import aggregate, read_jsonl, write_jsonl
 from kosis_ai.schemas import FactPart, Refusal, StatAnswer, StatResult
 
 REPORTS_DIR = Path(__file__).resolve().parent / "reports"
+# T1-25 complex items carry their operation in the id: S-CX-AVG-01 -> op=AVG
+_OP = re.compile(r"^S-CX-([A-Z]+)-\d+$")
 
 
 def oracle_answer(item: GoldenItem) -> StatAnswer:
@@ -68,8 +71,11 @@ def summarize(grades: list[Grade]) -> dict:
     refusal = [g for g in grades if g.kind == "not_answerable"]
     by_type: dict[str, Counter] = {}
     by_trap: dict[str, Counter] = {}
+    by_op: dict[str, Counter] = {}
     for g in grades:
         by_type.setdefault(g.type or "none", Counter())[g.verdict] += 1
+        if m := _OP.match(g.question_id):
+            by_op.setdefault(m.group(1), Counter())[g.verdict] += 1
         for trap in g.eda_traps:
             by_trap.setdefault(trap, Counter())[g.verdict] += 1
     return aggregate(rows) | {
@@ -83,6 +89,7 @@ def summarize(grades: list[Grade]) -> dict:
         "number_errors": sum(g.number_errors for g in grades),
         "by_type": {t: dict(c) for t, c in sorted(by_type.items())},
         "by_trap": {t: dict(c) for t, c in sorted(by_trap.items())},
+        "by_op": {t: dict(c) for t, c in sorted(by_op.items())},
         "needs_review": sum(1 for g in grades if g.needs_review),
     }
 
@@ -117,6 +124,8 @@ def render_markdown(summary: dict, meta: dict) -> str:
         lines.append(f"| type={t} | {c.get('PASS', 0)} | {c.get('PARTIAL', 0)} | {c.get('FAIL', 0)} |")
     for t, c in summary["by_trap"].items():
         lines.append(f"| trap={t} | {c.get('PASS', 0)} | {c.get('PARTIAL', 0)} | {c.get('FAIL', 0)} |")
+    for t, c in summary["by_op"].items():
+        lines.append(f"| op={t} | {c.get('PASS', 0)} | {c.get('PARTIAL', 0)} | {c.get('FAIL', 0)} |")
     if summary["error_types"]:
         lines += ["", "오류 유형: " + ", ".join(f"{k} {v}" for k, v in summary["error_types"].items())]
     return "\n".join(lines) + "\n"

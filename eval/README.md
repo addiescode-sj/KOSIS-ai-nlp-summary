@@ -206,3 +206,15 @@ uv run python -m eval.regress --run eval/results/<새> --base eval/results/<이�
 - 회귀 문항마다 새로 생긴 오류와 원인 단계(1 판정 / 2 분석 / 3 계산 / 4-5 문장·검증 / 실행), 경로(route/compose) 변화를 적는다. 거절 판단 회귀(false_refusal·missed_refusal)는 리포트 위쪽에 따로 모아 보여 준다.
 - 결과 파일: `<run>/grades/<최신>/regress.md`, `regress.json`
 - `eval/baselines/stat.json`에는 문항별 판정·오류 유형·경로·평가 조건만 들어 있다. 셀 값과 답변 문장은 넣지 않으므로 커밋한다. 기준선은 회귀를 확인한 뒤 의도적으로 올릴 때만 `--accept`한다.
+## 10. 복합 통계 문항 (T1-25)
+
+계산·파싱 모듈 고도화용 문항 28개가 `eval/golden/stat_golden_complex.jsonl`에 있다(n년 평균·누적합·두 기간 평균 비교·격차 변화·증감률 비교·구성비 변화·평균 대비·월 합산·어려운 기간 표현·거절).
+
+- 문항 id에 연산이 들어 있다(`S-CX-AVG-01`). 하네스 리포트는 이 접두어로 `op=AVG` 같은 분해 행을 만든다.
+- 다시 만들기: spec(`eval/golden/complex_spec.json`, 셀 ref와 derivation만)에서
+  ```bash
+  uv run python scripts/build_golden_edge.py --spec eval/golden/complex_spec.json --out eval/golden/stat_golden_complex.jsonl --checklist eval/golden/verify_checklist_complex.md
+  uv run python scripts/golden_to_parquet.py --golden eval/golden/stat_golden_complex.jsonl --report eval/golden/scope_report_complex.md
+  ```
+- 고도화 전후 측정: `run_eval --golden eval/golden/stat_golden_complex.jsonl` → `grade_run` → 리포트의 `op=` 행 비교. 고도화 전 기준선(mock)은 PASS 1/28이다(`plans/T1-25.md`).
+- 연속 증감·처음 기준을 넘은 해·전년 대비 증감 최대는 넣지 않았다. 지금 채점기로는 정답 연도·횟수를 채점할 수 없기 때문이다.

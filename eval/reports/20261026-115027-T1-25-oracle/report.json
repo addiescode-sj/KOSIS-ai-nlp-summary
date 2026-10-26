@@ -1,0 +1,118 @@
+{
+  "stage": "T1-25-oracle",
+  "started_at": "2026-10-26T11:50:27+09:00",
+  "golden_version": "golden",
+  "golden_sha256": "174614f5042406fcd01bc7a37a05d37463fd08ffb17706bc6465f79530859e29",
+  "questions": 28,
+  "answers": "oracle",
+  "summary": {
+    "scoring_version": "baseline-scoring-v1",
+    "total": 28,
+    "confirmed": 28,
+    "pending": 0,
+    "provisional": false,
+    "by_kind": {
+      "answerable": {
+        "total": 24,
+        "confirmed": 24,
+        "pass": 24,
+        "partial": 0,
+        "fail": 0,
+        "pass_rate": 1.0
+      },
+      "not_answerable": {
+        "total": 3,
+        "confirmed": 3,
+        "pass": 3,
+        "partial": 0,
+        "fail": 0,
+        "pass_rate": 1.0
+      },
+      "clarify": {
+        "total": 0,
+        "confirmed": 0,
+        "pass": 0,
+        "partial": 0,
+        "fail": 0,
+        "pass_rate": null
+      },
+      "default_allowed": {
+        "total": 1,
+        "confirmed": 1,
+        "pass": 1,
+        "partial": 0,
+        "fail": 0,
+        "pass_rate": 1.0
+      }
+    },
+    "unsupported_claims": 0,
+    "run_failures": 0,
+    "error_types": {},
+    "runs": 1,
+    "overall_pass_rate_per_run": {
+      "mean": 1.0,
+      "min": 1.0,
+      "max": 1.0
+    },
+    "numeric_accuracy": {
+      "hits": 25,
+      "total": 25,
+      "rate": 1.0
+    },
+    "refusal_rate": {
+      "hits": 3,
+      "total": 3,
+      "rate": 1.0
+    },
+    "false_refusals": 0,
+    "number_errors": 0,
+    "by_type": {
+      "compare": {
+        "PASS": 6
+      },
+      "share": {
+        "PASS": 3
+      },
+      "trend": {
+        "PASS": 18
+      },
+      "value": {
+        "PASS": 1
+      }
+    },
+    "by_trap": {},
+    "by_op": {
+      "AVG": {
+        "PASS": 3
+      },
+      "GAP": {
+        "PASS": 3
+      },
+      "GRW": {
+        "PASS": 3
+      },
+      "MON": {
+        "PASS": 2
+      },
+      "PAVG": {
+        "PASS": 3
+      },
+      "PRD": {
+        "PASS": 3
+      },
+      "REF": {
+        "PASS": 4
+      },
+      "SHR": {
+        "PASS": 3
+      },
+      "SUM": {
+        "PASS": 2
+      },
+      "VSA": {
+        "PASS": 2
+      }
+    },
+    "needs_review": 3
+  }
+}
