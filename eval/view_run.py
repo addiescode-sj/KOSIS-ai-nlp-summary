@@ -4,7 +4,8 @@
 
 Reads results.jsonl (and the latest grades/*/grades.jsonl from eval.grade_run when present) and writes
 <run>/view.html. Open it in a browser; the charts load the Vega-Lite viewer from cdn.jsdelivr.net, so the page
-needs internet. Data values stay inside the run folder (not committed).
+needs internet. Data values stay inside the run folder (not committed). Runs of the stat pipeline also show each
+question's step spans (T1-22) as a timeline with their attributes, and a per-step summary on top.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import json
 import sys
 from pathlib import Path
 
+from eval.grade_run import stage_summary
 from eval.scorer import read_jsonl
 
 VEGA = ("https://cdn.jsdelivr.net/npm/vega@5.30.0", "https://cdn.jsdelivr.net/npm/vega-lite@5.21.0",
@@ -39,19 +41,45 @@ border-left:3px solid #2f6db5;padding:8px 10px;margin:6px 0;overflow-wrap:anywhe
 table{border-collapse:collapse;font-size:12px;width:100%} th,td{border-bottom:1px solid #eceff4;padding:3px 6px;text-align:left;vertical-align:top}
 th{color:#5b6475;font-weight:600} details{font-size:12px;margin-top:6px} pre{white-space:pre-wrap;font-size:11px;background:#f8f9fb;padding:6px}
 .err{color:#9b1c1c;font-size:12px}
+.track{position:relative;height:16px;background:#eef1f6;border-radius:3px;margin:8px 0 2px}
+.bar{position:absolute;top:2px;height:12px;border-radius:2px;min-width:3px} .bar.e{outline:2px solid #c62828}
+.legend i,td i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px}
+.legend{font-size:12px;color:#5b6475;display:flex;gap:10px;flex-wrap:wrap} tr.se td{background:#fdecec;color:#9b1c1c}
 </style></head><body>
 <header><h1>__TITLE__</h1><div class="meta" id="meta"></div>
 <div class="filters">판정 <select id="fv"><option value="">전체</option><option>PASS</option><option>PARTIAL</option><option>FAIL</option><option>-</option></select>
 유형 <select id="ft"><option value="">전체</option></select> 경로 <select id="fr"><option value="">전체</option></select>
+실패 단계 <select id="fs"><option value="">전체</option></select>
 검색 <input id="fq" placeholder="문항 id·질문"></div></header>
-<main id="list"></main>
+<main><div id="stages"></div><div id="list" style="display:grid;gap:14px"></div></main>
 <script type="application/json" id="data">__DATA__</script>
 <script>
 const D = JSON.parse(document.getElementById('data').textContent);
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 document.getElementById('meta').textContent = D.meta;
 const fill = (id, vals) => { const el = document.getElementById(id); [...new Set(vals)].sort().forEach(v => { const o = document.createElement('option'); o.textContent = v; el.appendChild(o); }); };
-fill('ft', D.rows.map(r => r.type)); fill('fr', D.rows.map(r => r.route));
+fill('ft', D.rows.map(r => r.type)); fill('fr', D.rows.map(r => r.route)); fill('fs', D.rows.flatMap(r => r.failed));
+const COLORS = {'judge': '#6b7280', 'analyze.rules': '#2563eb', 'analyze.llm_fill': '#7c3aed', 'compute': '#059669',
+  'compose': '#d97706', 'verify': '#0891b2', 'template': '#94a3b8', 'fallback_chatbot': '#db2777'};
+const color = n => COLORS[n] || '#999';
+const swatch = n => `<i style="background:${color(n)}"></i>`;
+const attrs = a => Object.entries(a).map(([k, v]) => `${esc(k)} = ${esc(JSON.stringify(v))}`).join('<br>') || '-';
+function spans(r) {
+  if (!r.spans.length) return '';
+  const end = Math.max(...r.spans.map(s => s.start_ms + s.duration_ms), 0.001), failed = r.spans.filter(s => s.status === 'error').length;
+  const bars = r.spans.map(s => `<div class="bar${s.status === 'error' ? ' e' : ''}" title="${esc(s.name)} ${s.duration_ms}ms"
+    style="left:${s.start_ms / end * 100}%;width:${s.duration_ms / end * 100}%;background:${color(s.name)}"></div>`).join('');
+  const rows = r.spans.map(s => `<tr class="${s.status === 'error' ? 'se' : ''}"><td>${swatch(s.name)}${esc(s.name)}</td><td>${esc(s.status)}</td>
+    <td>${s.start_ms}</td><td>${s.duration_ms}</td><td>${attrs(s.attributes)}</td></tr>`).join('');
+  return `<div class="track">${bars}</div><details><summary>단계 span ${r.spans.length}개 · ${end.toFixed(1)}ms · 실패 ${failed}</summary>
+    <table><tr><th>단계</th><th>status</th><th>start ms</th><th>duration ms</th><th>attributes</th></tr>${rows}</table></details>`;
+}
+const S = Object.entries(D.stages);
+if (S.length) document.getElementById('stages').innerHTML = `<section class="card"><div class="head"><span class="id">단계별 요약</span>
+  <span class="meta">실패 = status error · 지연은 대기 제외 · 거절은 실패가 아님</span></div>
+  <table><tr><th>단계</th><th>실행</th><th>실패</th><th>p50 ms</th><th>p95 ms</th><th>입력 토큰</th><th>출력 토큰</th></tr>
+  ${S.map(([n, v]) => `<tr><td>${swatch(n)}${esc(n)}</td><td>${v.runs}</td><td>${v.errors}</td><td>${v.p50_ms}</td><td>${v.p95_ms}</td>
+  <td>${v.input_tokens}</td><td>${v.output_tokens}</td></tr>`).join('')}</table></section>`;
 function fmt(f) { if (f.value === null || f.value === undefined) return f.raw ? `'${f.raw}'` : ''; return Number(f.value).toLocaleString('ko-KR', {maximumFractionDigits: 4}) + (f.unit || ''); }
 function card(r) {
   const facts = (r.facts || []).map(f => `<tr><td>${esc(f.id)}</td><td>${esc(fmt(f))}</td><td>${esc(f.period || '')}</td>
@@ -59,21 +87,22 @@ function card(r) {
   return `<section class="card" data-id="${esc(r.id)}"><div class="head"><span class="id">${esc(r.id)}</span>
     <span class="tag">${esc(r.kind)}</span><span class="tag">${esc(r.type)}</span><span class="tag ${esc(r.verdict)}">${esc(r.verdict)}</span>
     <span class="tag">${esc(r.route)}</span>${r.errors.length ? `<span class="err">${esc(r.errors.join(', '))}</span>` : ''}</div>
-    <div class="q">${esc(r.question)}</div><div class="body"><div class="a">${esc(r.answer)}</div>
+    <div class="q">${esc(r.question)}</div>${spans(r)}<div class="body"><div class="a">${esc(r.answer)}</div>
     <div class="chart" id="c-${esc(r.id)}">${r.chart ? '' : '<span class="meta">그래프 없음</span>'}</div><div>
     ${facts ? `<table><tr><th>id</th><th>값</th><th>시점</th><th>분류</th><th>원본 칸·계산식</th><th>메모</th></tr>${facts}</table>` : ''}
     <details><summary>상세 (채점 메모·모델 원문)</summary><pre>${esc(r.details.join('\\n'))}</pre><pre>${esc(r.raw.join('\\n---\\n'))}</pre></details></div></div></section>`;
 }
 function draw() {
-  const v = fv.value, t = ft.value, rt = fr.value, q = fq.value.trim();
-  const rows = D.rows.filter(r => (!v || r.verdict === v) && (!t || r.type === t) && (!rt || r.route === rt) && (!q || (r.id + r.question).includes(q)));
+  const v = fv.value, t = ft.value, rt = fr.value, st = fs.value, q = fq.value.trim();
+  const rows = D.rows.filter(r => (!v || r.verdict === v) && (!t || r.type === t) && (!rt || r.route === rt)
+    && (!st || r.failed.includes(st)) && (!q || (r.id + r.question).includes(q)));
   list.innerHTML = rows.map(card).join('') || '<p>해당 문항 없음</p>';
   rows.filter(r => r.chart).forEach(r => vegaEmbed('#c-' + CSS.escape(r.id), r.chart, {actions: {export: true, source: true, compiled: false, editor: false}})
     .catch(e => { document.getElementById('c-' + r.id).innerHTML = '<span class="err">그래프 오류: ' + esc(e.message) + '</span>'; }));
 }
 const fv = document.getElementById('fv'), ft = document.getElementById('ft'), fr = document.getElementById('fr'), fq = document.getElementById('fq');
-const list = document.getElementById('list');
-[fv, ft, fr].forEach(el => el.addEventListener('change', draw)); fq.addEventListener('input', draw);
+const fs = document.getElementById('fs'), list = document.getElementById('list');
+[fv, ft, fr, fs].forEach(el => el.addEventListener('change', draw)); fq.addEventListener('input', draw);
 draw();
 </script></body></html>
 """
@@ -90,10 +119,11 @@ def build(run: Path, run_index: int = 0) -> Path:
     manifest = json.loads((run / "manifest.json").read_text(encoding="utf-8"))
     golden = {g["id"]: g for g in read_jsonl(run / "golden.jsonl")} if (run / "golden.jsonl").exists() else {}
     grades, graded_note = _latest_grades(run)
-    rows = []
+    rows, results = [], []
     for r in read_jsonl(run / "results.jsonl"):
         if r.get("run_index", 0) != run_index:
             continue
+        results.append(r)
         qid = r["question_id"]
         stat = r.get("stat_answer") or {}
         meta = r.get("decision_metadata") or {}
@@ -106,11 +136,12 @@ def build(run: Path, run_index: int = 0) -> Path:
             "route": f"{meta.get('route', '-')}/{meta.get('compose', '-')}",
             "verdict": grade.get("verdict", "-"), "errors": grade.get("error_types", []),
             "details": grade.get("details", []), "raw": r.get("raw_responses") or [],
+            "spans": meta.get("spans") or [], "failed": [s["name"] for s in meta.get("spans") or [] if s["status"] == "error"],
         })
     title = f"실행 결과 보기 — {manifest.get('stage', run.name)}"
     meta_line = (f"{run.name} · 파이프라인 {manifest.get('pipeline', 'chatbot')} · 프롬프트 {manifest.get('prompt_version')} · "
                  f"모델 {manifest.get('model', {}).get('model_name')} · {len(rows)}문항 · {graded_note}")
-    data = json.dumps({"meta": meta_line, "rows": rows}, ensure_ascii=False).replace("</", "<\\/")
+    data = json.dumps({"meta": meta_line, "rows": rows, "stages": stage_summary(results)}, ensure_ascii=False).replace("</", "<\\/")
     scripts = "\n".join(f'<script src="{url}"></script>' for url in VEGA)
     page = PAGE.replace("__TITLE__", title).replace("__SCRIPTS__", scripts).replace("__DATA__", data)
     out = run / "view.html"
