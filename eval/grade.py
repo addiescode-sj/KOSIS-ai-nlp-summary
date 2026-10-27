@@ -144,6 +144,8 @@ def count_unsupported(answer: StatAnswer, cells: dict[str, Cell], details: list[
                 if expected is not None:
                     details.append(f"unsupported {f.id}: {f.derivation} = {expected}, answer says {f.value}")
     periods = {f.period for f in answer.result.facts if f.period}
+    # '2024년 12월' is how a month period '202412' is written (T1-14): its year and month are periods too
+    periods |= {x for p in list(periods) if len(p) == 6 and p.isdigit() for x in (p[:4], str(int(p[4:])))}
     for part in answer.parts:
         if isinstance(part, TextPart):
             # ponytail: any non-period digit in text counts; widen the allow-list if T1-10 permits e.g. ordinals.

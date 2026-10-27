@@ -159,6 +159,59 @@ def test_review_rejects_verdict_that_conflicts_with_rules(golden, mock_settings,
     assert all(r["review_status"] == "pending" for r in scorer.read_jsonl(run_dir / "results.jsonl"))
 
 
+def _write_sheet(sheet, rows):
+    with sheet.open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=review.SHEET_COLUMNS)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def test_quality_score_round_trip_and_late_quality_for_confirmed_rows(golden, mock_settings, tmp_path):
+    run_dir = run_eval.run(golden, "B0", mock_settings, tmp_path / "results", client=MockClient("x"))
+    sheet = run_dir / "review.csv"
+    review.export_sheet(run_dir, sheet)
+    rows = list(csv.DictReader(sheet.open(encoding="utf-8-sig")))
+    rows[0].update(reviewer="tester", error_types="", quality_score="")  # verdict now, quality later
+    rows[1].update(reviewer="tester", error_types="missed_refusal", quality_score="0", quality_note="no reason")
+    _write_sheet(sheet, rows)
+    assert review.apply_sheet(run_dir, sheet) == (2, [])
+    assert review.export_sheet(run_dir, sheet) == 2  # q1 confirmed but unscored + q3 still pending
+    again = {r["question_id"]: r for r in csv.DictReader(sheet.open(encoding="utf-8-sig"))}
+    first = rows[0]["question_id"]
+    assert again[first]["reviewer"] == "tester" and again[first]["final_verdict"] == "PASS"  # verdict kept
+    again[first]["quality_score"] = "2"
+    _write_sheet(sheet, [again[first]])
+    assert review.apply_sheet(run_dir, sheet) == (1, [])
+    quality = scorer.aggregate(scorer.read_jsonl(run_dir / "results.jsonl"))["quality"]
+    assert quality == {"scored": 2, "confirmed": 2, "mean": 1.0, "zero": [rows[1]["question_id"]]}
+
+
+def test_quality_score_outside_rubric_is_rejected(golden, mock_settings, tmp_path):
+    run_dir = run_eval.run(golden, "B0", mock_settings, tmp_path / "results", client=MockClient("x"))
+    sheet = run_dir / "review.csv"
+    review.export_sheet(run_dir, sheet)
+    rows = list(csv.DictReader(sheet.open(encoding="utf-8-sig")))
+    rows[0].update(reviewer="tester", quality_score="3")
+    _write_sheet(sheet, rows)
+    confirmed, problems = review.apply_sheet(run_dir, sheet)
+    assert confirmed == 0 and "quality_score" in problems[0]
+
+
+def test_quality_agreement_joins_on_question_and_run_index():
+    results = [{"question_id": "a", "run_index": 0, "kind": "answerable", "quality_score": 2},
+               {"question_id": "b", "run_index": 0, "kind": "answerable", "quality_score": 1},
+               {"question_id": "c", "run_index": 0, "kind": "not_answerable", "quality_score": 0},
+               {"question_id": "a", "run_index": 1, "kind": "answerable", "quality_score": 0}]  # no judge row: left out
+    judged = [{"question_id": "a", "run_index": 0, "score": 2}, {"question_id": "b", "run_index": 0, "score": 2},
+              {"question_id": "c", "run_index": 0, "score": 0}, {"question_id": "d", "run_index": 0, "score": None}]
+    out = scorer.quality_agreement(results, judged)
+    assert out["all"]["n"] == 3 and out["all"]["agreement"] == 0.67
+    assert out["all"]["confusion_human_by_judge"] == [[1, 0, 0], [0, 0, 1], [0, 0, 1]]
+    assert out["answered"]["n"] == 2 and out["refused_or_clarify"] == {"n": 1, "agreement": 1.0, "weighted_kappa": None,
+                                                                        "confusion_human_by_judge": [[1, 0, 0], [0, 0, 0], [0, 0, 0]]}
+    assert 0 < out["all"]["weighted_kappa"] < 1
+
+
 def test_history_row_marks_provisional(tmp_path):
     summary = scorer.aggregate([_row("answerable", status="pending")])
     path = tmp_path / "history.md"

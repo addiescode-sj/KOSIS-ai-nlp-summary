@@ -10,7 +10,7 @@ import re
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from kosis_chat.answer.render import direction, fact_label, format_fact, is_change
+from kosis_chat.answer.render import direction, fact_label, format_fact, is_change, period_text
 from kosis_chat.compute import Computed
 
 from kosis_ai.schemas import Fact, FactPart, TextPart  # isort: skip
@@ -56,7 +56,7 @@ def fact_line(fact: Fact, main: bool) -> str:
         what = f"{_kind(fact)} ({fact.derivation})"
         way = f" ({direction(fact)})" if is_change(fact) else ""
     else:
-        what = f"{fact.period}년 {fact_label(fact, skip_totals=False)}"
+        what = f"{period_text(fact.period)} {fact_label(fact, skip_totals=False)}"
         way = ""
     note = f" — {fact.note}" if fact.note else ""
     return f"{{{fact.id}}} {tag} {what} = {format_fact(fact)}{way}{note}"

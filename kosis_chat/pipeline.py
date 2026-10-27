@@ -22,8 +22,9 @@ from kosis_chat.config import Settings, load_settings
 from kosis_chat.contract import to_source
 from kosis_chat.data import preprocessing
 from kosis_chat.data.schema import TableInput
+from kosis_chat.judge import messages
 from kosis_chat.judge.answerability import Verdict, judge
-from kosis_chat.judge.question import build_index
+from kosis_chat.judge.question import CAUSAL_WORDS, build_index
 from kosis_chat.llm import analyze_fill, compose
 from kosis_chat.llm.model import STATUS_OK, LLMClient, build_client
 from kosis_chat.llm.structured import StructuredResult, ask_structured
@@ -70,6 +71,11 @@ def _llm_attributes(model: str, usage: dict, attempts: int, status: str) -> dict
     """OpenTelemetry GenAI attribute names for one model step (HCX reports promptTokens/completionTokens)."""
     return {"gen_ai.request.model": model, "gen_ai.usage.input_tokens": usage.get("promptTokens"),
             "gen_ai.usage.output_tokens": usage.get("completionTokens"), "llm.attempts": attempts, "llm.status": status}
+
+
+def _causal_note(question: str) -> str | None:
+    """'추이와 그렇게 된 원인을 알려줘': the numbers are answered, the cause part is declined in a note (T1-14)."""
+    return messages.REFUSAL_MESSAGES["causal"] if CAUSAL_WORDS.search(question) else None
 
 
 class StatPipeline:
@@ -236,7 +242,7 @@ class StatPipeline:
         body = render_parts(parts, computed.result)
         stat = StatAnswer(
             outcome="answered", query=query, result=computed.result, parts=parts,
-            text=final_text(body, source, verdict.default_applied, [computed.note]),
+            text=final_text(body, source, verdict.default_applied, [computed.note, _causal_note(question)]),
             default_applied=verdict.default_applied, source=source,
         )
         chart = chart_spec(plan.type, computed)
