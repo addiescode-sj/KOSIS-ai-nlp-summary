@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
+from kosis_chat.data.events import event_key, load_events
 from kosis_chat.data.loader import load_table
 from kosis_chat.judge.answerability import judge
 from kosis_chat.judge.question import asked_periods, build_index, match_labels
@@ -177,3 +180,25 @@ def test_stock_summed_over_periods_is_refused(households, pop):
 def test_previous_year_default(households):
     assert judge("작년 대비 서울 1인 가구는 몇 % 늘었어?", households).default_applied == {"period": "latest (2024) vs previous (2023)"}
     assert judge("2024년 서울 1인 가구는 작년보다 늘었어?", households).default_applied == {}  # the period is named
+
+
+def test_periods_anchored_on_a_calendar_event():
+    """S5: a calendar name counts as an event only with a time word after it (직전, 이후, N년 전, 당시...)."""
+    before = asked_periods("코로나19 유행 직전 해와 비교하면 2025년 사망자 수는?")
+    assert before.singles == ("2019", "2025") and before.events == (("코로나19 유행 직전", "2020-01"),)
+    assert asked_periods("IMF 이후 출생아 수 추이").ranges == (("1997", "9999"),)
+    assert asked_periods("금융위기 당시 실업률").singles == ("2008",)
+    assert asked_periods("코로나 3년 전 사망자 수").singles == ("2017",)
+    assert asked_periods("4·19 혁명 직후 인구").singles == ("1961",)
+    for plain in ("코로나 환자 수", "세종시 인구밀도는?", "제주특별자치도 인구", "4월 19일 이후 혼인 건수"):
+        assert asked_periods(plain).events == (), plain
+
+
+def test_calendar_has_no_alias_that_reads_as_a_date_or_a_place():
+    """Aliases removed on 10/27: bare dates (4·19, 5.18...) read as days of this year, region names and common words
+    (세종시, 제주특별자치도, 매미, 루사) read as table labels."""
+    names = load_events()
+    for alias in ("4·19", "4.19", "5·16", "5.18", "6·25", "10·26", "12·12", "6·29", "세종시", "제주특별자치도", "매미", "루사"):
+        assert event_key(alias) not in names, alias
+    assert all(not re.fullmatch(r"[\d.·\s]+", name) for name in names)
+    assert names[event_key("4·19 혁명")] == "1960-04"

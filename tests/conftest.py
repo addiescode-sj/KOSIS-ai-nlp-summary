@@ -55,6 +55,8 @@ def _num(raw: str) -> float | None:
 # FAKE_TBL_001: 가상 성별 인구 (two items, 성별 0/1/2, 2022~2024, with -, x and 560p values).
 SEXES = (("0", "계"), ("1", "남자"), ("2", "여자"))
 POP_VALUES = {"2022": ("1,000", "480", "520"), "2023": ("1,050", "500", "550"), "2024": ("-", "x", "560p")}
+# value_kind as the Parquet build writes it.
+POP_KINDS = {"-": "dash", "x": "x_secret", "560p": "other_text"}
 
 
 def pop_rows() -> list[dict]:
@@ -62,13 +64,15 @@ def pop_rows() -> list[dict]:
     for period, values in POP_VALUES.items():
         for (code, label), raw in zip(SEXES, values, strict=True):
             rows.append({"period": period, "item_id": "T1", "item_name": "가상 인구", "unit": "명", "dim1_name": "성별",
-                         "dim1_code": code, "dim1_label": label, "value_raw": raw, "value": _num(raw)})
+                         "dim1_code": code, "dim1_label": label, "value_raw": raw,
+                         "value": _num(raw) if raw not in POP_KINDS else None, "value_kind": POP_KINDS.get(raw, "ok")})
     rows.append({"period": "2023", "item_id": "T2", "item_name": "가상 성비", "unit": "%", "dim1_name": "성별",
                  "dim1_code": "0", "dim1_label": "계", "value_raw": "90.9", "value": 90.9})
     return rows
 
 
-# FAKE_TBL_002: 가상 가구원수별 가구, regions nested by code length (시도 > 시군구 > 읍면동), no unit column.
+# FAKE_TBL_002: 가상 가구원수별 가구, regions nested by code length (시도 > 시군구 > 읍면동), no unit column,
+# ZIP-style values ("1000.0000") and a blank 2025.
 REGIONS = (("00", "전국"), ("03", "동부"), ("11", "서울특별시"), ("21", "부산광역시"), ("39", "제주특별자치도"),
            ("11010", "종로구"), ("11020", "중구"), ("21010", "중구"), ("11010530", "사직동"), ("11010540", "삼청동"))
 HOUSEHOLD_ITEMS = (("T0", "일반가구_계 (가구)"), ("T1", "1인 (가구)"), ("T2", "2인 (가구)"))
@@ -80,7 +84,9 @@ def household_rows() -> list[dict]:
     for p_no, period in enumerate(HOUSEHOLD_PERIODS):
         for r_no, (code, label) in enumerate(REGIONS):
             for i_no, (item_id, item_name) in enumerate(HOUSEHOLD_ITEMS):
-                raw = "" if period == "2025" else str(1000 * (r_no + 1) + 100 * i_no + p_no)
+                # 일반가구_계 (T0) is ten times a region's base, so a part's share of it stays below 100% (S3 checks that).
+                base = 10000 * (r_no + 1) if item_id == "T0" else 1000 * (r_no + 1) + 100 * i_no
+                raw = "" if period == "2025" else f"{base + p_no}.0000"  # ZIP style
                 rows.append({"source": "zip", "period": period, "item_id": item_id, "item_name": item_name,
                              "dim1_name": "행정구역별(읍면동)", "dim1_code": code, "dim1_label": label,
                              "value_raw": raw, "value": _num(raw), "value_kind": "ok" if raw else "blank"})

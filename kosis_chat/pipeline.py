@@ -17,7 +17,7 @@ from kosis_chat.answer.template import template_parts
 from kosis_chat.answer.verify import label_digits, verify
 from kosis_chat.chatbot import Answer, Chatbot, judge_record
 from kosis_chat.compute import CalcRefused, compute
-from kosis_chat.compute.analyze import Plan, Unresolved, build_request, rule_plan, to_query
+from kosis_chat.compute.analyze import Plan, Unresolved, build_plan, rule_plan, to_query
 from kosis_chat.config import Settings, load_settings
 from kosis_chat.contract import to_source
 from kosis_chat.data import preprocessing
@@ -121,9 +121,9 @@ class StatPipeline:
         calls.add(result, system, user)
         return result
 
-    def _request(self, plan: Plan, calls: _Calls, meta: dict):
+    def _place(self, plan: Plan, calls: _Calls, meta: dict):
         try:
-            return plan, build_request(plan, self.index, self.table)
+            return plan, build_plan(plan, self.index, self.table)
         except Unresolved as exc:
             meta["unresolved"] = exc.what
         plan = replace(plan, unresolved=plan.unresolved or meta["unresolved"])
@@ -132,13 +132,13 @@ class StatPipeline:
         filled, problems, kind = self._fill(plan, user, calls, meta, "fill")
         if filled is None:
             return plan, None
-        if (built := self._build(filled, kind, meta)) is not None:
-            return built
+        if (placed := self._build(filled, kind, meta)) is not None:
+            return placed
         if problems:  # the model's answer had a correctable fault: say it back once (analyze-fill-v2)
             again, _, kind = self._fill(plan, analyze_fill.retry_prompt(user, problems), calls, meta, "fill_retry")
             if again is not None:
-                if (built := self._build(again, kind, meta)) is not None:
-                    return built
+                if (placed := self._build(again, kind, meta)) is not None:
+                    return placed
                 filled = again
         return filled, None
 
@@ -154,11 +154,11 @@ class StatPipeline:
 
     def _build(self, filled: Plan, kind, meta: dict):
         tries = [filled]
-        if kind and kind != filled.type and not filled.op:  # an operation fixes its own type (value/trend/share)
+        if kind and kind != filled.type and not filled.pattern:  # a period pattern fixes its own type (value/trend/share)
             tries.append(replace(filled, type=kind))
         for candidate in tries:
             try:
-                return candidate, build_request(candidate, self.index, self.table)
+                return candidate, build_plan(candidate, self.index, self.table)
             except Unresolved as exc:
                 meta["unresolved_after_fill"] = exc.what
         return None
@@ -199,8 +199,8 @@ class StatPipeline:
             return self._done(self._verdict_answer(question, verdict), verdict, meta | {"route": "rules_final"}, _Calls(), started)
         calls = _Calls()
         plan = rule_plan(question, self.index, verdict.default_applied)
-        plan, request = self._request(plan, calls, meta)
-        if request is None:  # neither the rules nor the model placed the question: the compact-v2 chatbot answers
+        plan, built = self._place(plan, calls, meta)
+        if built is None:  # neither the rules nor the model placed the question: the compact-v2 chatbot answers
             answer = self.fallback.ask(question, golden_scope)
             # The chatbot's own record wins (its model wrote the numbers; its outcome_origin says whether a rule or
             # the model decided); the analysis calls made before it are added, not lost.
@@ -214,10 +214,11 @@ class StatPipeline:
                                    "fallback_prompt": FALLBACK_PROMPT, "numbers_origin": "model", "numbers_verified": False},
             )
         source = to_source(self.table.meta, org_id=self.org_id)
-        query = to_query(plan, self.index, request)
+        query = to_query(plan, self.index, built)
         meta["type"] = plan.type
+        meta["pattern"] = built.pattern
         try:
-            computed = compute(self.table, request)
+            computed = compute(self.table, built)
         except CalcRefused as exc:
             stat = StatAnswer(outcome="refused", query=query, refusal=Refusal(reason=exc.reason, message=exc.message),
                               text=final_text(exc.message, source), source=source, numbers_origin="none")

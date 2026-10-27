@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 
 from kosis_chat.config import PROJECT_ROOT
+from kosis_chat.data.events import load_events
 from kosis_chat.data.schema import Cell, TableInput
 from kosis_chat.data.scope import LABEL_ALIASES
 
@@ -38,6 +39,11 @@ _HALF = re.compile(r"((?:19|20)\d{2})\s*년\s*(상|하)반기")
 _QUARTER = re.compile(r"((?:19|20)\d{2})\s*년\s*([1-4])\s*분기")
 _PREVIOUS_YEAR = re.compile(r"(?:작년|전년|지난\s*해)\s*(?:대비|보다|에\s*비해|과|와|하고)")
 _YEARS_BEFORE = re.compile(r"(?<!\d)(\d{1,2})\s*년\s*전(?=과|보다|에|의|하고|\s|$)")  # not "2025년 전국"
+# An event of the calendar (data/events.json) followed by a time word (T0-04 S5): "코로나 직전 해", "IMF 이후",
+# "코로나19 유행 직전", "외환위기 2년 전", "세월호 참사 당시". A name with no time word after it is not a period, so a
+# region or a label that shares a word with an event stays a label.
+_EVENT_WHEN = (r"\s*(?:유행|발생|확산|사태|시작|출범)?\s*"
+               r"(?:(?P<n>\d{1,2})\s*년\s*(?P<dir>이전|이후|전|후|뒤)|(?P<word>직전|직후|이후|부터|당시|때))")
 TREND_WORDS = re.compile(r"추이|변화|변했|흐름|추세")
 # Operations over periods (v2): an average of several periods, a sum over them ("모두" counts with a period range).
 AVG_WORDS = re.compile(r"평균")
@@ -98,6 +104,7 @@ class Periods:
     spans: tuple[tuple[str, str], ...] = ()
     previous: bool = False
     before: int | None = None
+    events: tuple[tuple[str, str], ...] = ()  # (event phrase, event start) a period was read from
 
     @property
     def explicit(self) -> bool:
@@ -121,8 +128,38 @@ def _decade_range(m: re.Match) -> tuple[str, str]:
     return str(start), str(start + 9)
 
 
+@lru_cache(maxsize=1)
+def _event_pattern() -> re.Pattern:
+    names = sorted(load_events(), key=len, reverse=True)
+    alternation = "|".join(r"\s*".join(re.escape(ch) for ch in name) for name in names)
+    return re.compile(rf"(?<![0-9A-Za-z가-힣])(?P<name>{alternation}){_EVENT_WHEN}", re.IGNORECASE)
+
+
+def _event_periods(text: str) -> tuple[str, list[str], list[tuple[str, str]], list[tuple[str, str]], int]:
+    """(text without the event phrases, singles, ranges, (phrase, start), position of the first phrase) for the
+    calendar events the question anchors on."""
+    singles: list[str] = []
+    ranges: list[tuple[str, str]] = []
+    found: list[tuple[str, str]] = []
+    first = -1
+    for m in _event_pattern().finditer(text):
+        start = load_events()["".join(m.group("name").split()).casefold()]
+        year = int(start[:4])
+        if m.group("n"):
+            n = int(m.group("n"))
+            singles.append(str(year - n if m.group("dir") in ("전", "이전") else year + n))
+        elif m.group("word") in ("이후", "부터"):
+            ranges.append((str(year), "9999"))
+        else:
+            singles.append(str({"직전": year - 1, "직후": year + 1}.get(m.group("word"), year)))
+        found.append((m.group(0).strip(), start))
+        first = m.start() if first < 0 else first
+    return _event_pattern().sub(" ", text), singles, ranges, found, first
+
+
 def asked_periods(question: str) -> Periods:
     text = _COHORT.sub(" ", question)  # "1985년생" is a cohort label, not a period
+    text, event_singles, event_ranges, events, event_at = _event_periods(text)
     singles: list[str] = []
     spans: list[tuple[str, str]] = []
     for m in _HALF.finditer(text):
@@ -135,7 +172,7 @@ def asked_periods(question: str) -> Periods:
     for m in _MONTH.finditer(text):
         singles.append(f"{m.group(1)}{int(m.group(2)):02d}")
     text = _MONTH.sub(" ", text)
-    ranges = [(a, b) for a, b in _RANGE.findall(text)]
+    ranges = [(a, b) for a, b in _RANGE.findall(text)] + event_ranges
     text = _RANGE.sub(" ", text)
     ranges += [(a, "9999") for a in _SINCE.findall(text)]
     text = _SINCE.sub(" ", text)
@@ -146,6 +183,9 @@ def asked_periods(question: str) -> Periods:
             ranges.append(decade)
     text = _DECADE.sub(" ", text)
     singles += _YEAR.findall(text)
+    if event_singles:  # in question order: before the years when the event comes first ("코로나 직전 해와 2025년")
+        year_at = next((m.start() for m in _YEAR.finditer(question)), len(question))
+        singles = event_singles + singles if event_at < year_at else singles + event_singles
     before = _YEARS_BEFORE.search(text)
     if before and len(singles) == 1 and len(singles[0]) == 4:  # "10년 전과 비교해서 2025년": the earlier year is implied
         singles.insert(0, str(int(singles[0]) - int(before.group(1))))
@@ -158,6 +198,7 @@ def asked_periods(question: str) -> Periods:
         spans=tuple(spans),
         previous=bool(_PREVIOUS_YEAR.search(question)),
         before=int(before.group(1)) if before and len(singles) == 2 else None,
+        events=tuple(events),
     )
 
 

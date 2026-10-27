@@ -53,10 +53,10 @@ def test_fill_shapes_the_model_actually_wrote_are_read(index):
 
 
 def test_apply_maps_moves_and_reports(index):
-    p = plan(codes={REGION: ["11"]}, unresolved=["항목"], op="avg", groups=[["2020", "2021"]])
+    p = plan(codes={REGION: ["11"]}, unresolved=["항목"], pattern="avg", groups=[["2020", "2021"]])
     filled, ignored, problems = apply(p, AnalyzeFill(codes={"항목": ["1인"]}), index)
     assert filled.codes["항목"] == ["T1"] and ignored == [] and problems == [] and filled.unresolved == []
-    assert filled.op == "avg" and filled.groups == [["2020", "2021"]] and filled.codes[REGION] == ["11"]  # rules kept
+    assert filled.pattern == "avg" and filled.groups == [["2020", "2021"]] and filled.codes[REGION] == ["11"]  # rules kept
     moved, ignored, problems = apply(p, AnalyzeFill(codes={"가구원수": ["T1"]}), index)
     assert moved.codes["항목"] == ["T1"] and ignored == [] and problems == []
     bad, ignored, problems = apply(p, AnalyzeFill(codes={"시점": ["2023"], "항목": ["T99", "T1"]}), index)

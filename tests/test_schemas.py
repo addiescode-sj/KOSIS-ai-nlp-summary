@@ -9,7 +9,6 @@ from pydantic import ValidationError
 
 from kosis_ai.schemas import (
     CHART_KINDS,
-    OPS,
     QUESTION_KINDS,
     QUESTION_TYPES,
     REFUSAL_REASONS,
@@ -251,7 +250,8 @@ def test_unknown_field_is_rejected_on_every_model(build):
         pytest.param(lambda: Fact(id="f2", value=1.0, derivation="f2 * 2", round=0), id="derivation references itself"),
         pytest.param(lambda: Fact(id="f2", value=1.0, derivation="2 * 3", round=0), id="derivation without a fact"),
         pytest.param(lambda: Fact(id="f2", value=1.0, derivation="abs(f1)", round=0), id="derivation calls a function"),
-        pytest.param(lambda: Fact(id="f2", value=1.0, derivation="f1 ** 2", round=0), id="derivation uses power"),
+        pytest.param(lambda: Fact(id="f2", value=1.0, derivation="f1 ** f2", round=0), id="derivation uses a fact as exponent"),
+        pytest.param(lambda: Fact(id="f2", value=1.0, derivation="f1 % 2", round=0), id="derivation uses modulo"),
         pytest.param(lambda: Fact(id="f2", value=1.0, derivation="f1 -", round=0), id="derivation is not an expression"),
         pytest.param(lambda: Fact(id="f2", value=1.0, derivation="f1 / 2", round=11), id="round above the limit"),
         pytest.param(lambda: TextPart(text=""), id="empty text part"),
@@ -314,19 +314,25 @@ def test_cell_from_row_ignores_columns_outside_the_contract():
         Cell(**{k: v for k, v in row.items() if not k.startswith("dim")})
 
 
-# ---------------------------------------------------------------- T0-03 v2: ops and charts in the contract
+# ---------------------------------------------------------------- T0-03 v2: charts in the contract
 
 
 SPEC = {"$schema": "https://vega.github.io/schema/vega-lite/v5.json", "data": {"values": [{"이름": "2025", "값": 1}]}, "mark": "bar"}
 
 
-def test_chart_and_op_valid_shapes():
+def test_chart_valid_shapes():
     chart = Chart(kind="bar", spec=SPEC, fact_ids=["f1"])
     answer = StatAnswer(**ANSWERED, numbers_origin="code", chart=chart)
     assert answer.chart.kind == "bar" and StatAnswer.model_validate_json(answer.model_dump_json()) == answer
-    query = StatQuery(question="q", type="trend", op="pavg", periods=["2010", "2011", "2015", "2016"],
-                      period_groups=[["2010", "2011"], ["2015", "2016"]])
-    assert query.op == "pavg" and OPS == ("avg", "sum", "pavg", "psum", "vsa", "shr") and "timeline" in CHART_KINDS
+    assert "timeline" in CHART_KINDS
+
+
+def test_records_before_v3_load_without_their_v2_operation():
+    """S5 removed StatQuery.op / period_groups; a record written before still loads, the two keys dropped."""
+    old = {"question": "q", "type": "trend", "op": "pavg", "periods": ["2010", "2011", "2015", "2016"],
+           "period_groups": [["2010", "2011"], ["2015", "2016"]]}
+    query = StatQuery.model_validate(old)
+    assert query.periods == old["periods"] and "op" not in query.model_dump() and "period_groups" not in query.model_dump()
 
 
 @pytest.mark.parametrize(
@@ -343,12 +349,8 @@ def test_chart_and_op_valid_shapes():
         pytest.param(lambda: StatAnswer(outcome="refused", refusal=Refusal(reason="causal", message="x"), source=SOURCE,
                                         numbers_origin="none", chart=Chart(kind="bar", spec=SPEC, fact_ids=["f1"])),
                      id="chart on a refusal"),
-        pytest.param(lambda: StatQuery(question="q", op="mean"), id="unknown op"),
-        pytest.param(lambda: StatQuery(question="q", periods=["2010"], period_groups=[["2010"]]), id="period groups without op"),
-        pytest.param(lambda: StatQuery(question="q", op="avg", periods=["2010"], period_groups=[["2010", "2011"]]), id="group outside periods"),
-        pytest.param(lambda: StatQuery(question="q", op="avg", periods=["2010"], period_groups=[[]]), id="empty period group"),
     ],
 )
-def test_op_and_chart_violations_are_rejected(build):
+def test_chart_violations_are_rejected(build):
     with pytest.raises(ValidationError):
         build()

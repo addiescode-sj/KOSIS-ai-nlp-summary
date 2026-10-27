@@ -8,7 +8,7 @@ from eval import grade_run, run_eval, scorer
 from kosis_chat.answer.render import final_text, format_fact, josa
 from kosis_chat.answer.template import template_parts
 from kosis_chat.answer.verify import label_digits, verify
-from kosis_chat.compute import CalcRequest, compute
+from kosis_chat.compute import build, compute
 from kosis_chat.contract import to_stat_answer
 from kosis_chat.data.loader import load_table, sha256_of
 from kosis_chat.data.preprocessing import clean
@@ -51,7 +51,7 @@ def test_format_fact_and_josa():
 
 def test_verify_flags_typed_numbers_missing_facts_and_wrong_direction(households):
     table = clean(households)
-    computed = compute(table, CalcRequest(type="trend", cells=[ref("T1", "21", p) for p in ("2015", "2020", "2023")]))
+    computed = compute(table, build.trend([ref("T1", "21", p) for p in ("2015", "2020", "2023")]))
     good = compose.to_parts("부산 1인 가구는 2015년 {f1}에서 2023년 {f3}으로 {f4} 늘었습니다(증가율 {f5}).", computed)
     assert verify(good, computed) == [] and label_digits(good, computed) == 1  # '1인'
     typed = compose.to_parts("2015년 {f1}에서 {f3}으로 3가구 늘었습니다.", computed)
@@ -62,21 +62,41 @@ def test_verify_flags_typed_numbers_missing_facts_and_wrong_direction(households
 
 
 def test_to_parts_drops_a_repeated_unit(households):
-    computed = compute(clean(households), CalcRequest(type="value", cells=[ref("T1", "11", "2023")]))
+    computed = compute(clean(households), build.value(ref("T1", "11", "2023")))
     parts = compose.to_parts("서울은 {f1}가구입니다.", computed)
     assert parts == [TextPart(text="서울은 "), FactPart(fact_id="f1"), TextPart(text="입니다.")]
 
 
-@pytest.mark.parametrize("request_", [
-    CalcRequest(type="value", cells=[ref("T1", "11", "2023")]),
-    CalcRequest(type="trend", cells=[ref("T1", "21", p) for p in ("2015", "2020", "2023")]),
-    CalcRequest(type="compare", cells=[ref("T1", "11", "2023"), ref("T1", "00", "2023")], reference=1),
-    CalcRequest(type="share", cells=[ref("T1", "11", "2023")], total=ref("T0", "11", "2023")),
-    CalcRequest(type="extreme", candidates=[ref("T1", r, "2023") for r in ("11", "21", "39")], pick="max"),
+@pytest.mark.parametrize("built", [
+    build.value(ref("T1", "11", "2023")),
+    build.trend([ref("T1", "21", p) for p in ("2015", "2020", "2023")]),
+    build.compare([ref("T1", "11", "2023"), ref("T1", "00", "2023")], 1),
+    build.share([ref("T1", "11", "2023")], ref("T0", "11", "2023")),
+    build.extreme([ref("T1", r, "2023") for r in ("11", "21", "39")], "max"),
 ])
-def test_templates_pass_verification(households, request_):
-    computed = compute(clean(households), request_)
-    assert verify(template_parts(request_.type, computed), computed) == []
+def test_templates_pass_verification(households, built):
+    computed = compute(clean(households), built)
+    assert verify(template_parts(built.plan.present, computed), computed) == []
+
+
+def test_templates_cite_a_zero_difference():
+    from kosis_chat.compute.engine import Computed
+    from kosis_ai.schemas import StatResult
+
+    def facts(period_b):
+        dims = {"항목": "1인 (가구)", "행정구역별": "서울특별시"}
+        a = Fact(id="f1", value=100.0, unit="가구", period="2023", dims=dims, source_ref="T|T1|11|2023")
+        b = Fact(id="f2", value=100.0, unit="가구", period=period_b, dims=dims if period_b != "2023" else dims | {"행정구역별": "경기도"},
+                 source_ref=f"T|T1|{'11' if period_b != '2023' else '31'}|{period_b}")
+        diff = Fact(id="f3", value=0, unit="가구", derivation="f2 - f1", round=0)
+        return [a, b, diff]
+
+    trend = Computed(result=StatResult(facts=facts("2024")), main=["f1", "f2", "f3"])
+    parts = template_parts("trend", trend)
+    assert verify(parts, trend) == [] and "변함이 없습니다(차이 " in "".join(p.text for p in parts if isinstance(p, TextPart))
+    compare = Computed(result=StatResult(facts=facts("2023")), main=["f1", "f2", "f3"])
+    parts = template_parts("compare", compare)
+    assert verify(parts, compare) == [] and "두 값은 같습니다(차이 " in "".join(p.text for p in parts if isinstance(p, TextPart))
 
 
 def test_final_text_adds_default_note_and_source():
@@ -191,18 +211,20 @@ def test_run_eval_stat_pipeline(household_path, mock_settings, tmp_path):
 # ---------------------------------------------------------------- charts and the result page
 
 
-@pytest.mark.parametrize("request_, kind, rows, highlighted", [
-    (CalcRequest(type="value", cells=[ref("T1", "11", "2023")]), "value", 4, ["2023"]),  # every numeric period (2025 is blank)
-    (CalcRequest(type="trend", cells=[ref("T1", "21", p) for p in ("2015", "2020", "2023")]), "trend", 3, ["2015", "2023"]),
-    (CalcRequest(type="compare", cells=[ref("T1", "11", "2023"), ref("T1", "00", "2023")], reference=1), "compare", 2,
-     ["서울특별시"]),
-    (CalcRequest(type="share", cells=[ref("T1", "11", "2023")], total=ref("T0", "11", "2023")), "share", 1, ["1인"]),  # made-up total < part: no '그 외' slice
-    (CalcRequest(type="extreme", candidates=[ref("T1", r, "2023") for r in ("11", "21", "39")], pick="max"), "extreme", 3,
-     ["제주특별자치도"]),
+@pytest.mark.parametrize("built, kind, rows, highlighted", [
+    (build.value(ref("T1", "11", "2023")), "value", 4, ["2023"]),  # every numeric period (2025 is blank)
+    (build.trend([ref("T1", "21", p) for p in ("2015", "2020", "2023")]), "trend", 3, ["2015", "2023"]),
+    (build.compare([ref("T1", "11", "2023"), ref("T1", "00", "2023")], 1), "compare", 2, ["서울특별시"]),
+    (build.share([ref("T1", "11", "2023")], ref("T0", "11", "2023")), "share", 2, ["1인"]),  # the part and a '그 외' slice
+    (build.extreme([ref("T1", r, "2023") for r in ("11", "21", "39")], "max"), "extreme", 3, ["제주특별자치도"]),
+    (build.gap((ref("T1", "11", "2015"), ref("T1", "21", "2015")), (ref("T1", "11", "2024"), ref("T1", "21", "2024"))),
+     "compare", 2, ["2024년"]),  # the gap at each period, the later one highlighted
+    (build.growth((ref("T1", "11", "2015"), ref("T1", "11", "2024")), (ref("T1", "21", "2015"), ref("T1", "21", "2024"))),
+     "compare", 2, ["서울특별시"]),  # each target's growth rate, the one the gap names first highlighted
 ])
-def test_chart_for_each_type(households, request_, kind, rows, highlighted):
+def test_chart_for_each_type(households, built, kind, rows, highlighted):
     from kosis_chat.answer.chart import SCHEMA, chart_spec
-    chart = chart_spec(kind, compute(clean(households), request_))
+    chart = chart_spec(kind, compute(clean(households), built))
     spec, values = chart.spec, chart.spec["data"]["values"]
     assert spec["$schema"] == SCHEMA and len(values) == rows
     assert [v["이름"] for v in values if v["강조"] == "예"] == highlighted
@@ -287,14 +309,15 @@ def test_run_eval_isolates_a_pipeline_error_per_question(household_path, mock_se
     assert [g["verdict"] for g in graded] == ["FAIL", "PASS"] and graded[0]["error_types"] == ["run_failure"]
 
 
-# ---------------------------------------------------------------- T0-03 v2: ops answered end to end, charts in the contract
+# ---------------------------------------------------------------- patterns answered end to end, charts in the contract
 
 
 def test_average_question_is_answered_with_a_chart_in_the_contract(households):
     bot = pipeline(households, [reply("2015년부터 2024년까지 서울특별시 1인 가구는 연평균 {f5}입니다.")])
     answer = bot.ask("2015년부터 2024년까지 서울특별시 1인 가구의 연평균은?")
     stat = answer.stat_answer
-    assert stat.query.op == "avg" and stat.query.period_groups == [["2015", "2020", "2023", "2024"]]
+    assert answer.decision_metadata["pattern"] == "avg" and stat.query.periods == ["2015", "2020", "2023", "2024"]
+    assert [s.op for s in stat.query.plan.steps] == ["select", "aggregate"]
     assert stat.result.facts[4].derivation == "(f1 + f2 + f3 + f4) / 4" and stat.text.startswith("2015년부터 2024년까지 서울특별시 1인 가구는 연평균 3,101.5가구입니다.")
     assert stat.chart.kind == "timeline" and stat.chart.fact_ids == ["f1", "f2", "f3", "f4", "f5"] and answer.chart == stat.chart.spec
     assert stat.numbers_origin == "code" and stat.numbers_verified and answer.decision_metadata["chart"] == "timeline"
@@ -302,20 +325,26 @@ def test_average_question_is_answered_with_a_chart_in_the_contract(households):
     assert "{f5} [반드시 인용] 평균 ((f1 + f2 + f3 + f4) / 4) = 3,101.5가구 — 2015년~2024년 4개 시점 평균" in user
 
 
-@pytest.mark.parametrize("question, op, text", [
+@pytest.mark.parametrize("question, pattern, text", [
     ("2015년부터 2024년까지 서울특별시 1인 가구의 연평균은?", "avg", "2015년~2024년 서울특별시 1인 평균은 3,101.5가구입니다."),
     ("서울특별시 1인 가구는 2015~2020년 평균보다 2023~2024년 평균이 얼마나 많아?", "pavg",
      "서울특별시 1인은 2015년~2020년 평균 3,100.5가구에서 2023년~2024년 평균 3,102.5가구로 2.0가구 늘었습니다(증가율 0.1%)."),
     ("2024년 서울특별시 1인 가구는 2015~2023년 평균보다 얼마나 많아?", "vsa",
      "2024년 서울특별시 1인은 3,103가구로 2015년~2023년 평균 3,101.0가구보다 2.0가구 많습니다(증가율 0.1%)."),
     ("전국 일반가구 중 1인 가구 비중은 2015년보다 2024년에 몇 %p 늘었어?", "shr",
-     "전국 일반가구_계 가운데 1인 비중은 2015년 110.0%에서 2024년 110.0%로 변함이 없습니다(차이 0.0%p)."),  # made-up values: equal shares
+     "전국 일반가구_계 가운데 1인 비중은 2015년 11.0%에서 2024년 11.0%로 변함이 없습니다(차이 0.0%p)."),  # made-up values: equal shares
+    ("서울과 부산의 1인 가구 격차는 2015년보다 2024년에 얼마나 변했어?", "gap",
+     ("서울특별시와 부산광역시의 1인 격차는 2015년 1,000가구(서울특별시 3,100가구, 부산광역시 4,100가구)에서 2024년 "
+      "1,000가구(서울특별시 3,103가구, 부산광역시 4,103가구)로 변함이 없습니다(차이 0가구).")),  # made-up values: equal gaps
+    ("2015년 대비 2024년 1인 가구 증가율은 서울과 부산 중 어디가 더 높아?", "grw",
+     "2015년~2024년 서울특별시는 3,100가구에서 3,103가구로 0.1% 증가했고, 부산광역시는 4,100가구에서 4,103가구로 0.1% 증가했습니다."),
 ])
-def test_op_templates_pass_verification(households, question, op, text):
+def test_pattern_templates_pass_verification(households, question, pattern, text):
     bot = pipeline(households, [reply("숫자 없이"), reply("숫자 없이")])  # the model never cites: the template answers
     answer = bot.ask(question)
     stat = answer.stat_answer
-    assert answer.decision_metadata["compose"] == "template" and stat.query.op == op and stat.numbers_verified
+    assert answer.decision_metadata["compose"] == "template" and answer.decision_metadata["pattern"] == pattern
+    assert stat.numbers_verified
     assert stat.text.startswith(text), stat.text
     assert stat.chart is not None and all(stat.result.get(i) for i in stat.chart.fact_ids)
 

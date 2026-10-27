@@ -7,3 +7,4 @@ pyarrow>=15.0
 pandas>=2.0
 # Tests (offline, Mock only)
 pytest>=8.0
+hypothesis>=6.100  # property tests of the v3 plan engine (tests/test_plan_properties.py)

@@ -133,7 +133,7 @@ python -m eval.review apply --run eval\results\<실행 폴더>
 | answerable | wrong_value, wrong_unit, wrong_period, wrong_dims, unsupported_claim, false_refusal | missing_aux, no_source |
 | not_answerable | missed_refusal, unsupported_claim, wrong_reason | insufficient_reason |
 | clarify | assumed_condition, unsupported_claim | missing_clarification |
-| default_allowed | wrong_value, wrong_unit, wrong_period, wrong_dims, disallowed_default, unsupported_claim | unstated_default, no_source |
+| default_allowed | wrong_value, wrong_unit, wrong_period, wrong_dims, disallowed_default, unsupported_claim | unstated_default, no_source, missing_aux |
 
 - form에서 출처를 생략하라고 지시한 실행은 `no_source`를 붙이지 않는다(실험 조건이므로). 대신 `review_note`에 적어 둔다.
 
@@ -169,7 +169,7 @@ python -m eval.harness --suite stat --golden eval/golden --oracle --stage oracle
 - 규칙(`eval/grade.py`)은 사람 판정과 같은 `RULES`/`decide_verdict`를 쓴다. LLM은 쓰지 않는다.
   - 셀 fact는 `source_ref`와 값으로 맞춘다. 셀이 없을 때, 기간만 다르면 `wrong_period`, 나머지는 `wrong_dims`가 된다.
   - 계산 fact는 입력 셀(`source_ref` 집합)로 짝을 짓고, 값은 골든 `round` 자릿수의 반 단위까지 허용한다. fact id나 식을 다르게 써도 된다.
-  - 숫자 오류(`unsupported_claim`)는 세 가지다. Parquet과 다른 셀 값, 다시 계산하면 안 맞는 계산 fact, 연결 문장(TextPart) 속 숫자(fact의 시점은 제외).
+  - 숫자 오류(`unsupported_claim`)는 세 가지다. Parquet과 다른 셀 값, 다시 계산하면 안 맞는 계산 fact, 연결 문장(TextPart) 속 숫자. 단 fact의 시점(월 시점 `202503`이면 `2025`·`3`·`1`분기도)과 fact 라벨에 든 숫자(`1인`, `1985년생`)는 제외한다(`grade.allowed_text_numbers`, 2026-10-27).
   - 거절은 `allowed_reasons` 안의 사유여야 PASS다. 되묻기 문항에 답하면 `assumed_condition`, 기본값을 밝히지 않으면 `unstated_default`가 된다.
   - 거절 문구가 충분한지, 되묻기 선택지가 좋은지는 코드로 판정하지 않는다. 리포트의 "사람 확인 필요"로 센다.
 - 슬롯 정확도(T1-23, 질의 이해): 답의 `query`(StatQuery)를 골든 정답 셀에서 뽑은 슬롯과 비교한다. 판정(PASS/FAIL)에는 영향이 없는 별도 지표다.

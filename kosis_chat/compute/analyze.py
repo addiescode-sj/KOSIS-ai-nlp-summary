@@ -1,6 +1,7 @@
 """Question -> what to compute (T1-06), rules first: the judge's parser finds the periods and the labels the question
 names; this module adds the question type, fills the categories the question leaves out (a total, or the only
-choice) and builds the CalcRequest. Whatever the rules cannot decide is listed in Plan.unresolved for the LLM step.
+choice), picks the cells and arranges them into a v3 plan (build.py). Whatever the rules cannot decide is listed in
+Plan.unresolved for the LLM step.
 """
 
 from __future__ import annotations
@@ -8,7 +9,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field, replace
 
-from kosis_chat.compute.request import CalcRequest, Term
+from kosis_chat.compute import build
+from kosis_chat.compute.build import Built, Pattern
 from kosis_chat.compute.roles import is_province, pick_of, reference_index
 from kosis_chat.data.schema import Cell, TableInput
 from kosis_chat.judge.answerability import resolve
@@ -27,7 +29,7 @@ from kosis_chat.judge.question import (
     squash,
 )
 
-from kosis_ai.schemas import Op, QuestionType, StatQuery  # isort: skip
+from kosis_ai.schemas import QuestionType, StatQuery  # isort: skip
 
 PERIOD_AXIS = "시점"  # Plan.over when an extreme question ranks periods ("가장 낮았던 해")
 RECENT_POINTS = 5
@@ -43,6 +45,13 @@ _PREVIOUS = re.compile(r"latest \((\d{4,6})\) vs previous \((\d{4,6})\)")
 _NUM_RANGE = re.compile(r"(\d+)\s*(인|세)\s*(이하|이상|미만|초과)")
 _NUM_LABEL = re.compile(r"^(\d+)\s*(인|세)\s*(이상)?(?:\s*\(.*\))?$")
 _BOTH_SEXES = re.compile(r"남녀|남성과\s*여성|남자와\s*여자|성별")
+# Two targets at two periods (S5): how their gap changed ("격차가 벌어졌어"), or which changed more ("증가율이 더 높아").
+_GAP_WORDS = re.compile(r"격차|차이")
+_GAP_CHANGE = re.compile(r"변했|변화|벌어|좁혀|줄어|늘어|커졌|작아|달라|줄었|늘었")
+_GROWTH_WORDS = re.compile(r"증가율|감소율|증감률|증가\s*폭|감소\s*폭|증감\s*폭|더\s*(?:많이\s*)?(?:늘|줄)")
+_DECLINE = re.compile(r"감소율|감소\s*폭|더\s*(?:많이\s*)?줄")
+_GROWTH_RATE = re.compile(r"증가율|감소율|증감률")
+_AMOUNT = re.compile(r"증가\s*폭|감소\s*폭|증감\s*폭|더\s*(?:많이\s*)?(?:늘|줄)")
 
 
 @dataclass
@@ -56,10 +65,11 @@ class Plan:
     missing_years: list[str] = field(default_factory=list)  # asked years the table does not have
     default_applied: dict[str, str] = field(default_factory=dict)
     unresolved: list[str] = field(default_factory=list)
-    # v2: an operation over periods and its period groups (table periods, in question order; see schemas.Op).
-    # vsa: groups[0] is the averaged range, groups[1] the single period compared with it.
-    op: Op | None = None
+    # A pattern over periods (avg, sum, pavg, psum, vsa, shr; see build.Pattern) and its period groups (table
+    # periods, in question order). vsa: groups[0] is the averaged range, groups[1] the single period compared with it.
+    pattern: Pattern | None = None
     groups: list[list[str]] = field(default_factory=list)
+    events: list[tuple[str, str]] = field(default_factory=list)  # (phrase, start) of calendar events periods came from
 
 
 class Unresolved(Exception):
@@ -183,8 +193,8 @@ def _period_groups(p: Periods, index: TableIndex, kind: QuestionType) -> list[li
     return [g for g in groups if g]
 
 
-def _operation(question: str, rest: str, p: Periods, index: TableIndex, kind: QuestionType) -> tuple[Op | None, list[list[str]]]:
-    """(op, period groups) when the question aggregates periods; (None, []) for the five plain types.
+def _operation(question: str, rest: str, p: Periods, index: TableIndex, kind: QuestionType) -> tuple[Pattern | None, list[list[str]]]:
+    """(pattern, period groups) when the question aggregates periods; (None, []) for the five plain types.
 
     rest is the question with matched labels removed, so "평균" in a label ('평균 가구원수') does not count."""
     groups = _period_groups(p, index, kind)
@@ -222,18 +232,40 @@ def rule_plan(question: str, index: TableIndex, default_applied: dict[str, str] 
     default = dict(default_applied or {})
     periods, missing = _periods(parsed.periods, index, default)
     kind = _question_type(question, parsed.periods, codes)
-    plan = Plan(question, kind, codes, periods, missing_years=missing, default_applied=default)
-    plan.op, plan.groups = _operation(question, parsed.rest, parsed.periods, index, kind)
-    if plan.op == "sum" and parsed.periods.spans and not parsed.periods.singles:
+    plan = Plan(question, kind, codes, periods, missing_years=missing, default_applied=default,
+                events=list(parsed.periods.events))
+    plan.pattern, plan.groups = _operation(question, parsed.rest, parsed.periods, index, kind)
+    if plan.pattern == "sum" and parsed.periods.spans and not parsed.periods.singles:
         plan.type = "value"  # "2024년 상반기 혼인 건수": one number for one named period
-    elif plan.op and plan.op != "shr" and kind not in ("value", "trend"):
+    elif plan.pattern and plan.pattern != "shr" and kind not in ("value", "trend"):
         plan.type = "trend"  # an average or sum over periods is a trend question, whatever its wording suggested
+    if plan.pattern is None and (pair := _two_by_two(question, plan)):
+        plan.pattern, plan.groups, plan.type = pair
+        return plan
     if kind == "extreme":
         plan.pick = pick_of(question)
         plan.over = PERIOD_AXIS if ASKS_PERIOD.search(question) else _ranked_axis(index, codes)
         if plan.over is None:
             plan.unresolved.append("over")
     return plan
+
+
+def _two_by_two(question: str, plan: Plan) -> tuple[Pattern, list[list[str]], QuestionType] | None:
+    """(gap or grw, the two periods, "compare") when the question names two targets of one category and two years
+    (or a range: its ends). A monthly table's yearly value stands for the year; without one the rules do not guess."""
+    pairs = [n for n, named in plan.codes.items() if len(named) == 2]
+    years = sorted({p[:4] for p in plan.periods})
+    if len(pairs) != 1 or len(years) < 2 or any(len(v) > 2 for v in plan.codes.values()):
+        return None
+    if _GROWTH_WORDS.search(question):
+        pattern: Pattern = "grw"
+    elif _GAP_WORDS.search(question) and _GAP_CHANGE.search(question):
+        pattern = "gap"
+    else:
+        return None
+    if years[0] not in plan.periods or years[-1] not in plan.periods:
+        return None
+    return pattern, [[years[0]], [years[-1]]], "compare"
 
 
 def _ranked_axis(index: TableIndex, codes: dict[str, list[str]]) -> str | None:
@@ -243,7 +275,7 @@ def _ranked_axis(index: TableIndex, codes: dict[str, list[str]]) -> str | None:
     return (regional or open_axes or [None])[0]
 
 
-# ---------------------------------------------------------------- plan -> request
+# ---------------------------------------------------------------- plan -> blocks
 
 
 def _total(index: TableIndex, name: str) -> str | None:
@@ -330,16 +362,27 @@ def _ref(lookup: _Lookup, fixed: dict[str, str], period: str, problems: list[str
     return cell.source_ref
 
 
-def build_request(plan: Plan, index: TableIndex, table: TableInput) -> CalcRequest:
-    """CalcRequest for the plan, or Unresolved naming what is missing (for the LLM step)."""
+def _note(plan: Plan) -> str | None:
+    """What the answer should say about the periods: asked years the table lacks, events read from the calendar."""
+    notes = [f"{'·'.join(plan.missing_years)}년은 표에 없음"] if plan.missing_years else []
+    for phrase, start in plan.events:
+        when = f"{start[:4]}년" + (f" {int(start[5:])}월" if len(start) > 4 else "")
+        notes.append(f"'{phrase}'은(는) 사건 달력의 시작 시점 {when} 기준")
+    return "; ".join(notes) or None
+
+
+def build_plan(plan: Plan, index: TableIndex, table: TableInput) -> Built:
+    """The blocks for the plan (build.py), or Unresolved naming what is missing (for the LLM step)."""
     if plan.unresolved:
         raise Unresolved(plan.unresolved)
     lookup = _lookup(table)
     problems: list[str] = []
-    note = f"{'·'.join(plan.missing_years)}년은 표에 없음" if plan.missing_years else None
+    note = _note(plan)
     kind = plan.type
-    if plan.op:
-        return _op_request(plan, index, lookup, note)
+    if plan.pattern in ("gap", "grw"):
+        return _two_by_two_plan(plan, index, lookup, note)
+    if plan.pattern:
+        return _period_plan(plan, index, lookup, note)
     if kind in ("value", "trend"):
         fixed = _fixed(plan, index, set(), problems)
         if problems:
@@ -351,13 +394,13 @@ def build_request(plan: Plan, index: TableIndex, table: TableInput) -> CalcReque
             refs = [r for p in periods if (r := _ref(lookup, fixed, p, []))]
             if len(refs) < 2:
                 raise Unresolved([f"추이 시점 부족 {periods}"])
-            return CalcRequest(type="trend", cells=refs, note=note)
+            return build.trend(refs, note)
         period = _one_period(plan, lookup, [fixed])
         ref = _ref(lookup, fixed, period or "", problems)
         if problems:
             raise Unresolved(problems)
         newer = [p for p in lookup.all_periods(fixed) if period and p > period] if plan.default_applied.get("period") else []
-        return CalcRequest(type="value", cells=[ref], context=[_ref(lookup, fixed, p, []) for p in newer], note=note)
+        return build.value(ref, [_ref(lookup, fixed, p, []) for p in newer], note)
     if kind == "compare":
         side = next((n for n, named in plan.codes.items() if len(named) == 2), None)
         if side is None:
@@ -373,26 +416,36 @@ def build_request(plan: Plan, index: TableIndex, table: TableInput) -> CalcReque
         if problems:
             raise Unresolved(problems)
         labels = [index.axes[side].labels[c] for c in plan.codes[side]]
-        return CalcRequest(type="compare", cells=refs, reference=reference_index(plan.question, labels), note=note)
+        return build.compare(refs, reference_index(plan.question, labels), note)
     if kind == "share":
-        return _share_request(plan, index, lookup, note)
+        return _share_plan(plan, index, lookup, note)
     if kind == "extreme":
-        return _extreme_request(plan, index, lookup, note)
+        return _extreme_plan(plan, index, lookup, note)
     raise Unresolved(["질문 유형"])
 
 
 def _share_axis(plan: Plan, index: TableIndex) -> tuple[str, list[str], str] | None:
-    """(axis, part codes, total code): items first ('1인 가구 비중'), then a category ('동부 가구 비중')."""
+    """(axis, part codes, denominator code): items first ('1인 가구 비중'), then a category ('동부 가구 비중').
+
+    The denominator is the parts' nearest common parent in the code hierarchy ('외국인근로자' -> '한국국적을 가지지 않은
+    자'), else the category's total; a parent the question names with the parts is not a part."""
     order = [ITEM_AXIS] + [n for n in plan.codes if n != ITEM_AXIS]
     for name in order:
-        total = _total(index, name) if name in index.axes else None
-        parts = [c for c in plan.codes.get(name, []) if c != total]
-        if total and parts:
-            return name, parts, total
+        if name not in index.axes:
+            continue
+        axis = index.axes[name]
+        named = plan.codes.get(name, [])
+        parents = {axis.parents.get(c) for c in named if axis.parents.get(c) in axis.labels}
+        parent = next(iter(parents)) if len(parents) == 1 else None
+        total = _total(index, name)
+        whole = parent if parent is not None and all(axis.parents.get(c) == parent or c == parent for c in named) else total
+        parts = [c for c in named if c not in (total, whole)]
+        if whole and parts:
+            return name, parts, whole
     return None
 
 
-def _share_request(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | None) -> CalcRequest:
+def _share_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | None) -> Built:
     found = _share_axis(plan, index)
     if found is None:
         raise Unresolved(["비중의 분자·분모"])
@@ -406,10 +459,10 @@ def _share_request(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | N
     refs = [_ref(lookup, f, period or "", problems) for f in sets]
     if problems:
         raise Unresolved(problems)
-    return CalcRequest(type="share", cells=refs[:-1], total=refs[-1], note=note)
+    return build.share(refs[:-1], refs[-1], note)
 
 
-def _extreme_request(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | None) -> CalcRequest:
+def _extreme_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | None) -> Built:
     if plan.over is None or (plan.over != PERIOD_AXIS and plan.over not in index.axes):
         raise Unresolved(["over"])  # the model fill can leave it open too
     share = bool(SHARE_WORDS.search(plan.question))
@@ -453,14 +506,34 @@ def _extreme_request(plan: Plan, index: TableIndex, lookup: _Lookup, note: str |
     if len(candidates) < 2:
         raise Unresolved(["비교 대상 부족"])
     context = [r for f, p in context_sets if (r := _ref(lookup, f, p, []))]
-    return CalcRequest(type="extreme", candidates=candidates, candidate_totals=totals, pick=plan.pick, context=context,
-                       note=note)
+    return build.extreme(candidates, plan.pick, totals, context, note)
 
 
-def _op_request(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | None) -> CalcRequest:
-    """Terms for the op from the plan's period groups; the cells of one series, fixed like a value question."""
+def _two_by_two_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | None) -> Built:
+    """gap / grw: the two targets (question order) at the earliest and the latest asked period."""
+    side = next((n for n, named in plan.codes.items() if len(named) == 2), None)
+    if side is None:
+        raise Unresolved(["비교할 두 대상"])
     problems: list[str] = []
-    if plan.op == "shr":
+    fixed = _fixed(plan, index, {side}, problems)
+    if problems:
+        raise Unresolved(problems)
+    early, late = plan.groups[0][0], plan.groups[-1][-1]
+    cells = [[_ref(lookup, _with(fixed, side, c), p, problems) for p in (early, late)] for c in plan.codes[side]]
+    if problems:
+        raise Unresolved(problems)
+    (x1, x2), (y1, y2) = cells
+    if plan.pattern == "gap":
+        return build.gap((x1, y1), (x2, y2), note)
+    return build.growth((x1, x2), (y1, y2), amount=bool(_AMOUNT.search(plan.question)) and not _GROWTH_RATE.search(plan.question),
+                        decline=bool(_DECLINE.search(plan.question)), note=note)
+
+
+def _period_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | None) -> Built:
+    """Blocks for a pattern over periods from the plan's period groups; the cells of one series, fixed like a value
+    question (a share pattern: the parts and the total at each period)."""
+    problems: list[str] = []
+    if plan.pattern == "shr":
         found = _share_axis(plan, index)
         if found is None:
             raise Unresolved(["비중의 분자·분모"])
@@ -468,44 +541,54 @@ def _op_request(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | None
         fixed = _fixed(replace(plan, codes={k: v for k, v in plan.codes.items() if k != name}), index, {name}, problems)
         if problems:
             raise Unresolved(problems)
-        terms = []
-        for group in sorted(plan.groups, key=lambda g: g[0]):  # the earlier share first
+        shares = []
+        for group in plan.groups:
             period = group[-1]
             refs = [_ref(lookup, _with(fixed, name, c), period, problems) for c in parts]
             whole = _ref(lookup, _with(fixed, name, total), period, problems)
             if problems:
                 raise Unresolved(problems)
-            terms.append(Term(cells=refs, total=whole))
-        return CalcRequest(type="share", op="shr", terms=terms, note=note)
+            shares.append((refs, whole))
+        if len(shares) != 2:
+            raise Unresolved([f"shr: 비중 시점 {len(shares)}개"])
+        return build.share_change(shares[0], shares[1], note)
     fixed = _fixed(plan, index, set(), problems)
     if problems:
         raise Unresolved(problems)
     groups = plan.groups
-    if not groups and plan.op == "avg":  # "최근 n년 평균"
+    if not groups and plan.pattern == "avg":  # "최근 n년 평균"
         numeric = lookup.numeric_periods(fixed)
         n = int(m.group(1)) if (m := re.search(r"최근\s*(\d+)\s*년", plan.question)) else RECENT_POINTS
         groups = [numeric[-n:]]
-    if plan.op in ("pavg", "psum"):
-        groups = sorted(groups, key=lambda g: g[0])  # the earlier group first: the later one is compared with it
-    terms = []
+    cells = []
     for n, group in enumerate(groups):
         refs = [r for p in group if (r := _ref(lookup, fixed, p, []))]
         if not refs:
             raise Unresolved([f"기간 {group[0]}~{group[-1]}에 칸 없음"])
-        agg = None if plan.op == "vsa" and n == 1 else ("sum" if plan.op in ("sum", "psum") else "avg")
+        agg = None if plan.pattern == "vsa" and n == 1 else ("sum" if plan.pattern in ("sum", "psum") else "avg")
         if agg and len(refs) < 2:
             raise Unresolved([f"{agg}에 시점 부족 {group}"])
-        terms.append(Term(cells=refs, agg=agg))
+        cells.append(refs)
     try:
-        return CalcRequest(type=plan.type, op=plan.op, terms=terms, note=note)
-    except ValueError as exc:  # the groups do not fit the op (one range for pavg): not a question for this op
-        raise Unresolved([f"{plan.op}: {exc.errors()[0]['msg'] if hasattr(exc, 'errors') else exc}"]) from exc
+        if plan.pattern in ("avg", "sum"):
+            if len(cells) != 1:
+                raise ValueError(f"needs 1 period group, got {len(cells)}")
+            return build.over_periods(cells[0], plan.pattern, plan.type, note)
+        if len(cells) != 2:
+            raise ValueError(f"needs 2 period groups, got {len(cells)}")
+        if plan.pattern == "vsa":
+            if len(cells[1]) != 1:
+                raise ValueError(f"a single period holds one cell, got {len(cells[1])}")
+            return build.vs_average(cells[0], cells[1][0], note)
+        return build.groups_compared(cells[0], cells[1], "avg" if plan.pattern == "pavg" else "sum", note)
+    except ValueError as exc:  # the groups do not fit the pattern (one range for pavg): not a question for it
+        raise Unresolved([f"{plan.pattern}: {exc}"]) from exc
 
 
 # ---------------------------------------------------------------- plan -> StatQuery (the record in labels)
 
 
-def to_query(plan: Plan, index: TableIndex, request: CalcRequest | None = None) -> StatQuery:
+def to_query(plan: Plan, index: TableIndex, built: Built | None = None) -> StatQuery:
     def labels(name: str) -> list[str]:
         return [index.axes[name].labels[c].strip() for c in plan.codes.get(name, []) if c in index.axes[name].labels]
 
@@ -523,9 +606,8 @@ def to_query(plan: Plan, index: TableIndex, request: CalcRequest | None = None) 
         periods=plan.periods,
         filters=filters,
         targets=[{side: label} for label in labels(side)] if side else [],
-        reference=request.reference if request is not None else None,
+        reference=built.reference if built is not None else None,
         over=over,
         pick=plan.pick,
-        op=plan.op,
-        period_groups=[list(g) for g in plan.groups] if plan.op else [],
+        plan=built.plan if built is not None else None,
     )

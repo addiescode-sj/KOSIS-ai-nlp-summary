@@ -18,7 +18,7 @@ from pathlib import Path
 from eval.golden import GoldenItem, load_items, read_cells, read_source
 from eval.grade import grade
 from kosis_chat.compute import CalcRefused, compute
-from kosis_chat.compute.analyze import Unresolved, build_request, rule_plan, to_query
+from kosis_chat.compute.analyze import Unresolved, build_plan, rule_plan, to_query
 from kosis_chat.config import PROJECT_ROOT
 from kosis_chat.data.loader import load_table
 from kosis_chat.data.preprocessing import clean
@@ -49,22 +49,22 @@ def check(item: GoldenItem) -> dict:
     if verdict.outcome != "answered":
         return row | {"verdict": "FAIL", "error_types": [f"judge_{verdict.outcome}"], "details": [verdict.rule or ""]}
     try:
-        request = build_request(plan, index, table)
-        computed = compute(table, request)
+        built = build_plan(plan, index, table)
+        computed = compute(table, built)
     except Unresolved as exc:
         return row | {"verdict": "UNRESOLVED", "error_types": [], "details": exc.what}
     except CalcRefused as exc:
         return row | {"verdict": "FAIL", "error_types": ["calc_refused"], "details": [f"{exc.reason}: {exc.message}"]}
     answer = StatAnswer(
         outcome="answered",
-        query=to_query(plan, index, request),
+        query=to_query(plan, index, built),
         result=computed.result,
         parts=[FactPart(fact_id=i) for i in computed.main],
         default_applied=verdict.default_applied,
         source=read_source(item.path),
         numbers_origin="code",
     )
-    row |= {"request": request.model_dump(exclude_defaults=True)}
+    row |= {"pattern": built.pattern, "plan": built.plan.model_dump(exclude_defaults=True)}
     try:
         graded = grade(item, answer, read_cells(item.path))
     except ValueError as exc:  # the grader cannot place an error type for this kind (eval/scorer.RULES)

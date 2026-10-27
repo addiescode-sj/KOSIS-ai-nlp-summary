@@ -119,7 +119,7 @@ def apply(plan: Plan, fill: AnalyzeFill, index: TableIndex) -> tuple[Plan, list[
     """The plan with the model's choices where the rules had none.
 
     Returns (plan, ignored, problems): ignored records what was dropped (for the eval record), problems says the
-    same to the model for one more try. Operation and period groups the rules set are kept as they are."""
+    same to the model for one more try. The pattern and period groups the rules set are kept as they are."""
     ignored: list[str] = []
     problems: list[str] = []
     asked = asked_axes(plan, index)

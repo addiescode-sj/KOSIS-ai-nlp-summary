@@ -1,19 +1,18 @@
 """Calculation engine (T1-07) on the made-up tables, and the M1 golden check wiring (eval/compute_check.py)."""
 
 import pytest
-from pydantic import ValidationError
 
 from conftest import write_table
-from eval.compute_check import check, oracle_request
+from eval.compute_check import check, oracle_plan
 from eval.golden import GoldenItem
 from eval.grade import evaluate
-from kosis_chat.compute import CalcRefused, CalcRequest, compute
-from kosis_chat.compute.request import Term
+from kosis_chat.compute import CalcRefused, build, compute
 from kosis_chat.compute.roles import pick_of, reference_index
 from kosis_chat.data.loader import load_table, sha256_of
 from kosis_chat.data.preprocessing import clean
 
-# FAKE_TBL_002 value = 1000 * (region no + 1) + 100 * item no + period no (conftest.household_rows).
+# FAKE_TBL_002 value = 1000 * (region no + 1) + 100 * item no + period no; T0 (일반가구_계) is 10000 * (region no + 1)
+# + period no (conftest.household_rows).
 REGION_NO = {"00": 0, "03": 1, "11": 2, "21": 3, "39": 4}
 ITEM_NO = {"T0": 0, "T1": 1, "T2": 2}
 PERIOD_NO = {"2015": 0, "2020": 1, "2023": 2, "2024": 3}
@@ -25,6 +24,8 @@ def ref(item, region, period):
 
 
 def value(item, region, period):
+    if item == "T0":
+        return 10000 * (REGION_NO[region] + 1) + PERIOD_NO[period]
     return 1000 * (REGION_NO[region] + 1) + 100 * ITEM_NO[item] + PERIOD_NO[period]
 
 
@@ -48,7 +49,7 @@ def recomputes(computed):
 
 
 def test_value_cell_fact(households):
-    computed = compute(households, CalcRequest(type="value", cells=[ref("T1", "11", "2023")]))
+    computed = compute(households, build.value(ref("T1", "11", "2023")))
     (fact,) = computed.result.facts
     assert fact.value == value("T1", "11", "2023") and fact.source_ref == ref("T1", "11", "2023")
     assert fact.unit == "가구" and fact.period == "2023" and fact.dims["행정구역별(읍면동)"] == "서울특별시"
@@ -57,7 +58,7 @@ def test_value_cell_fact(households):
 
 def test_trend_keeps_every_point_and_derives_difference_and_growth(households):
     cells = [ref("T1", "21", p) for p in ("2024", "2015", "2020", "2023")]  # any order: sorted by period
-    computed = compute(households, CalcRequest(type="trend", cells=cells))
+    computed = compute(households, build.trend(cells))
     by_id = facts_by_id(computed)
     assert [by_id[f"f{n}"].period for n in range(1, 5)] == ["2015", "2020", "2023", "2024"]
     diff, growth = by_id["f5"], by_id["f6"]
@@ -71,7 +72,7 @@ def test_trend_of_a_percent_is_a_point_difference(tmp_path):
             for p, raw in (("2015", "48.3"), ("2016", "55"), ("2017", "60"))]
     path = write_table(tmp_path / "data", "FAKE_PCT", rows, CATALOG)
     table = clean(load_table(path))
-    computed = compute(table, CalcRequest(type="trend", cells=[f"FAKE_PCT|T1||{p}" for p in ("2015", "2016", "2017")]))
+    computed = compute(table, build.trend([f"FAKE_PCT|T1||{p}" for p in ("2015", "2016", "2017")]))
     diff = facts_by_id(computed)["f4"]
     assert (diff.derivation, diff.value, diff.unit, diff.round) == ("f3 - f1", 11.7, "%p", 1)
     assert len(computed.result.facts) == 4  # no growth rate of a percentage
@@ -79,18 +80,17 @@ def test_trend_of_a_percent_is_a_point_difference(tmp_path):
 
 def test_compare_signs(households):
     a, b = ref("T1", "11", "2023"), ref("T1", "00", "2023")
-    named = compute(households, CalcRequest(type="compare", cells=[b, a], reference=1))  # "전국은 서울보다"
+    named = compute(households, build.compare([b, a], 1))  # "전국은 서울보다"
     by_id = facts_by_id(named)
     assert by_id["f3"].derivation == "f1 - f2" and by_id["f3"].value == value("T1", "00", "2023") - value("T1", "11", "2023")
     assert by_id["f4"].derivation == "f1 / f2" and by_id["f4"].unit == "배"
-    plain = facts_by_id(compute(households, CalcRequest(type="compare", cells=[b, a])))  # larger minus smaller
+    plain = facts_by_id(compute(households, build.compare([b, a])))  # larger minus smaller
     assert plain["f3"].derivation == "f2 - f1" and plain["f3"].value > 0
     assert recomputes(named)
 
 
 def test_share_uses_the_total_cell_and_sums_parts(households):
-    computed = compute(households, CalcRequest(type="share", cells=[ref("T1", "21", "2023"), ref("T2", "21", "2023")],
-                                               total=ref("T0", "21", "2023")))
+    computed = compute(households, build.share([ref("T1", "21", "2023"), ref("T2", "21", "2023")], ref("T0", "21", "2023")))
     share = facts_by_id(computed)["f4"]
     assert share.derivation == "(f1 + f2) / f3 * 100" and share.unit == "%" and share.round == 1
     assert recomputes(computed)
@@ -98,9 +98,8 @@ def test_share_uses_the_total_cell_and_sums_parts(households):
 
 def test_extreme_ranks_shares_and_keeps_runner_up_and_context(households):
     regions = ("11", "21", "39")
-    computed = compute(households, CalcRequest(
-        type="extreme", candidates=[ref("T1", r, "2023") for r in regions],
-        candidate_totals=[ref("T0", r, "2023") for r in regions], pick="max", context=[ref("T1", "00", "2023")]))
+    computed = compute(households, build.extreme(
+        [ref("T1", r, "2023") for r in regions], "max", [ref("T0", r, "2023") for r in regions], [ref("T1", "00", "2023")]))
     by_id = facts_by_id(computed)
     winner = by_id[computed.picked["winner"]]
     assert winner.note == "3개 중 가장 높음" and winner.derivation == "f1 / f2 * 100"
@@ -108,24 +107,24 @@ def test_extreme_ranks_shares_and_keeps_runner_up_and_context(households):
     assert by_id[computed.picked["runner_up"]].note == "두 번째"
     assert by_id["f7"].source_ref == ref("T1", "00", "2023") and computed.main == ["f1", "f2", "f3"]
     assert recomputes(computed)
-    plain = compute(households, CalcRequest(type="extreme", candidates=[ref("T1", r, "2023") for r in regions], pick="min"))
+    plain = compute(households, build.extreme([ref("T1", r, "2023") for r in regions], "min"))
     assert facts_by_id(plain)["f1"].source_ref == ref("T1", "11", "2023")  # smallest value
 
 
 def test_symbols_missing_cells_and_mixed_units_are_refused(households, pop_path):
     with pytest.raises(CalcRefused) as blank:
-        compute(households, CalcRequest(type="value", cells=[ref("T1", "11", "2025")]))
+        compute(households, build.value(ref("T1", "11", "2025")))
     assert blank.value.reason == "missing_value"
     with pytest.raises(CalcRefused) as nowhere:
-        compute(households, CalcRequest(type="value", cells=["FAKE_TBL_002|T9|11|2023"]))
+        compute(households, build.value("FAKE_TBL_002|T9|11|2023"))
     assert nowhere.value.reason == "class_mismatch"
     pop = clean(load_table(pop_path))
     with pytest.raises(CalcRefused) as units:
-        compute(pop, CalcRequest(type="compare", cells=["FAKE_TBL_001|T1|0|2023", "FAKE_TBL_001|T2|0|2023"]))
+        compute(pop, build.compare(["FAKE_TBL_001|T1|0|2023", "FAKE_TBL_001|T2|0|2023"]))
     assert units.value.reason == "unit_mismatch"
     # A trend whose ends are symbols has fewer than two numbers.
     with pytest.raises(CalcRefused) as trend:
-        compute(pop, CalcRequest(type="trend", cells=["FAKE_TBL_001|T1|1|2024", "FAKE_TBL_001|T1|1|2023"]))
+        compute(pop, build.trend(["FAKE_TBL_001|T1|1|2024", "FAKE_TBL_001|T1|1|2023"]))
     assert trend.value.reason == "missing_value"
 
 
@@ -134,19 +133,18 @@ def test_summing_rates_is_not_aggregatable(tmp_path):
             for i, n, v in (("T1", "가상 출생률", "1.5"), ("T2", "가상 사망률", "2.5"), ("T0", "가상 전체율", "10"))]
     path = write_table(tmp_path / "data", "FAKE_RATE", rows, CATALOG)
     with pytest.raises(CalcRefused) as exc:
-        compute(clean(load_table(path)), CalcRequest(type="share", cells=["FAKE_RATE|T1||2023", "FAKE_RATE|T2||2023"],
-                                                     total="FAKE_RATE|T0||2023"))
+        compute(clean(load_table(path)), build.share(["FAKE_RATE|T1||2023", "FAKE_RATE|T2||2023"], "FAKE_RATE|T0||2023"))
     assert exc.value.reason == "not_aggregatable"
 
 
-@pytest.mark.parametrize("payload", [
-    {"type": "value", "cells": []}, {"type": "compare", "cells": ["a"]}, {"type": "share", "cells": ["a"]},
-    {"type": "extreme", "candidates": ["a", "b"]}, {"type": "value", "cells": ["a"], "reference": 0},
-    {"type": "extreme", "candidates": ["a", "b"], "candidate_totals": ["t"], "pick": "max"}, {"type": "value", "cells": ["a"], "x": 1},
+@pytest.mark.parametrize("make", [
+    lambda: build.compare(["a"]), lambda: build.compare(["a", "b"], reference=2), lambda: build.trend(["a"]),
+    lambda: build.share([], "t"), lambda: build.extreme(["a"], "max"), lambda: build.extreme(["a", "b"], "max", ["t"]),
+    lambda: build.trend(["a", "a"]),  # a cell listed twice
 ])
-def test_request_shape_is_checked(payload):
-    with pytest.raises(ValidationError):
-        CalcRequest.model_validate(payload)
+def test_plan_shape_is_checked(make):
+    with pytest.raises(ValueError):  # pydantic's ValidationError is a ValueError too
+        make()
 
 
 @pytest.mark.parametrize("question, expected", [
@@ -180,7 +178,8 @@ def test_m1_check_grades_engine_output_like_a_model_answer(household_path):
         {"id": "f1", "value": value("T1", "21", "2023"), "source_ref": ref("T1", "21", "2023")},
         {"id": "f2", "value": value("T2", "21", "2023"), "source_ref": ref("T2", "21", "2023")},
         {"id": "f3", "value": value("T0", "21", "2023"), "source_ref": ref("T0", "21", "2023")},
-        {"id": "f4", "value": 207.5, "derivation": "(f1 + f2) / f3 * 100", "round": 1, "unit": "%"}])
+        {"id": "f4", "value": round((value("T1", "21", "2023") + value("T2", "21", "2023")) / value("T0", "21", "2023") * 100, 1),
+         "derivation": "(f1 + f2) / f3 * 100", "round": 1, "unit": "%"}])
     row = check(share)
     assert row["verdict"] == "PASS", row["details"]
     wrong = golden(household_path, type="share", required_facts=[
@@ -195,8 +194,8 @@ def test_oracle_trend_takes_every_period_in_range(household_path):
         {"id": "f1", "value": value("T1", "11", "2015"), "source_ref": ref("T1", "11", "2015")},
         {"id": "f2", "value": value("T1", "11", "2023"), "source_ref": ref("T1", "11", "2023")},
         {"id": "f3", "value": 2, "derivation": "f2 - f1", "round": 0}])
-    request = oracle_request(item, clean(load_table(household_path)))
-    assert request.cells == [ref("T1", "11", p) for p in ("2015", "2020", "2023")]
+    built = oracle_plan(item, clean(load_table(household_path)))
+    assert built.plan.step("s").cells == [ref("T1", "11", p) for p in ("2015", "2020", "2023")]
     assert check(item)["verdict"] == "PASS"
 
 
@@ -204,13 +203,14 @@ def test_oracle_extreme_over_regions_excludes_totals(household_path):
     item = golden(household_path, type="extreme", question="2023년 1인 가구가 가장 많은 시도는?",
                   scope={"dims": {"행정구역별(읍면동)": ["00", "11", "21", "39"]}, "periods": ["2023", "2023"]},
                   required_facts=[{"id": "f1", "value": value("T1", "39", "2023"), "source_ref": ref("T1", "39", "2023")}])
-    request = oracle_request(item, clean(load_table(household_path)))
-    assert request.pick == "max" and ref("T1", "00", "2023") not in request.candidates
-    assert request.context == [ref("T1", "00", "2023")] and len(request.candidates) == 3
+    built = oracle_plan(item, clean(load_table(household_path)))
+    rank = built.plan.step("k")
+    assert rank.pick == "max" and ref("T1", "00", "2023") not in rank.candidates
+    assert built.context == [ref("T1", "00", "2023")] and len(rank.candidates) == 3
     assert check(item)["verdict"] == "PASS"
 
 
-# ---------------------------------------------------------------- T0-03 v2: ops over periods
+# ---------------------------------------------------------------- patterns over periods (T0-03 v2, blocks since T0-04)
 
 
 def seoul(*periods):
@@ -230,29 +230,27 @@ def flow_ref(item, period):
 
 
 def test_avg_and_sum_over_periods(households, flow):
-    avg = compute(households, CalcRequest(type="trend", op="avg", terms=[Term(cells=seoul("2015", "2020", "2023", "2024"), agg="avg")]))
+    avg = compute(households, build.over_periods(seoul("2015", "2020", "2023", "2024"), "avg"))
     by_id = facts_by_id(avg)
-    assert avg.op == "avg" and avg.main == ["f5"] and by_id["f5"].derivation == "(f1 + f2 + f3 + f4) / 4"
+    assert avg.pattern == "avg" and avg.main == ["f5"] and by_id["f5"].derivation == "(f1 + f2 + f3 + f4) / 4"
     assert by_id["f5"].value == 3101.5 and by_id["f5"].round == 1 and by_id["f5"].unit == "가구" and recomputes(avg)
     assert avg.terms[0].cell_ids == ["f1", "f2", "f3", "f4"] and avg.terms[0].periods == ("2015", "2024")
-    total = compute(flow, CalcRequest(type="value", op="sum", terms=[Term(cells=[flow_ref("T1", "2023"), flow_ref("T1", "2024")], agg="sum")]))
+    total = compute(flow, build.over_periods([flow_ref("T1", "2023"), flow_ref("T1", "2024")], "sum", "value"))
     assert facts_by_id(total)["f3"].derivation == "f1 + f2" and facts_by_id(total)["f3"].value == 24 and total.main == ["f1", "f2", "f3"]
     assert facts_by_id(total)["f3"].round == 0 and "합계" in facts_by_id(total)["f3"].note
 
 
 def test_two_period_groups_compared(households, flow):
-    early, late = Term(cells=seoul("2015", "2020"), agg="avg"), Term(cells=seoul("2023", "2024"), agg="avg")
-    pavg = compute(households, CalcRequest(type="trend", op="pavg", terms=[early, late]))
+    pavg = compute(households, build.groups_compared(seoul("2015", "2020"), seoul("2023", "2024"), "avg"))
     by_id = facts_by_id(pavg)
     assert [by_id[i].value for i in pavg.main] == [3100.5, 3102.5, 2.0, 0.1] and by_id["f7"].derivation == "f6 - f3"
     assert by_id["f8"].derivation == "(f6 / f3 - 1) * 100" and by_id["f8"].unit == "%" and recomputes(pavg)
-    terms = [Term(cells=[flow_ref("T1", "2023"), flow_ref("T1", "2024")], agg="sum"), Term(cells=[flow_ref("T1", "2025")])]
-    with pytest.raises(ValidationError):  # psum compares two sums, not a sum and a cell
-        CalcRequest(type="trend", op="psum", terms=terms)
+    with pytest.raises(ValueError):  # psum compares two sums, not a sum and a cell
+        build.groups_compared([flow_ref("T1", "2023"), flow_ref("T1", "2024")], [flow_ref("T1", "2025")], "sum")
 
 
 def test_value_against_an_average(households):
-    vsa = compute(households, CalcRequest(type="trend", op="vsa", terms=[Term(cells=seoul("2015", "2020", "2023"), agg="avg"), Term(cells=seoul("2024"))]))
+    vsa = compute(households, build.vs_average(seoul("2015", "2020", "2023"), ref("T1", "11", "2024")))
     by_id = facts_by_id(vsa)
     assert vsa.main == ["f4", "f5", "f6", "f7"] and by_id["f4"].value == 3101.0 and by_id["f5"].source_ref == ref("T1", "11", "2024")
     assert (by_id["f6"].derivation, by_id["f6"].value) == ("f5 - f4", 2.0) and by_id["f7"].derivation == "(f5 / f4 - 1) * 100"
@@ -260,8 +258,8 @@ def test_value_against_an_average(households):
 
 
 def test_share_change_in_points(households):
-    terms = [Term(cells=[ref("T1", "00", "2015")], total=ref("T0", "00", "2015")), Term(cells=[ref("T1", "00", "2024")], total=ref("T0", "00", "2024"))]
-    shr = compute(households, CalcRequest(type="share", op="shr", terms=terms))
+    shr = compute(households, build.share_change(([ref("T1", "00", "2015")], ref("T0", "00", "2015")),
+                                                  ([ref("T1", "00", "2024")], ref("T0", "00", "2024"))))
     by_id = facts_by_id(shr)
     assert shr.main == ["f3", "f6", "f7"] and by_id["f3"].derivation == "f1 / f2 * 100" and by_id["f6"].derivation == "f4 / f5 * 100"
     assert by_id["f7"].derivation == "f6 - f3" and by_id["f7"].unit == "%p" and recomputes(shr)
@@ -269,34 +267,31 @@ def test_share_change_in_points(households):
 
 def test_summing_a_stock_or_a_rate_over_periods_is_refused(households, flow):
     with pytest.raises(CalcRefused) as err:  # 1인 (가구) is a stock: the same households would be counted again
-        compute(households, CalcRequest(type="trend", op="sum", terms=[Term(cells=seoul("2015", "2020"), agg="sum")]))
+        compute(households, build.over_periods(seoul("2015", "2020"), "sum"))
     assert err.value.reason == "not_aggregatable"
-    avg = compute(households, CalcRequest(type="trend", op="avg", terms=[Term(cells=seoul("2015", "2020"), agg="avg")]))
+    avg = compute(households, build.over_periods(seoul("2015", "2020"), "avg"))
     assert avg.main == ["f1", "f2", "f3"]  # an average of a stock is fine
     with pytest.raises(CalcRefused) as err:  # a rate summed over periods
-        compute(flow, CalcRequest(type="trend", op="sum", terms=[Term(cells=[flow_ref("T2", "2023"), flow_ref("T2", "2024")], agg="sum")]))
+        compute(flow, build.over_periods([flow_ref("T2", "2023"), flow_ref("T2", "2024")], "sum"))
     assert err.value.reason == "not_aggregatable"
-    psum = compute(flow, CalcRequest(type="trend", op="psum", terms=[Term(cells=[flow_ref("T1", "2023"), flow_ref("T1", "2024")], agg="sum"), Term(cells=[flow_ref("T1", "2024"), flow_ref("T1", "2025")], agg="sum")]))
+    psum = compute(flow, build.groups_compared([flow_ref("T1", "2023"), flow_ref("T1", "2024")],
+                                               [flow_ref("T1", "2024"), flow_ref("T1", "2025")], "sum"))
     assert [facts_by_id(psum)[i].value for i in psum.main] == [24, 26, 2, 8.3] and recomputes(psum)
 
 
-@pytest.mark.parametrize("payload", [
-    {"type": "trend", "op": "avg", "terms": [{"cells": ["a"], "agg": "avg"}]},  # an average of one cell
-    {"type": "trend", "op": "avg", "terms": [{"cells": ["a", "b"], "agg": "sum"}]},  # wrong aggregate
-    {"type": "trend", "op": "pavg", "terms": [{"cells": ["a", "b"], "agg": "avg"}]},  # one group for two
-    {"type": "trend", "op": "vsa", "terms": [{"cells": ["a"]}, {"cells": ["b", "c"], "agg": "avg"}]},  # the average comes first
-    {"type": "value", "op": "shr", "terms": [{"cells": ["a"], "total": "t"}, {"cells": ["b"], "total": "u"}]},  # shr is a share question
-    {"type": "share", "op": "shr", "terms": [{"cells": ["a"], "total": "t"}, {"cells": ["b", "c"], "total": "u"}]},  # different parts
-    {"type": "trend", "op": "sum", "cells": ["a", "b"], "terms": [{"cells": ["a", "b"], "agg": "sum"}]},  # cells and terms together
-    {"type": "trend", "terms": [{"cells": ["a", "b"], "agg": "sum"}]},  # terms without an op
-    {"type": "trend", "op": "avg", "terms": [{"cells": ["a", "b"], "agg": "avg", "total": "t"}]},  # aggregate and share at once
+@pytest.mark.parametrize("make", [
+    lambda: build.over_periods(["a"], "avg"),  # an average of one cell
+    lambda: build.over_periods(["a", "b"], "avg", present="compare"),  # one number over periods is a value or a trend
+    lambda: build.groups_compared(["a", "b"], ["c"], "avg"),  # the later group is one cell
+    lambda: build.vs_average(["a"], "b"),  # the average needs two or more cells
+    lambda: build.share_change((["a"], "t"), (["b", "c"], "u")),  # different parts
 ])
-def test_op_request_shape_is_checked(payload):
-    with pytest.raises(ValidationError):
-        CalcRequest.model_validate(payload)
+def test_period_pattern_shape_is_checked(make):
+    with pytest.raises(ValueError):
+        make()
 
 
-def test_oracle_request_builds_the_op_from_the_golden_derivations(household_path):
+def test_oracle_plan_builds_the_pattern_from_the_golden_derivations(household_path):
     item = golden(household_path, id="S-CX-PAVG-09", type="trend", required_facts=[
         {"id": "f1", "value": value("T1", "11", "2015"), "source_ref": ref("T1", "11", "2015")},
         {"id": "f2", "value": value("T1", "11", "2020"), "source_ref": ref("T1", "11", "2020")},
@@ -305,6 +300,6 @@ def test_oracle_request_builds_the_op_from_the_golden_derivations(household_path
         {"id": "f5", "value": value("T1", "11", "2024"), "source_ref": ref("T1", "11", "2024")},
         {"id": "f6", "value": 3102.5, "derivation": "(f4 + f5) / 2", "round": 1},
         {"id": "f7", "value": 2.0, "derivation": "f6 - f3", "round": 1}])
-    request = oracle_request(item, clean(load_table(household_path)))
-    assert request.op == "pavg" and [t.cells for t in request.terms] == [seoul("2015", "2020"), seoul("2023", "2024")]
+    built = oracle_plan(item, clean(load_table(household_path)))
+    assert built.pattern == "pavg" and [built.plan.step(t.cells).cells for t in built.terms] == [seoul("2015", "2020"), seoul("2023", "2024")]
     assert check(item)["verdict"] == "PASS", check(item)["details"]

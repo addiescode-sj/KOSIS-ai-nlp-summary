@@ -2,14 +2,14 @@
 
 value: one bar · trend: a line over every period · compare: two bars · share: a pie of the parts and the rest ·
 extreme: every candidate as a sorted bar · avg / sum: the periods as bars with the aggregate in the title ·
-pavg / psum / vsa / shr: the two numbers compared as bars. The asked value is highlighted; numbers are the facts'
-own values. chart_spec returns the shared Chart (kind, Vega-Lite spec, the facts it draws) that StatAnswer carries.
+pavg / psum / vsa / shr: the two numbers compared as bars · gap: the gap at each period as bars · grw: each target's
+change as bars. The asked value is highlighted; numbers are the facts' own values. chart_spec returns the shared Chart (kind, Vega-Lite spec, the facts it draws) that StatAnswer carries.
 Render with any Vega-Lite v5 viewer (vega-embed, Streamlit st.vega_lite_chart, Altair); eval/view_run.py shows them.
 """
 
 from __future__ import annotations
 
-from kosis_chat.answer.render import fact_label, format_fact, format_number, item_label, span_text
+from kosis_chat.answer.render import fact_label, format_fact, format_number, item_label, period_text, span_text
 from kosis_chat.compute import Computed
 
 from kosis_ai.schemas import Chart, Fact, QuestionType  # isort: skip
@@ -172,7 +172,7 @@ def _extreme(computed: Computed, by_id: dict[str, Fact]) -> Chart | None:
     return Chart(kind="bar", spec=spec, fact_ids=fact_ids)
 
 
-# ---------------------------------------------------------------- v2 ops over periods
+# ---------------------------------------------------------------- patterns over periods
 
 
 def _span_name(term) -> str:
@@ -196,24 +196,49 @@ def _two_terms(computed: Computed, by_id: dict[str, Fact]) -> Chart | None:
     a, b = by_id[earlier.value_id], by_id[later.value_id]
     word = {"avg": " 평균", "sum": " 합계"}
     names = [f"{_span_name(earlier)}{word.get(earlier.agg or '', '')}", f"{_span_name(later)}{word.get(later.agg or '', '')}"]
-    if computed.op == "shr":
+    if computed.pattern == "shr":
         names = [_span_name(earlier), _span_name(later)]
     rows = [_row(names[0], a, False), _row(names[1], b, True)]
     label = fact_label(by_id[earlier.cell_ids[0]])
-    what = "비중" if computed.op == "shr" else ""
+    what = "비중" if computed.pattern == "shr" else ""
     title = f"{label} {what} 비교".replace("  ", " ").strip()
     spec = _bars(title, rows, a.unit, sort=names, horizontal=False)
     return Chart(kind="bar", spec=spec, fact_ids=[a.id, b.id])
 
 
-_CHARTS = {"value": _value, "trend": _trend, "compare": _compare, "share": _share, "extreme": _extreme}
-_OP_CHARTS = {"avg": _one_term, "sum": _one_term, "pavg": _two_terms, "psum": _two_terms, "vsa": _two_terms, "shr": _two_terms}
+def _gap(computed: Computed, by_id: dict[str, Fact]) -> Chart | None:
+    """gap: the gap at the earlier and the later period as bars, the later one highlighted."""
+    x1, y1, x2, _, g1, g2, _ = (by_id[i] for i in computed.main)
+    names = [period_text(x1.period or ""), period_text(x2.period or "")]
+    names_pair = _differing([(x1.dims or {}, x1.period), (y1.dims or {}, y1.period)])
+    title = f"{names_pair[0]}·{names_pair[1]} {_common([(x1.dims or {}, None), (y1.dims or {}, None)])} 격차"
+    spec = _bars(title.replace("  ", " ").strip(), [_row(names[0], g1, False), _row(names[1], g2, True)], g1.unit, sort=names,
+                 horizontal=False)
+    return Chart(kind="bar", spec=spec, fact_ids=[g1.id, g2.id])
+
+
+def _grw(computed: Computed, by_id: dict[str, Fact]) -> Chart | None:
+    """grw: each target's change (growth rate or amount) as bars, the one the answer names first highlighted."""
+    a1, _, a2, _, v1, v2, d = (by_id[i] for i in computed.main)
+    names = _differing([(a1.dims or {}, a1.period), (a2.dims or {}, a2.period)])
+    subject = d.derivation.split("-")[0].strip()
+    word = "증감률" if v1.unit == "%" else "증감"
+    rows = [_row(names[0], v1, v1.id == subject), _row(names[1], v2, v2.id == subject)]
+    rows = [{**r, "표시": format_number(f.value, f.unit, f.round)} for r, f in zip(rows, (v1, v2))]  # keep the sign here
+    spec = _bars(f"{_common([(a1.dims or {}, None), (a2.dims or {}, None)])} {word} 비교".replace("  ", " ").strip(), rows,
+                 v1.unit, sort=names, horizontal=False)
+    return Chart(kind="bar", spec=spec, fact_ids=[v1.id, v2.id])
+
+
+_CHARTS = {"value": _value, "trend": _trend, "compare": _compare, "share": _share, "extreme": _extreme,
+           "avg": _one_term, "sum": _one_term, "pavg": _two_terms, "psum": _two_terms, "vsa": _two_terms, "shr": _two_terms,
+           "gap": _gap, "grw": _grw}
 
 
 def chart_spec(kind: QuestionType, computed: Computed) -> Chart | None:
     """The chart for the answer (kind, Vega-Lite v5 spec, the facts drawn), or None when there is nothing to draw."""
     by_id = {f.id: f for f in computed.result.facts}
-    builder = _OP_CHARTS[computed.op] if computed.op else _CHARTS[kind]
+    builder = _CHARTS[computed.pattern or kind]
     try:
         return builder(computed, by_id)
     except (KeyError, IndexError, StopIteration):  # an unexpected fact layout: answer without a chart

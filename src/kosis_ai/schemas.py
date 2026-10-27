@@ -7,8 +7,9 @@ v2 (2026-10-26, plans/T0-03.md): every model rejects unknown fields (a typo cann
 id, value, raw, source_ref, derivation and round, and StatAnswer records who wrote the numbers (numbers_origin) and
 whether code verified them (numbers_verified). Records written before v2 still load: the new fields default to
 "not recorded" (None / False) and are only cross-checked when set.
-Also v2: an operation over periods (Op: an average, a sum, two periods compared) that StatQuery records and the
-engine computes as derived facts, and the chart drawn from the facts (Chart) carried inside StatAnswer.
+Also v2: the chart drawn from the facts (Chart) carried inside StatAnswer.
+v3 (T0-04): the calculation as blocks (PlanV3), recorded in StatQuery.plan; it replaced v2's operation over periods
+(StatQuery.op / period_groups), which records written before v3 still carry and which are dropped on load.
 """
 
 from __future__ import annotations
@@ -34,10 +35,6 @@ RefusalReason = Literal[
     "out_of_scope",  # outside the provided tables
 ]
 MeasureKind = Literal["count_stock", "count_flow", "ratio", "average", "index"]
-# An operation over periods, on top of the question type (v2, T1-25 complex questions):
-# avg / sum: one period group aggregated to one number; pavg / psum: two period groups, each aggregated, compared;
-# vsa: one period against the average of a period group; shr: a share at two periods and its change in %p.
-Op = Literal["avg", "sum", "pavg", "psum", "vsa", "shr"]
 # How a chart is drawn (kosis_chat/answer/chart.py): bars by name, bars in period order, a line over periods, a pie.
 ChartKind = Literal["bar", "timeline", "line", "pie"]
 Outcome = Literal["answered", "refused", "clarify"]
@@ -52,7 +49,6 @@ QUESTION_TYPES = get_args(QuestionType)
 QUESTION_KINDS = get_args(QuestionKind)
 REFUSAL_REASONS = get_args(RefusalReason)
 NUMBERS_ORIGINS = get_args(NumbersOrigin)
-OPS = get_args(Op)
 CHART_KINDS = get_args(ChartKind)
 VALUE_KINDS = get_args(ValueKind)
 MAX_DIMS = 8  # dim1..dim8 columns in the Parquet files
@@ -62,9 +58,10 @@ MAX_ROUND = 10  # decimals a derived fact may keep (the golden set uses 0..5)
 _UNIT_SUFFIX = re.compile(r"\(([^()\s\d~]{1,5})\)\s*$")
 _IDENT = re.compile(r"[A-Za-z_]\w*")
 _ORG_ID = re.compile(r"\d{3}")
-# A derivation is arithmetic over fact ids: + - * / and parentheses (what eval/grade.py recomputes).
+# A derivation is arithmetic over fact ids: + - * / and parentheses (what eval/grade.py recomputes), and ** with a
+# constant exponent (v3, for an average annual growth rate: '((f2 / f1) ** (1 / 9) - 1) * 100').
 _DERIVATION_NODES = (ast.Expression, ast.BinOp, ast.UnaryOp, ast.Constant, ast.Name, ast.Load)
-_DERIVATION_OPS = (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.USub, ast.UAdd)
+_DERIVATION_OPS = (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.USub, ast.UAdd, ast.Pow)
 
 
 class Contract(BaseModel):
@@ -86,7 +83,11 @@ def check_derivation(expr: str) -> list[str]:
         raise ValueError(f"derivation {expr!r} is not an expression: {exc.msg}") from None
     for node in ast.walk(tree):
         if not isinstance(node, _DERIVATION_NODES + _DERIVATION_OPS):
-            raise ValueError(f"derivation {expr!r} may only use fact ids, numbers and + - * / ( )")
+            raise ValueError(f"derivation {expr!r} may only use fact ids, numbers and + - * / ** ( )")
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Pow) and any(
+            isinstance(n, ast.Name) for n in ast.walk(node.right)
+        ):
+            raise ValueError(f"derivation {expr!r}: an exponent must be a number, not a fact")
         if isinstance(node, ast.Constant) and (isinstance(node.value, bool) or not isinstance(node.value, (int, float))):
             raise ValueError(f"derivation {expr!r} may only use numeric constants")
     names = [node.id for node in ast.walk(tree) if isinstance(node, ast.Name)]
@@ -204,6 +205,280 @@ class Cell(Contract):
         )
 
 
+# ---------------------------------------------------------------- v3 calculation plan (T0-04)
+# A plan is a list of steps, each a small block whose inputs are earlier steps: select cells, aggregate a series,
+# combine two values, rank candidates, find a period or a category by a condition, or repeat a sub-plan per target.
+# New question shapes are new combinations of the same blocks, so this schema does not grow with them.
+# present says how the answer is shown (the question type); the steps alone say what is computed.
+
+AggFn = Literal["sum", "avg", "min", "max", "first", "last"]
+# diff: a - b · ratio: a / b · pct_change: (a / b - 1) * 100 · pp_diff: a - b of two percentages, in %p ·
+# share: a (summed when several cells) / b * 100 · per: a / b * scale ("per 1,000 people") ·
+# cagr: ((a / b) ** (1 / years) - 1) * 100 · index: a / b * 100 (b as 100)
+CombineFn = Literal["diff", "ratio", "pct_change", "pp_diff", "share", "per", "cagr", "index"]
+Compare = Literal[">", ">=", "<", "<=", "=="]
+PeriodKind = Literal["list", "range", "recent", "anchor", "span"]
+SpanPart = Literal["year", "H1", "H2", "Q1", "Q2", "Q3", "Q4"]
+STEP_SHAPES = ("cells", "scalar", "ranking", "found", "mapped")
+
+
+class PeriodSpec(Contract):
+    """Periods as the question names them; code resolves them to table periods (kosis_chat/compute/resolve.py).
+
+    list: periods · range: start..end · recent: the last n periods that hold a number · anchor: an event or a period
+    moved by offset (or every period from it when to_latest), e.g. 코로나 -1 · span: a part of a year on a monthly or
+    quarterly table (a half, a quarter, the whole year)."""
+
+    kind: PeriodKind
+    periods: list[str] = Field(default_factory=list)
+    start: str | None = None
+    end: str | None = None
+    n: int | None = Field(default=None, ge=1)
+    event: str | None = None  # a name in kosis_chat/data/events.json
+    period: str | None = None  # anchor on a period instead of an event
+    offset: int = 0
+    # anchor: what offset counts ("코로나 직전 해" = year, "직전 달" = month); None: the table's period unit
+    unit: Literal["year", "month"] | None = None
+    to_latest: bool = False
+    year: str | None = None
+    part: SpanPart | None = None
+
+    @model_validator(mode="after")
+    def _fields_of_kind(self) -> PeriodSpec:
+        need = {"list": bool(self.periods), "range": bool(self.start and self.end), "recent": self.n is not None,
+                "anchor": bool(self.event) != bool(self.period), "span": bool(self.year and self.part)}
+        if not need[self.kind]:
+            raise ValueError(f"period kind {self.kind!r} is missing its fields")
+        return self
+
+
+class TargetSpec(Contract):
+    """Codes of one category (or of the items): listed, every child of a code, the total, or a label path
+    ('서울특별시 > 중구') that code resolves to one code or to clarify options."""
+
+    codes: list[str] = Field(default_factory=list)
+    children_of: str | None = None
+    total: bool = False
+    path: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _one_way(self) -> TargetSpec:
+        ways = [bool(self.codes), self.children_of is not None, self.total, bool(self.path)]
+        if sum(ways) != 1:
+            raise ValueError("a target names codes, children_of, total or a path: exactly one")
+        return self
+
+
+class _Step(Contract):
+    id: str
+
+    @field_validator("id")
+    @classmethod
+    def _identifier(cls, value: str) -> str:
+        if not _fact_id_ok(value):
+            raise ValueError(f"step id {value!r} must be a plain identifier")
+        return value
+
+    def inputs(self) -> list[str]:
+        return []
+
+
+class SelectStep(_Step):
+    """Cells of one series or one cross-section: by source_ref (cells), or by item, categories and periods that
+    code resolves first (table defaults to the question's table)."""
+
+    op: Literal["select"] = "select"
+    cells: list[str] = Field(default_factory=list)
+    table: str | None = None
+    item: TargetSpec | None = None
+    dims: dict[str, TargetSpec] = Field(default_factory=dict)
+    periods: PeriodSpec | None = None
+
+    @model_validator(mode="after")
+    def _cells_or_spec(self) -> SelectStep:
+        spec = self.item is not None or bool(self.dims) or self.periods is not None
+        if bool(self.cells) == spec:
+            raise ValueError(f"select {self.id}: name cells by source_ref or by item/dims/periods, not both or neither")
+        if len(self.cells) != len(set(self.cells)):
+            raise ValueError(f"select {self.id}: a cell is listed twice")
+        return self
+
+
+class AggregateStep(_Step):
+    op: Literal["aggregate"] = "aggregate"
+    of: str
+    fn: AggFn
+
+    def inputs(self) -> list[str]:
+        return [self.of]
+
+
+class CombineStep(_Step):
+    op: Literal["combine"] = "combine"
+    a: str
+    b: str
+    fn: CombineFn
+    # larger_first: a and b are swapped when b is larger (a gap with no named reference: larger minus smaller);
+    # smaller_first: the other way (which of two declines is larger: the more negative change first)
+    orient: Literal["fixed", "larger_first", "smaller_first"] = "fixed"
+    optional: bool = False  # skip (no fact) when the value would mean nothing: a growth rate of a %, a zero base
+    scale: float | None = Field(default=None, gt=0)  # per: e.g. 1000
+    years: int | None = Field(default=None, ge=1)  # cagr: periods between b and a
+    note: str | None = None
+
+    @model_validator(mode="after")
+    def _fn_fields(self) -> CombineStep:
+        if (self.fn == "per") != (self.scale is not None):
+            raise ValueError(f"combine {self.id}: scale goes with per, and per needs it")
+        if (self.fn == "cagr") != (self.years is not None):
+            raise ValueError(f"combine {self.id}: years goes with cagr, and cagr needs it")
+        if self.a == self.b:
+            raise ValueError(f"combine {self.id}: a and b are the same step")
+        return self
+
+    def inputs(self) -> list[str]:
+        return [self.a, self.b]
+
+
+class RankStep(_Step):
+    """Candidates ranked; the first keep are reported. Candidates are cells (one cell each, or a share of each
+    candidate's total) or the values of a map step (of), e.g. each province's growth rate."""
+
+    op: Literal["rank"] = "rank"
+    candidates: list[str] = Field(default_factory=list)  # source_refs
+    totals: list[str] = Field(default_factory=list)  # share ranking: the total of each candidate, same order
+    of: str | None = None  # a map step
+    pick: Literal["max", "min"]
+    keep: int = Field(default=2, ge=1)
+
+    @model_validator(mode="after")
+    def _totals_match(self) -> RankStep:
+        if (len(self.candidates) >= 2) == (self.of is not None):
+            raise ValueError(f"rank {self.id}: rank two or more candidates or a map step (of), exactly one")
+        if self.candidates and len(self.candidates) == 1:
+            raise ValueError(f"rank {self.id}: needs two or more candidates")
+        if self.totals and len(self.totals) != len(self.candidates):
+            raise ValueError(f"rank {self.id}: totals must match candidates")
+        return self
+
+    def inputs(self) -> list[str]:
+        return [self.of] if self.of else []
+
+
+class FindStep(_Step):
+    """The periods (or categories) of a series whose value meets a condition against a number or a scalar step."""
+
+    op: Literal["find"] = "find"
+    of: str
+    cmp: Compare
+    value: float | None = None
+    ref: str | None = None
+    which: Literal["first", "last", "all"] = "first"
+
+    @model_validator(mode="after")
+    def _one_threshold(self) -> FindStep:
+        if (self.value is None) == (self.ref is None):
+            raise ValueError(f"find {self.id}: compare with value or with ref, exactly one")
+        return self
+
+    def inputs(self) -> list[str]:
+        return [self.of, *([self.ref] if self.ref else [])]
+
+
+class MapStep(_Step):
+    """The same sub-plan once per code of one category; body selects with the placeholder code '*' on that axis."""
+
+    op: Literal["map"] = "map"
+    axis: str
+    codes: list[str] = Field(min_length=2)
+    body: list[SelectStep | AggregateStep | CombineStep] = Field(min_length=1)
+    result: str  # the body step whose value is kept per code
+
+    @model_validator(mode="after")
+    def _result_in_body(self) -> MapStep:
+        ids = [s.id for s in self.body]
+        if self.result not in ids:
+            raise ValueError(f"map {self.id}: result {self.result!r} is not a body step")
+        starred = [s for s in self.body if isinstance(s, SelectStep) and (t := s.dims.get(self.axis)) and t.codes == ["*"]]
+        if not starred:
+            raise ValueError(f"map {self.id}: a body select must name the mapped axis {self.axis!r} as codes ['*']")
+        _check_order(self.body, f"map {self.id}")
+        return self
+
+
+Step = Annotated[SelectStep | AggregateStep | CombineStep | RankStep | FindStep | MapStep, Field(discriminator="op")]
+
+
+def _check_order(steps: list, where: str) -> dict[str, str]:
+    """Unique ids, every input defined earlier; returns step id -> shape."""
+    shapes: dict[str, str] = {}
+    for s in steps:
+        if s.id in shapes:
+            raise ValueError(f"{where}: step id {s.id!r} is used twice")
+        missing = [i for i in s.inputs() if i not in shapes]
+        if missing:
+            raise ValueError(f"{where}: step {s.id} uses {missing}, which are not earlier steps")
+        shapes[s.id] = _shape(s, shapes)
+    return shapes
+
+
+def _shape(step, shapes: dict[str, str]) -> str:
+    """What a step yields, checking what its inputs yield: cells (one or more), a scalar, a ranking, found
+    periods, or one value per mapped code."""
+    if isinstance(step, SelectStep):
+        return "cells"
+    if isinstance(step, AggregateStep):
+        if shapes[step.of] not in ("cells", "mapped"):
+            raise ValueError(f"aggregate {step.id}: needs cells or a map, got {shapes[step.of]}")
+        return "scalar"
+    if isinstance(step, CombineStep):
+        bad = [i for i in (step.a, step.b) if shapes[i] not in ("cells", "scalar")]
+        if bad:
+            raise ValueError(f"combine {step.id}: inputs must be cells or scalars, not {[shapes[i] for i in bad]}")
+        return "scalar"
+    if isinstance(step, FindStep):
+        if shapes[step.of] != "cells" or (step.ref and shapes[step.ref] not in ("cells", "scalar")):
+            raise ValueError(f"find {step.id}: needs cells to search and a scalar threshold")
+        return "found"
+    if isinstance(step, RankStep):
+        if step.of and shapes[step.of] != "mapped":
+            raise ValueError(f"rank {step.id}: of must be a map step, got {shapes[step.of]}")
+        return "ranking"
+    return "mapped"
+
+
+class PlanV3(Contract):
+    """What code computes for one question (v3). show lists the steps the answer cites, in order."""
+
+    plan_version: Literal["3"] = "3"
+    steps: list[Step] = Field(min_length=1)
+    show: list[str] = Field(min_length=1)
+    present: QuestionType | Literal["table"]
+    note: str | None = None  # what the answer should say about the choice (missing years, a default period)
+    based_on: str | None = None  # a follow-up question's earlier plan; not supported yet
+
+    @model_validator(mode="after")
+    def _wired(self) -> PlanV3:
+        shapes = _check_order(self.steps, "plan")
+        unknown = [i for i in self.show if i not in shapes]
+        if unknown:
+            raise ValueError(f"show names steps that do not exist: {unknown}")
+        if len(self.show) != len(set(self.show)):
+            raise ValueError("show lists a step twice")
+        if self.based_on is not None:
+            raise ValueError("based_on (follow-up questions) is not supported yet")
+        inner = [b.id for s in self.steps if isinstance(s, MapStep) for b in s.body]
+        clash = sorted(set(inner) & set(shapes) | {i for i in inner if inner.count(i) > 1})
+        if clash:
+            raise ValueError(f"map body step ids must differ from every other step id: {clash}")
+        if self.present == "extreme" and not any(shapes[i] == "ranking" for i in self.show):
+            raise ValueError("an extreme answer shows a rank step")
+        return self
+
+    def step(self, step_id: str):
+        return next(s for s in self.steps if s.id == step_id)
+
+
 class StatQuery(Contract):
     """Question analysis result (T1-06)."""
 
@@ -219,21 +494,15 @@ class StatQuery(Contract):
     reference: int | None = None  # compare: index in targets of the side named as the reference ("전국보다")
     over: dict[str, list[str]] = Field(default_factory=dict)  # extreme: category ranked over -> its labels
     pick: Literal["max", "min"] | None = None  # extreme: highest or lowest
-    # v2: the operation over periods, and the period groups it works on (table periods, in question order),
-    # e.g. pavg over [["2010", ..., "2014"], ["2015", ..., "2019"]]; periods holds every period of every group.
-    op: Op | None = None
-    period_groups: list[list[str]] = Field(default_factory=list)
+    plan: PlanV3 | None = None  # v3: the calculation as blocks (when code computed the answer)
 
-    @model_validator(mode="after")
-    def _groups_in_periods(self) -> StatQuery:
-        if self.period_groups and not self.op:
-            raise ValueError("period_groups need an op")
-        if any(not g for g in self.period_groups):
-            raise ValueError("a period group cannot be empty")
-        outside = [p for g in self.period_groups for p in g if p not in self.periods]
-        if outside:
-            raise ValueError(f"period_groups name periods that are not in periods: {outside}")
-        return self
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_v2_operation(cls, data: object) -> object:
+        """Records written before v3 carry v2's op / period_groups; the plan replaced them, so they are dropped."""
+        if isinstance(data, dict) and ("op" in data or "period_groups" in data):
+            return {k: v for k, v in data.items() if k not in ("op", "period_groups")}
+        return data
 
 
 class Fact(Contract):
