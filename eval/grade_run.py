@@ -4,7 +4,8 @@
 
 The report goes inside the run folder (<run>/grades/<stamp>-<stage>/, data values: not committed). Besides the
 eval.harness metrics it lists how each question was answered (rules, model fill, template, chatbot fallback) and how
-many 'unsupported text numbers' are only digits inside labels ('1인 가구'), which eval/grade.py counts as errors.
+many 'unsupported text numbers' are only digits inside labels ('1인 가구'), which eval/grade.py counts as errors,
+and a per-step table from the spans StatPipeline records (runs, failures, latency p50/p95, tokens; T1-22).
 """
 
 from __future__ import annotations
@@ -31,6 +32,28 @@ _NUMBER = re.compile(r"\d[\d,]*(?:\.\d+)?")
 
 def label_numbers(answer: StatAnswer) -> set[str]:
     return {n for f in answer.result.facts for label in (f.dims or {}).values() for n in _NUMBER.findall(label)}
+
+
+def _percentile(values: list[float], q: float) -> float:
+    ordered = sorted(values)
+    return ordered[min(len(ordered) - 1, round(q * (len(ordered) - 1)))]
+
+
+def stage_summary(rows: list[dict]) -> dict[str, dict]:
+    """Per span name: how often it ran, how often it failed, latency p50/p95 (ms) and tokens, in first-seen order."""
+    spans: dict[str, list[dict]] = {}
+    for row in rows:
+        for span in (row.get("decision_metadata") or {}).get("spans") or []:
+            spans.setdefault(span["name"], []).append(span)
+    summary = {}
+    for name, group in spans.items():
+        ms = [s["duration_ms"] for s in group]
+        tokens = [(s["attributes"].get("gen_ai.usage.input_tokens") or 0, s["attributes"].get("gen_ai.usage.output_tokens") or 0)
+                  for s in group]
+        summary[name] = {"runs": len(group), "errors": sum(s["status"] == "error" for s in group),
+                         "p50_ms": _percentile(ms, 0.5), "p95_ms": _percentile(ms, 0.95),
+                         "input_tokens": sum(t[0] for t in tokens), "output_tokens": sum(t[1] for t in tokens)}
+    return summary
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -78,6 +101,7 @@ def main(argv: list[str] | None = None) -> int:
         route = ((rows.get(g.question_id) or {}).get("decision_metadata") or {}).get("route", "-")
         by_route.setdefault(route, []).append(g)
     meta["slots_by_route"] = {r: slot_summary(gs)["all"] for r, gs in sorted(by_route.items())}
+    meta["stages"] = stage_summary(list(rows.values()))
     out = save_report(grades, meta, run / "grades")
     extra = [
         "", f"- 파이프라인: {meta['pipeline']} · 프롬프트: {meta['prompt_version']}",
@@ -86,6 +110,11 @@ def main(argv: list[str] | None = None) -> int:
         f"- 라벨 숫자만 때문에 FAIL인 문항: {len(label_only_fails)}개 {', '.join(label_only_fails)}",
         "- 슬롯 모두 맞음, 경로별: " + ", ".join(f"{r} {v['hits']}/{v['total']}" for r, v in meta["slots_by_route"].items() if v["total"]),
     ] + ([f"- 채점기 오류(집계 제외): {e}" for e in grader_errors] or [])
+    if meta["stages"]:
+        extra += ["", "단계별 span (실행 = span 수, 실패 = status error, 지연은 대기 제외)", "",
+                  "| 단계 | 실행 | 실패 | p50 ms | p95 ms | 입력 토큰 | 출력 토큰 |", "| --- | --- | --- | --- | --- | --- | --- |"]
+        extra += [f"| {n} | {v['runs']} | {v['errors']} | {v['p50_ms']} | {v['p95_ms']} | {v['input_tokens']} | {v['output_tokens']} |"
+                  for n, v in meta["stages"].items()]
     with (out / "report.md").open("a", encoding="utf-8") as f:
         f.write("\n".join(extra) + "\n")
     print((out / "report.md").read_text(encoding="utf-8"))
