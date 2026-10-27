@@ -34,6 +34,7 @@ from kosis_chat.judge.question import (
 )
 
 from kosis_ai.schemas import Outcome, Refusal  # isort: skip  (question.py puts src/ on the path)
+from kosis_chat.answer.render import item_label  # isort: skip  (after question.py: render needs kosis_ai)
 
 _UNIT_SUFFIX = re.compile(r"\s*\([^()]*\)\s*$")
 RECENT_POINTS = 5  # "최근 추이" with no number of years, as in scope.py
@@ -57,6 +58,12 @@ class Verdict:
     def refuse(cls, rule: str, reason: str, available: str | None = None, **fields: str) -> Verdict:
         message = messages.refusal_message(reason, **fields)
         return cls("refused", rule, Refusal(reason=reason, message=message, available=available), final=True)
+
+
+# T1-14: docs/question_types.md criteria the rules did not implement yet
+EVALUATIVE = re.compile(r"(높|많|낮|적)은\s*편")  # "높은 편이야?": no comparison basis -> clarify
+AVERAGE_WORDS = re.compile(r"평균")
+OPEN_END = "9999"  # range end of "A년 이후"
 
 
 # ---------------------------------------------------------------- resolving labels to codes
@@ -173,9 +180,12 @@ def _out_of_scope(p: Parsed, **_) -> Verdict | None:
 def _no_period(p: Parsed, index: TableIndex, **_) -> Verdict | None:
     missing = [s for s in p.periods.singles if not index.period_ok(s)]
     missing += [a for a, b in p.periods.ranges if not any(a <= y[:4] <= b for y in index.periods)]
+    years = sorted({y[:4] for y in index.periods})
+    if not missing and (AVERAGE_WORDS.search(p.question) or SUM_WORDS.search(p.rest)):
+        # an average or sum over A~B needs every year: a missing end is not replaced by the years that exist (T1-14)
+        missing = [end for a, b in p.periods.ranges if b != OPEN_END for end in (a, b) if end not in years]
     if not missing:
         return None
-    years = sorted({y[:4] for y in index.periods})
     asked = ", ".join(_period_text(s) for s in missing)
     return Verdict.refuse("no_period", "no_period", available=f"이 표의 시점: {years[0]}~{years[-1]}년", asked=asked)
 
@@ -188,7 +198,7 @@ def _same_name(p: Parsed, resolved: Resolved, **_) -> Verdict | None:
     if not resolved.ambiguous:
         return None
     label, options = resolved.ambiguous[0]
-    question = messages.CLARIFY_LABEL.format(label=label)
+    question = messages.with_josa(messages.CLARIFY_LABEL.format(label=label))
     return Verdict("clarify", "same_name", clarify_question=question, clarify_options=tuple(options), final=True)
 
 
@@ -210,6 +220,14 @@ def _vague_item(p: Parsed, index: TableIndex, resolved: Resolved, **_) -> Verdic
             return Verdict("clarify", "vague_item", clarify_question=messages.CLARIFY_ITEM, clarify_options=options,
                            final=True)
     return None
+
+
+def _evaluative(p: Parsed, **_) -> Verdict | None:
+    """'1990년생 누적 혼인 비율은 높은 편이야?': '편' needs a basis the question does not give (T1-14)."""
+    if not (m := EVALUATIVE.search(p.question)):
+        return None
+    question = messages.CLARIFY_COMPARE.format(word=m.group(0).replace(" ", "")[:-1].strip())
+    return Verdict("clarify", "evaluative", clarify_question=question, clarify_options=messages.COMPARE_OPTIONS, final=True)
 
 
 def _unit_mismatch(p: Parsed, index: TableIndex, resolved: Resolved, **_) -> Verdict | None:
@@ -257,6 +275,13 @@ def _not_aggregatable(p: Parsed, index: TableIndex, resolved: Resolved, **_) -> 
     if kinds and all(_kind_class(k) == "rate" for k in kinds):
         what = "·".join(_show(label) for label in named) or "이 표의 값"
         return Verdict.refuse("not_aggregatable", "not_aggregatable", what=what)
+    # a stock (households, population) counted again each year: summing years double counts (T1-14)
+    years = [(a, b) for a, b in p.periods.ranges if b != OPEN_END and a < b]
+    if years and kinds == {"count_stock"}:
+        items = [index.axes[ITEM_AXIS].labels[c] for c in resolved.codes.get(ITEM_AXIS, ())] if ITEM_AXIS in index.axes else []
+        what = "·".join(f"'{item_label(label)}'" for label in items) or "·".join(_show(label) for label in named) or "이 표의 값"
+        message = messages.with_josa(messages.STOCK_OVER_TIME.format(what=what))
+        return Verdict("refused", "not_aggregatable", Refusal(reason="not_aggregatable", message=message), final=True)
     return None
 
 
@@ -283,7 +308,8 @@ def _symbol(p: Parsed, index: TableIndex, resolved: Resolved, cells: list[Cell],
 
 # Order matters: the first rule that fires decides (a period that is not there beats a label that is shared).
 RULES = (
-    _causal, _out_of_scope, _no_period, _same_name, _vague_item, _unit_mismatch, _not_aggregatable, _no_cell, _symbol,
+    _causal, _out_of_scope, _no_period, _same_name, _vague_item, _evaluative, _unit_mismatch, _not_aggregatable, _no_cell,
+    _symbol,
 )  # fmt: skip
 
 
