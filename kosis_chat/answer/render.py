@@ -46,9 +46,24 @@ def direction(fact: Fact) -> str:
     return "증가" if fact.value > 0 else "감소"
 
 
+_HOUSEHOLD = re.compile(r"\d+인(?: 이상)?")
+
+
 def item_label(label: str) -> str:
-    """'1인 (가구)' -> '1인'; the unit is written with the number."""
-    return _UNIT_SUFFIX.sub("", label).strip() or label.strip()
+    """'1인 (가구)' -> '1인 가구', '출생건수 (명)' -> '출생건수', '일반가구_계' -> '일반가구 전체' (T1-14)."""
+    core = _UNIT_SUFFIX.sub("", label).strip() or label.strip()
+    if core.endswith("_계"):
+        return core[:-2] + " 전체"
+    if _HOUSEHOLD.fullmatch(core) and "(가구)" in label:
+        return f"{core} 가구"
+    return core
+
+
+def period_text(period: str) -> str:
+    """'202412' -> '2024년 12월', '2024' -> '2024년': a month code is never shown as a year (T1-14)."""
+    if len(period) == 6 and period.isdigit():
+        return f"{period[:4]}년 {int(period[4:])}월"
+    return f"{period}년"
 
 
 def fact_label(fact: Fact, skip_totals: bool = True) -> str:
@@ -74,24 +89,7 @@ def render_parts(parts: list, result: StatResult) -> str:
     return "".join(out).strip()
 
 
-# Final consonant of the sound a word ends with: digits and unit symbols as they are read (3 = 삼, % = 퍼센트).
-_READ_LAST = {"0": "영", "1": "일", "2": "이", "3": "삼", "4": "사", "5": "오", "6": "육", "7": "칠", "8": "팔", "9": "구",
-              "%": "트", "p": "트", "㎢": "터"}
-_PAIRS = {"이": ("이", "가"), "은": ("은", "는"), "을": ("을", "를"), "과": ("과", "와"), "으로": ("으로", "로")}
-
-
-def josa(word: str, particle: str) -> str:
-    """word + the particle form its last sound takes: josa('서울특별시', '이') -> '서울특별시가'."""
-    with_final, without = _PAIRS[particle]
-    last = next((ch for ch in reversed(word.strip()) if not ch.isspace() and ch not in ")'\""), "")
-    last = _READ_LAST.get(last, last)
-    code = ord(last) - 0xAC00 if last else -1
-    if not 0 <= code < 11172:
-        return word + without
-    final = code % 28
-    if particle == "으로" and final == 8:  # ㄹ: 서울로
-        return word + without
-    return word + (with_final if final else without)
+josa = messages.josa  # moved to messages so refusal sentences can use it without an import cycle
 
 
 def default_sentence(applied: dict[str, str]) -> str:

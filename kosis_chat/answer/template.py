@@ -5,7 +5,7 @@ Each template cites the facts the calculation marked as main, so a template answ
 
 from __future__ import annotations
 
-from kosis_chat.answer.render import direction, fact_label, format_fact, item_label, josa
+from kosis_chat.answer.render import direction, fact_label, format_fact, item_label, josa, period_text
 from kosis_chat.compute import Computed
 
 from kosis_ai.schemas import Fact, FactPart, QuestionType, TextPart  # isort: skip
@@ -26,7 +26,7 @@ def _after(fact: Fact, particle: str) -> TextPart:
 
 
 def _year(fact: Fact) -> str:
-    return f"{fact.period}년 " if fact.period else ""
+    return f"{period_text(fact.period)} " if fact.period else ""
 
 
 def _side(a: Fact, b: Fact) -> str:
@@ -34,7 +34,7 @@ def _side(a: Fact, b: Fact) -> str:
     for name, label in (a.dims or {}).items():
         if (b.dims or {}).get(name) != label:
             return item_label(label)
-    return f"{a.period}년"
+    return period_text(a.period)
 
 
 def _common(a: Fact, b: Fact) -> str:
@@ -54,7 +54,7 @@ def _value(facts: list[Fact], computed: Computed) -> list:
 
 def _trend(facts: list[Fact], computed: Computed) -> list:
     first, last, diff, *growth = facts
-    parts = [_t(f"{_subject(fact_label(first))}{first.period}년 "), _f(first), _t("에서 "), _t(f"{last.period}년 "),
+    parts = [_t(f"{_subject(fact_label(first))}{period_text(first.period)} "), _f(first), _t("에서 "), _t(f"{period_text(last.period)} "),
              _f(last), _after(last, "으로"), _t(" ")]
     way = direction(diff)
     if way == "같음":
@@ -107,7 +107,7 @@ def _extreme(facts: list[Fact], computed: Computed) -> list:
     w, r = cell_of(winner), cell_of(runner) if runner else None
     word = "가장 높습니다" if "높음" in (winner.note or "") else "가장 낮습니다"
     name = _side(w, r) if r else fact_label(w)
-    lead = f"{'' if name.endswith('년') else _year(w)}{_common(w, r) if r else ''}".strip()
+    lead = f"{'' if name.endswith(('년', '월')) else _year(w)}{_common(w, r) if r else ''}".strip()
     what = "비중은" if winner.derivation else "값은"
     parts = [_t(f"{lead} {what} " if lead else ""), _t(f"{josa(name, '이')} "), _f(winner), _after(winner, "으로"),
              _t(f" {word}.")]
