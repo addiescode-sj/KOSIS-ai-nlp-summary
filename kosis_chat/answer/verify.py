@@ -26,7 +26,7 @@ def allowed_numbers(computed: Computed) -> tuple[set[str], set[str]]:
     labels: set[str] = set()
     for f in computed.result.facts:
         if f.period:
-            periods |= {f.period, f.period[:4]}
+            periods |= {f.period, f.period[:4]} | ({str(int(f.period[4:]))} if len(f.period) == 6 else set())
         for label in (f.dims or {}).values():
             labels |= set(NUMBER.findall(label))
     return periods, labels
