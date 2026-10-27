@@ -241,3 +241,24 @@ python -m eval.compare_runs --raw_path eval/results/<raw_run> --pipe_path eval/r
 - `view_raw`: 문항마다 질문, 모델 답 원문, 시간·토큰, 모델에 보낸 입력(표 + 질문, 접힘)을 보여 준다. 그래프·채점 없음, 인터넷 불필요.
 - `compare_runs`: 먼저 두 실행의 `golden.jsonl` 질문(id와 질문 글)이 같은지 확인하고, 다르면 차이를 출력하고 멈춘다(종료 코드 2). 같으면 문항마다 왼쪽에 AI 답(raw), 오른쪽에 파이프라인 답(`stat_answer.text`, 텍스트 챗봇이면 `raw_answer`)과 결과(answered/refused/clarify), 경로, 사실 목록(접힘)을 놓는다. 중간에 멈춘 실행의 빠진 문항은 "실행 안 됨"으로 표시한다.
 - `grade_run`은 raw 실행을 채점하지 않고 종료 코드 2로 끝난다. `view_run`도 쓸 수 있지만 판정은 모두 `-`이다.
+
+## 자연어 품질 자동 평가 (T1-26)
+
+답변 문장이 읽기 쉬운지를 0~2점으로 매긴다. 숫자가 맞는지는 7장의 채점기가 보므로 여기서는 문장만 본다.
+
+```
+run_eval → grade_run → judge (선택) → view_run → regress
+```
+
+```bash
+uv run python -m eval.judge --run eval/results/<run_id>                                   # HCX-007, 호출 간격 5초
+uv run python -m eval.judge --run eval/results/<run_id> --labels eval/quality_labels.jsonl  # 보정 라벨 검출률까지
+```
+
+- **코드 표기 검사**(결정적, LLM 없음): 단위 중복(`844명/㎢ 명/㎢`), 연월 코드 노출(`202412년`), 숫자+단위 뒤 조사 불일치(`가구과`, 단위 끝 글자의 받침으로 판정), 내부 라벨(`일반가구_계`), 미완성 조사 템플릿(`와(과)`·`은(는)`). 출처 줄은 검사하지 않는다.
+- **LLM judge**(HCX-007, temperature 0): 코드가 못 보는 의미 문제만 본다. 태그는 `ignored_part`(질문 일부 무시), `unsupported_judgement`(표에 없는 평가), `missing_detail`(요구 정보 누락), `awkward_label`(라벨을 그대로 옮긴 어색한 표현), `unclear_refusal`, `other`.
+- 점수: 답한 문항은 2 = 바로 답하고 읽기 쉬움, 1 = 어색하거나 설명 부족, 0 = 질문 일부를 건너뛰었거나 오해를 부름. 거절·되묻기 문항은 사유와 확인 가능한 범위를 분명히 말하면 2점이다. 코드 표기 검사에 걸리면 최대 1점이다.
+- judge 호출이 실패한 문항은 점수 없음으로 두고 평균에서 뺀다. 같은 (루브릭 버전, judge 모델, 질문, 답변)은 `data/cache/judge.jsonl`에 캐시해 다시 부르지 않는다.
+- judge 점수는 비결정적이라 회귀 게이트에 넣지 않는다. 주 용도는 **파이프라인 전→후 비교**다. 답변 모델과 judge 모델이 같으면 리포트에 자기 선호 경고를 적는다(예: AI 단독 답을 HCX-007로 만든 경우).
+- 결과: `<run>/quality.md`, `quality.json`, `quality.jsonl`(문항별 점수·태그·표기 문제·이유).
+- `eval/quality_labels.jsonl`: 보정 라벨. `source: human`은 사람이 판정한 사례(10/26 Notion), `candidate`는 Claude가 찾은 표기 후보로 사람 확인 전이다. 리포트는 둘을 나눠 검출률을 적는다. T1-21 사람 점수가 나오면 judge 점수와 일치도를 잰다.
