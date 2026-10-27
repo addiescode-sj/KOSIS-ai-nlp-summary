@@ -98,6 +98,7 @@ def aggregate(results: list[dict]) -> dict:
         "unsupported_claims": errors.get("unsupported_claim", 0),
         "run_failures": sum(1 for r in results if r.get("call_status") != "ok"),
         "error_types": dict(sorted(errors.items())),
+        "quality": quality_summary(results),
         "runs": len(run_indexes),
         "overall_pass_rate_per_run": {
             "mean": statistics.fmean(per_run) if per_run else None,
@@ -105,6 +106,45 @@ def aggregate(results: list[dict]) -> dict:
             "max": max(per_run) if per_run else None,
         },
     }
+
+
+def quality_summary(results: list[dict]) -> dict:
+    """Human natural-language quality (T1-21): mean over confirmed rows that have a score, with n/N stated."""
+    confirmed = [r for r in results if r.get("review_status") == "confirmed"]
+    scored = [r for r in confirmed if r.get("quality_score") is not None]
+    return {
+        "scored": len(scored), "confirmed": len(confirmed),
+        "mean": round(statistics.fmean(r["quality_score"] for r in scored), 2) if scored else None,
+        "zero": [r["question_id"] for r in scored if r["quality_score"] == 0],
+    }
+
+
+def quality_agreement(results: list[dict], judged: list[dict]) -> dict:
+    """Human vs judge quality, joined on (question_id, run_index): agreement, 3x3 confusion, per group, linear-weighted kappa.
+
+    The judge score is the reported one (capped at 1 by format checks). Refusals and clarifications are a separate
+    group because they use a separate rubric.
+    """
+    judge = {(j["question_id"], j.get("run_index", 0)): j["score"] for j in judged if j.get("score") is not None}
+    pairs = [(r["quality_score"], judge[k], r.get("kind"))
+             for r in results if r.get("quality_score") is not None
+             and (k := (r["question_id"], r.get("run_index", 0))) in judge]
+
+    def stats(ps: list[tuple]) -> dict:
+        n = len(ps)
+        if not n:
+            return {"n": 0}
+        confusion = [[sum(1 for h, j, _ in ps if h == a and j == b) for b in range(3)] for a in range(3)]
+        observed = sum(1 - abs(h - j) / 2 for h, j, _ in ps) / n
+        rows, cols = [sum(confusion[a]) / n for a in range(3)], [sum(confusion[a][b] for a in range(3)) / n for b in range(3)]
+        expected = sum(rows[a] * cols[b] * (1 - abs(a - b) / 2) for a in range(3) for b in range(3))
+        kappa = None if expected == 1 else round((observed - expected) / (1 - expected), 2)
+        return {"n": n, "agreement": round(sum(1 for h, j, _ in ps if h == j) / n, 2), "weighted_kappa": kappa,
+                "confusion_human_by_judge": confusion}
+
+    refusal = {KIND_NOT_ANSWERABLE, KIND_CLARIFY}
+    return {"all": stats(pairs), "answered": stats([p for p in pairs if p[2] not in refusal]),
+            "refused_or_clarify": stats([p for p in pairs if p[2] in refusal])}
 
 
 HISTORY_HEADER = (
@@ -152,6 +192,8 @@ def main(argv: list[str] | None = None) -> int:
     results = read_jsonl(run_dir / "results.jsonl")
     manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
     summary = aggregate(results)
+    if (run_dir / "quality.jsonl").exists():  # T1-26 judge output: compare with the blind human scores
+        summary["quality_agreement"] = quality_agreement(results, read_jsonl(run_dir / "quality.jsonl"))
     (run_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     if summary["provisional"]:

@@ -117,6 +117,8 @@ python -m eval.review export --run eval\results\<실행 폴더>
 2. 행마다 `expected`(정답 fact)와 `raw_answer`를 비교한다.
 3. 틀린 점이 있으면 `error_types`에 적는다(여러 개는 `;`로 구분). 맞으면 비워 둔다.
 4. `reviewer`에 이름을 쓴다. 이름이 없는 행은 미판정으로 남는다.
+   - `quality_score`에 자연어 품질 0~2점을 적는다(답한 문항: 2 = 질문에 바로 답하고 읽기 쉬움, 1 = 어색하거나 설명 부족, 0 = 질문 일부를 건너뛰었거나 오해를 부름. 거절·되묻기 문항: 사유와 확인 가능한 범위를 분명히 말하면 2점). 비워 두면 정오 판정만 확정되고, 다음 `export` 때 그 행이 품질 칸만 비운 채 다시 나온다.
+   - judge 점수는 시트에 보여 주지 않는다(블라인드). 사람 점수가 judge 점수에 끌리지 않아야 둘의 일치도가 의미가 있다.
 5. `final_verdict`는 비워 두면 규칙으로 정해진다.
 
 ```bat
@@ -141,6 +143,7 @@ python -m eval.scorer --run eval\results\<실행 폴더>
 ```
 
 - PASS / PARTIAL / FAIL 수와 오류 유형별 건수를 출력하고 `summary.json`으로 저장한다.
+- 자연어 품질(`quality`): 품질 점수가 있는 확정 행의 평균(채점 n / 확정 N)과 0점 문항. 실행 폴더에 `quality.jsonl`(judge 결과)이 있으면 `(question_id, run_index)`로 맞춰 사람-judge 일치율, 3×3 혼동표, 답한 문항 / 거절·되묻기별 일치율, 가중 κ를 `quality_agreement`에 함께 낸다. eval-history 표의 칸은 바꾸지 않았다.
 - 미판정 행이 남아 있으면 `[잠정]`으로 표시된다.
 - 기준 점수로 남길 실행만 `--append-history --change "<바꾼 것>"`을 붙여 `docs/reports/eval-history.md`에 한 줄 추가한다. mock 실행은 기록되지 않는다.
 
