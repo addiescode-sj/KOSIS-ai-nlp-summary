@@ -8,10 +8,14 @@ import pytest
 from pydantic import ValidationError
 
 from kosis_ai.schemas import (
+    CHART_KINDS,
+    OPS,
     QUESTION_KINDS,
     QUESTION_TYPES,
     REFUSAL_REASONS,
     Cell,
+    Chart,
+    Dim,
     Fact,
     FactPart,
     Refusal,
@@ -204,5 +208,147 @@ def test_citation_format():
     ],
 )
 def test_contract_violation_is_rejected(build):
+    with pytest.raises(ValidationError):
+        build()
+
+
+# ---------------------------------------------------------------- T0-03 v2: stricter contract
+
+
+ANSWERED = dict(outcome="answered", result=StatResult(facts=[CELL]), parts=[FactPart(fact_id="f1")], source=SOURCE)
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        pytest.param(lambda: Source(org_id="101", tbl_id="T", survey_nm="s", tbl_nm="t", extra=1), id="Source"),
+        pytest.param(lambda: Fact(id="f1", value=1.0, source_ref="T|T1|1|2025", label="x"), id="Fact"),
+        pytest.param(lambda: StatQuery(question="q", slot="x"), id="StatQuery"),
+        pytest.param(lambda: StatResult(facts=[], warnings=[]), id="StatResult"),
+        pytest.param(lambda: FactPart(fact_id="f1", text="x"), id="FactPart"),
+        pytest.param(lambda: TextPart(text="x", fact_id="f1"), id="TextPart"),
+        pytest.param(lambda: StatAnswer(**ANSWERED, chart_kind="bar"), id="StatAnswer"),
+    ],
+)
+def test_unknown_field_is_rejected_on_every_model(build):
+    with pytest.raises(ValidationError, match="[Ee]xtra"):
+        build()
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        pytest.param(lambda: Fact(id="1f", value=1.0, source_ref="T|T1|1|2025"), id="id is not an identifier"),
+        pytest.param(lambda: Fact(id="for", value=1.0, source_ref="T|T1|1|2025"), id="id is a keyword"),
+        pytest.param(lambda: Fact(id="f1", value=float("nan"), source_ref="T|T1|1|2025"), id="value is nan"),
+        pytest.param(lambda: Fact(id="f1", value=float("inf"), source_ref="T|T1|1|2025"), id="value is inf"),
+        pytest.param(lambda: Fact(id="f1", value=True, source_ref="T|T1|1|2025"), id="value is a bool"),
+        pytest.param(lambda: Fact(id="f1", raw="-", value=0.0, source_ref="T|T1|1|2025"), id="symbol fact with a number"),
+        pytest.param(lambda: Fact(id="f1", value=1.0, unit=" ", source_ref="T|T1|1|2025"), id="blank unit"),
+        pytest.param(lambda: Fact(id="f1", value=1.0, source_ref="T|2025"), id="source_ref with two parts"),
+        pytest.param(lambda: Fact(id="f1", value=1.0, source_ref="|T1|1|2025"), id="source_ref without table"),
+        pytest.param(lambda: Fact(id="f1", value=1.0, source_ref="T|T1|1|"), id="source_ref without period"),
+        pytest.param(lambda: Fact(id="f2", value=1.0, derivation="f2 * 2", round=0), id="derivation references itself"),
+        pytest.param(lambda: Fact(id="f2", value=1.0, derivation="2 * 3", round=0), id="derivation without a fact"),
+        pytest.param(lambda: Fact(id="f2", value=1.0, derivation="abs(f1)", round=0), id="derivation calls a function"),
+        pytest.param(lambda: Fact(id="f2", value=1.0, derivation="f1 ** 2", round=0), id="derivation uses power"),
+        pytest.param(lambda: Fact(id="f2", value=1.0, derivation="f1 -", round=0), id="derivation is not an expression"),
+        pytest.param(lambda: Fact(id="f2", value=1.0, derivation="f1 / 2", round=11), id="round above the limit"),
+        pytest.param(lambda: TextPart(text=""), id="empty text part"),
+        pytest.param(lambda: StatAnswer(outcome="answered", result=StatResult(facts=[CELL]), source=SOURCE), id="answered without parts"),
+        pytest.param(
+            lambda: StatAnswer(outcome="refused", refusal=Refusal(reason="causal", message="x"), parts=[FactPart(fact_id="f1")],
+                               result=StatResult(facts=[CELL]), source=SOURCE),
+            id="refusal with a fact part",
+        ),
+        pytest.param(lambda: StatAnswer(**ANSWERED, default_applied={"": "2024"}), id="default with a blank key"),
+        pytest.param(lambda: StatAnswer(**ANSWERED, default_applied={"period": " "}), id="default with a blank value"),
+        pytest.param(lambda: StatAnswer(**ANSWERED, numbers_origin="model"), id="model origin with a cited fact"),
+        pytest.param(lambda: StatAnswer(**ANSWERED, numbers_origin="none"), id="none origin with a cited fact"),
+        pytest.param(
+            lambda: StatAnswer(outcome="answered", parts=[TextPart(text="x")], source=SOURCE, numbers_origin="code"),
+            id="code origin without a cited fact",
+        ),
+        pytest.param(
+            lambda: StatAnswer(outcome="refused", refusal=Refusal(reason="causal", message="x"), source=SOURCE, numbers_origin="code"),
+            id="code origin on a refusal",
+        ),
+        pytest.param(lambda: StatAnswer(**ANSWERED, numbers_origin="model", numbers_verified=True), id="verified model numbers"),
+        pytest.param(lambda: StatAnswer(**ANSWERED, numbers_origin=None, numbers_verified=True), id="verified legacy numbers"),
+        pytest.param(lambda: StatAnswer(**ANSWERED, numbers_origin=None, defaults_verified=True), id="verified legacy defaults"),
+        pytest.param(lambda: StatAnswer(**ANSWERED, numbers_origin="weird"), id="unknown origin"),
+    ],
+)
+def test_v2_contract_violation_is_rejected(build):
+    with pytest.raises(ValidationError):
+        build()
+
+
+def test_v2_valid_shapes():
+    derived = Fact(id="f2", value=2.0, derivation="f1 * 2", round=0)
+    code = StatAnswer(outcome="answered", result=StatResult(facts=[CELL, derived]), parts=[FactPart(fact_id="f2")], source=SOURCE,
+                      numbers_origin="code", numbers_verified=True, defaults_verified=True, default_applied={"period": "2025"})
+    assert code.numbers_origin == "code" and code.result.facts[1].derivation == "f1 * 2"
+    model = StatAnswer(outcome="answered", parts=[TextPart(text="x")], source=SOURCE, numbers_origin="model")
+    assert model.numbers_verified is False
+    none = StatAnswer(outcome="refused", refusal=Refusal(reason="causal", message="x"), source=SOURCE, numbers_origin="none")
+    assert none.parts == []
+    assert Fact(id="a1", value=1.0, source_ref="DT_1B8000H|T10|2025").source_ref.count("|") == 2  # three parts: the minimum
+
+
+def test_record_written_before_v2_still_loads():
+    legacy = {"outcome": "answered", "query": {"question": "q"}, "result": {"facts": [CELL.model_dump(mode="json")]},
+              "parts": [{"kind": "fact", "fact_id": "f1"}], "text": "x", "source": SOURCE.model_dump()}
+    answer = StatAnswer.model_validate(legacy)
+    assert answer.numbers_origin is None and answer.numbers_verified is False and answer.defaults_verified is False
+    assert answer.parts == [FactPart(fact_id="f1")] and answer.result.facts == [CELL] and answer.text == "x"
+
+
+def test_cell_from_row_ignores_columns_outside_the_contract():
+    row = {"org_id": "101", "tbl_id": "T", "source": "api", "prd_se": "Y", "period": "2025", "item_id": "T1", "item_name": "i",
+           "unit": "명", "value_raw": "12", "value": 12.0, "value_kind": "ok", "dim1_name": "성별", "dim1_code": "1",
+           "dim1_label": "남자", "dim2_code": None, "build_note": "added by the Parquet build"}  # fmt: skip
+    cell = Cell.from_row(row)
+    assert cell.dims == [Dim(name="성별", code="1", label="남자")] and cell.value == 12.0
+    with pytest.raises(ValidationError, match="[Ee]xtra"):
+        Cell(**{k: v for k, v in row.items() if not k.startswith("dim")})
+
+
+# ---------------------------------------------------------------- T0-03 v2: ops and charts in the contract
+
+
+SPEC = {"$schema": "https://vega.github.io/schema/vega-lite/v5.json", "data": {"values": [{"이름": "2025", "값": 1}]}, "mark": "bar"}
+
+
+def test_chart_and_op_valid_shapes():
+    chart = Chart(kind="bar", spec=SPEC, fact_ids=["f1"])
+    answer = StatAnswer(**ANSWERED, numbers_origin="code", chart=chart)
+    assert answer.chart.kind == "bar" and StatAnswer.model_validate_json(answer.model_dump_json()) == answer
+    query = StatQuery(question="q", type="trend", op="pavg", periods=["2010", "2011", "2015", "2016"],
+                      period_groups=[["2010", "2011"], ["2015", "2016"]])
+    assert query.op == "pavg" and OPS == ("avg", "sum", "pavg", "psum", "vsa", "shr") and "timeline" in CHART_KINDS
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        pytest.param(lambda: Chart(kind="scatter", spec=SPEC, fact_ids=["f1"]), id="unknown chart kind"),
+        pytest.param(lambda: Chart(kind="bar", spec={"mark": "bar"}, fact_ids=["f1"]), id="chart without inline data"),
+        pytest.param(lambda: Chart(kind="bar", spec=SPEC, fact_ids=[]), id="chart without facts"),
+        pytest.param(lambda: Chart(kind="bar", spec=SPEC, fact_ids=["f1", "f1"]), id="chart with a repeated fact"),
+        pytest.param(lambda: Chart(kind="bar", spec=SPEC, fact_ids=["f1"], title="x"), id="chart with an unknown field"),
+        pytest.param(lambda: StatAnswer(**ANSWERED, numbers_origin="code", chart=Chart(kind="bar", spec=SPEC, fact_ids=["f9"])),
+                     id="chart over an unknown fact"),
+        pytest.param(lambda: StatAnswer(**ANSWERED, chart=Chart(kind="bar", spec=SPEC, fact_ids=["f1"])), id="chart without code numbers"),
+        pytest.param(lambda: StatAnswer(outcome="refused", refusal=Refusal(reason="causal", message="x"), source=SOURCE,
+                                        numbers_origin="none", chart=Chart(kind="bar", spec=SPEC, fact_ids=["f1"])),
+                     id="chart on a refusal"),
+        pytest.param(lambda: StatQuery(question="q", op="mean"), id="unknown op"),
+        pytest.param(lambda: StatQuery(question="q", periods=["2010"], period_groups=[["2010"]]), id="period groups without op"),
+        pytest.param(lambda: StatQuery(question="q", op="avg", periods=["2010"], period_groups=[["2010", "2011"]]), id="group outside periods"),
+        pytest.param(lambda: StatQuery(question="q", op="avg", periods=["2010"], period_groups=[[]]), id="empty period group"),
+    ],
+)
+def test_op_and_chart_violations_are_rejected(build):
     with pytest.raises(ValidationError):
         build()

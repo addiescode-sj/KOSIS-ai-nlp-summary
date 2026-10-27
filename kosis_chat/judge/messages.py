@@ -31,9 +31,12 @@ def refusal_message(reason: str, **fields: str) -> str:
 _DEFAULT_KEYS = {"period": "시점"}
 _LATEST = re.compile(r"latest \((.+)\)")
 _RECENT = re.compile(r"recent (\d+) points \((.+)\)")
+_PREVIOUS = re.compile(r"latest \((.+)\) vs previous \((.+)\)")
 
 
 def _default_text(value: str) -> str:
+    if match := _PREVIOUS.fullmatch(value):
+        return f"가장 최근 시점 {match.group(1)}과 그 직전 시점 {match.group(2)}"
     if match := _LATEST.fullmatch(value):
         return f"가장 최근 시점 {match.group(1)}"
     if match := _RECENT.fullmatch(value):

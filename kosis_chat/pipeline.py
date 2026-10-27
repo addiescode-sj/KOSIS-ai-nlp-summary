@@ -34,6 +34,14 @@ VERSION = compose.VERSION
 FALLBACK_PROMPT = "compact-v2"
 
 
+def add_usage(total: dict[str, Any], usage: dict[str, Any]) -> dict[str, Any]:
+    """Add the API's numeric token counts of one call into a running total (in place; returned for convenience)."""
+    for key, value in usage.items():
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            total[key] = total.get(key, 0) + value
+    return total
+
+
 @dataclass
 class _Calls:
     """Model calls made for one question, summed the way Answer reports them."""
@@ -47,9 +55,7 @@ class _Calls:
 
     def add(self, result: StructuredResult, system: str, user: str) -> None:
         self.attempts += result.attempts
-        for key, value in result.usage.items():
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
-                self.usage[key] = self.usage.get(key, 0) + value
+        add_usage(self.usage, result.usage)
         self.raw += result.raw
         self.errors += result.errors
         self.waited += result.retry_wait_seconds
@@ -120,25 +126,47 @@ class StatPipeline:
             return plan, build_request(plan, self.index, self.table)
         except Unresolved as exc:
             meta["unresolved"] = exc.what
-        user = analyze_fill.user_prompt(plan.question, self.index, replace(plan, unresolved=plan.unresolved or meta["unresolved"]))
-        result = self._ask_model(calls, analyze_fill.SYSTEM_PROMPT, user, analyze_fill.AnalyzeFill)
+        plan = replace(plan, unresolved=plan.unresolved or meta["unresolved"])
+        user = analyze_fill.user_prompt(plan.question, self.index, plan)
         meta["route"] = "llm_fill"
-        if result.status != STATUS_OK:
-            meta["fill_status"] = result.status
+        filled, problems, kind = self._fill(plan, user, calls, meta, "fill")
+        if filled is None:
             return plan, None
-        filled, ignored = analyze_fill.apply(plan, result.value, self.index)
-        meta["fill"] = result.value.model_dump(exclude_defaults=True) | ({"ignored": ignored} if ignored else {})
+        if (built := self._build(filled, kind, meta)) is not None:
+            return built
+        if problems:  # the model's answer had a correctable fault: say it back once (analyze-fill-v2)
+            again, _, kind = self._fill(plan, analyze_fill.retry_prompt(user, problems), calls, meta, "fill_retry")
+            if again is not None:
+                if (built := self._build(again, kind, meta)) is not None:
+                    return built
+                filled = again
+        return filled, None
+
+    def _fill(self, plan: Plan, user: str, calls: _Calls, meta: dict, key: str):
+        """(plan filled by the model, problems to say back, the type the model named), or (None, [], None)."""
+        result = self._ask_model(calls, analyze_fill.SYSTEM_PROMPT, user, analyze_fill.AnalyzeFill)
+        if result.status != STATUS_OK:
+            meta[f"{key}_status"] = result.status
+            return None, [], None
+        filled, ignored, problems = analyze_fill.apply(plan, result.value, self.index)
+        meta[key] = result.value.model_dump(exclude_defaults=True) | ({"ignored": ignored} if ignored else {})
+        return filled, problems, result.value.type
+
+    def _build(self, filled: Plan, kind, meta: dict):
         tries = [filled]
-        if result.value.type and result.value.type != filled.type:
-            tries.append(replace(filled, type=result.value.type))
+        if kind and kind != filled.type and not filled.op:  # an operation fixes its own type (value/trend/share)
+            tries.append(replace(filled, type=kind))
         for candidate in tries:
             try:
                 return candidate, build_request(candidate, self.index, self.table)
             except Unresolved as exc:
                 meta["unresolved_after_fill"] = exc.what
-        return filled, None
+        return None
 
-    def _compose(self, question: str, computed, note: str | None, calls: _Calls, meta: dict) -> list:
+    def _compose(self, question: str, computed, note: str | None, calls: _Calls, meta: dict) -> tuple[list, bool]:
+        """(parts, verified): the model's sentence once it passes verification, else a code template.
+
+        verified is what StatAnswer.numbers_verified records: the parts the answer shows passed verify()."""
         user = compose.user_prompt(question, computed, note)
         problems: list[str] = []
         for attempt in range(2):
@@ -153,9 +181,13 @@ class StatPipeline:
             meta.setdefault("verify_problems", []).append(problems)
             if not problems:
                 meta["compose"] = "model" if attempt == 0 else "model_retry"
-                return parts
+                return parts, True
         meta["compose"] = "template"
-        return template_parts(meta["type"], computed)
+        parts = template_parts(meta["type"], computed)
+        problems = verify(parts, computed)  # a template cites every main fact by construction; recorded, not assumed
+        if problems:
+            meta["template_problems"] = problems
+        return parts, not problems
 
     # ------------------------------------------------------------ entry point
 
@@ -170,11 +202,16 @@ class StatPipeline:
         plan, request = self._request(plan, calls, meta)
         if request is None:  # neither the rules nor the model placed the question: the compact-v2 chatbot answers
             answer = self.fallback.ask(question, golden_scope)
+            # The chatbot's own record wins (its model wrote the numbers; its outcome_origin says whether a rule or
+            # the model decided); the analysis calls made before it are added, not lost.
             return replace(
                 answer, attempts=answer.attempts + calls.attempts, raw_responses=calls.raw + answer.raw_responses,
                 format_errors=calls.errors + answer.format_errors, retry_wait_seconds=answer.retry_wait_seconds + calls.waited,
                 latency_seconds=max(0.0, time.perf_counter() - started - answer.retry_wait_seconds - calls.waited),
-                decision_metadata={**answer.decision_metadata, **meta, "route": "fallback_chatbot", "fallback_prompt": FALLBACK_PROMPT},
+                usage=add_usage(dict(calls.usage), answer.usage),
+                input_tokens_estimate=calls.prompt_chars + answer.input_tokens_estimate,
+                decision_metadata={**meta, **answer.decision_metadata, "pipeline": "stat", "route": "fallback_chatbot",
+                                   "fallback_prompt": FALLBACK_PROMPT, "numbers_origin": "model", "numbers_verified": False},
             )
         source = to_source(self.table.meta, org_id=self.org_id)
         query = to_query(plan, self.index, request)
@@ -183,19 +220,22 @@ class StatPipeline:
             computed = compute(self.table, request)
         except CalcRefused as exc:
             stat = StatAnswer(outcome="refused", query=query, refusal=Refusal(reason=exc.reason, message=exc.message),
-                              text=final_text(exc.message, source), source=source)
+                              text=final_text(exc.message, source), source=source, numbers_origin="none")
             return self._done(stat, verdict, meta | {"route": f"{meta['route']}+calc_refused"}, calls, started)
-        parts = self._compose(question, computed, computed.note, calls, meta)
+        parts, verified = self._compose(question, computed, computed.note, calls, meta)
         meta["label_digits"] = label_digits(parts, computed)
+        meta["numbers_verified"] = verified
         body = render_parts(parts, computed.result)
+        chart = chart_spec(plan.type, computed)
         stat = StatAnswer(
             outcome="answered", query=query, result=computed.result, parts=parts,
             text=final_text(body, source, verdict.default_applied, [computed.note]),
             default_applied=verdict.default_applied, source=source,
+            numbers_origin="code", numbers_verified=verified, defaults_verified=True,  # rule_plan computed with them
+            chart=chart,
         )
-        chart = chart_spec(plan.type, computed)
-        meta["chart"] = chart is not None
-        return replace(self._done(stat, verdict, meta, calls, started), chart=chart)
+        meta["chart"] = chart.kind if chart else None
+        return replace(self._done(stat, verdict, meta, calls, started), chart=chart.spec if chart else None)
 
     def _verdict_answer(self, question: str, verdict: Verdict) -> StatAnswer:
         query = StatQuery(question=question)
@@ -203,11 +243,12 @@ class StatPipeline:
             r = verdict.refusal
             source = None if r.reason == "out_of_scope" else to_source(self.table.meta, org_id=self.org_id)
             return StatAnswer(outcome="refused", query=query, refusal=Refusal(reason=r.reason, message=r.message, available=r.available),
-                              text=final_text(r.message, source), source=source)
+                              text=final_text(r.message, source), source=source, numbers_origin="none")
         options = list(verdict.clarify_options)
         body = "\n".join([verdict.clarify_question, *(f"- {o}" for o in options)])
         source = to_source(self.table.meta, org_id=self.org_id)
-        return StatAnswer(outcome="clarify", query=query, clarify_options=options, text=final_text(body, source), source=source)
+        return StatAnswer(outcome="clarify", query=query, clarify_options=options, text=final_text(body, source), source=source,
+                          numbers_origin="none")
 
     def _done(self, stat: StatAnswer, verdict: Verdict, meta: dict, calls: _Calls, started: float) -> Answer:
         return Answer(

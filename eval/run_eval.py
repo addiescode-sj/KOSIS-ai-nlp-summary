@@ -10,19 +10,20 @@ import logging
 import re
 import sys
 import time
+import traceback
 from pathlib import Path
 from dataclasses import replace
 
 from eval.scorer import KINDS, SCORING_VERSION
 from eval.recording import RecordingClient, RunRecorder, source_snapshot
 from eval.audit_report import save_reports
-from kosis_chat.chatbot import JUDGE_MODES, Chatbot
+from kosis_chat.chatbot import JUDGE_MODES, Answer, Chatbot
 from kosis_chat.config import PROJECT_ROOT, Settings, load_env, load_settings, resolve_path
 from kosis_chat.contract import org_id_from_table_path, to_stat_answer
 from kosis_chat.data.loader import load_table, sha256_of
 from kosis_chat.data.scope import MODES as SCOPE_MODES
 from kosis_chat.llm import prompts, raw_prompt
-from kosis_chat.llm.model import BACKENDS, STATUS_FORMAT_ERROR, LLMClient, build_client
+from kosis_chat.llm.model import BACKENDS, STATUS_FORMAT_ERROR, STATUS_PIPELINE_ERROR, LLMClient, TraceWriteError, build_client
 from kosis_chat.pipeline import StatPipeline
 from kosis_chat.raw import RawRunner
 
@@ -254,7 +255,16 @@ def run(
                 if interval and results and not results[-1]["judge"].get("final"):  # a rule verdict sent no call
                     time.sleep(interval)  # stay under per-minute rate limits (HCX 429)
                     waited += interval
-                answer = bot.ask(item["question"], item.get("scope"))
+                try:
+                    answer = bot.ask(item["question"], item.get("scope"))
+                except (KeyboardInterrupt, TraceWriteError):  # the user stopped the run / the audit trail is broken
+                    raise
+                except Exception as exc:  # a bug on one question is that question's failure; the other rows still run
+                    detail = f"{type(exc).__name__}: {exc}"
+                    log.exception("[call %d/%d] %s pipeline error", len(results) + 1, total_calls, item["id"])
+                    recorder.event({"type": "pipeline_error", "error": detail, "traceback": traceback.format_exc()})
+                    answer = Answer(text="", status=STATUS_PIPELINE_ERROR, table_meta=bot.table.meta,
+                                    prompt_version=bot.prompt_version, error=detail)
                 try:  # raw replies stay as written (raw_answer), never turned into a StatAnswer
                     stat_answer = None if pipeline == "raw" else to_stat_answer(item["question"], answer, org_id=org_id_from_table_path(item["table"], bot.table.meta.tbl_id))
                 except ValueError as exc:
@@ -382,7 +392,7 @@ def close_logging(handlers: list[logging.Handler]) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m eval.run_eval", description="Run the golden set (calls the model).")
     parser.add_argument("--stage", required=True, help="stage name, e.g. B0")
-    parser.add_argument("--golden", default="eval/golden/stat_golden.jsonl", help="golden .jsonl file or a directory of them")
+    parser.add_argument("--golden", default="eval/golden/golden.jsonl", help="golden .jsonl file or a directory of them")
     parser.add_argument("--config", default=None)
     parser.add_argument("--backend", choices=BACKENDS, default=None)
     parser.add_argument("--answer-format", choices=["text", "json"], default="text")

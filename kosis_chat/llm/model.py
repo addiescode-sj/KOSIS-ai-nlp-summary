@@ -22,6 +22,7 @@ STATUS_FORMAT_ERROR = "format_error"
 STATUS_TIMEOUT = "timeout"
 STATUS_API_ERROR = "api_error"
 STATUS_INPUT_TOO_LONG = "input_too_long"
+STATUS_PIPELINE_ERROR = "pipeline_error"  # an exception in our own code while answering one question (eval.run_eval)
 
 log = logging.getLogger("kosis.llm")
 

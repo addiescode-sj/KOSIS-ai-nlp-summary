@@ -73,7 +73,7 @@ python -m eval.run_eval --stage <이름> --golden eval/golden/stat_golden.jsonl 
 
 | 파일 | 내용 |
 | --- | --- |
-| `results.jsonl` | 문항별 답변(`raw_answer`), 호출 상태(`call_status`), 오류, 판정 |
+| `results.jsonl` | 문항별 답변(`raw_answer`), 호출 상태(`call_status`), 오류, 판정. `stat_answer`(공통 계약)에는 누가 숫자를 썼는지 `numbers_origin`(`code`: 계산 코드, `model`: 모델 문장, `none`: 거절·되묻기), 코드가 숫자를 검증했는지 `numbers_verified`, 기본값을 계산에 실제로 썼는지 `defaults_verified`가 남는다(T0-03 v2 이전 기록은 `null`/`false`) |
 | `manifest.json` | 모델·프롬프트 버전·직렬화·범위 모드(`scope_mode`)·골든셋·데이터 해시, form 경로와 sha256 |
 | `golden.jsonl` | 이번 실행에 쓴 골든셋 사본 |
 | `form.txt` | `--form`을 줬을 때 그 시점의 form 파일 사본 |
@@ -95,6 +95,9 @@ python -m eval.run_eval --stage <이름> --golden eval/golden/stat_golden.jsonl 
 ### 호출 실패 확인
 
 호출이 실패한 문항은 자동으로 FAIL(`run_failure`)이 된다. 판정 전에 실패 원인을 먼저 본다.
+계약(`src/kosis_ai/schemas.py`)을 바꾼 뒤에는 `python -m eval.recheck_contract --run eval\results\<실행 폴더>`로 저장된 `stat_answer`가 새 계약으로도 읽히는지 확인한다(안 읽히는 행과 이유, `numbers_origin`/경로 분포를 출력).
+`stat_answer.query.op`·`period_groups`는 기간 연산(평균·합·두 기간 비교·비중 변화, T0-03 v2)을, `stat_answer.chart`는 코드가 그린 그래프(kind·Vega-Lite spec·근거 fact)를 담는다. `chart` 열은 같은 spec이다.
+`call_status`가 `pipeline_error`면 API가 아니라 우리 코드가 그 문항에서 예외를 낸 것이다(T0-03 v2). 실행은 다음 문항으로 이어지고, 예외 내용은 `call_error`에, 전체 traceback은 `events.jsonl`의 `pipeline_error` 이벤트에 남는다.
 
 ```bat
 python -c "import json;[print(r['question_id'],r['call_status'],(r['call_error'] or '')[:150]) for r in map(json.loads,open(r'eval\results\<실행 폴더>\results.jsonl',encoding='utf-8')) if r['call_status']!='ok']"

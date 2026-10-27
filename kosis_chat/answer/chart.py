@@ -1,16 +1,18 @@
 """A Vega-Lite chart for each answer, built by code from the computed facts (the model never touches it).
 
 value: one bar · trend: a line over every period · compare: two bars · share: a pie of the parts and the rest ·
-extreme: every candidate as a sorted bar. The asked value is highlighted; numbers are the facts' own values.
+extreme: every candidate as a sorted bar · avg / sum: the periods as bars with the aggregate in the title ·
+pavg / psum / vsa / shr: the two numbers compared as bars. The asked value is highlighted; numbers are the facts'
+own values. chart_spec returns the shared Chart (kind, Vega-Lite spec, the facts it draws) that StatAnswer carries.
 Render with any Vega-Lite v5 viewer (vega-embed, Streamlit st.vega_lite_chart, Altair); eval/view_run.py shows them.
 """
 
 from __future__ import annotations
 
-from kosis_chat.answer.render import fact_label, format_fact, item_label
+from kosis_chat.answer.render import fact_label, format_fact, format_number, item_label, span_text
 from kosis_chat.compute import Computed
 
-from kosis_ai.schemas import Fact, QuestionType  # isort: skip
+from kosis_ai.schemas import Chart, Fact, QuestionType  # isort: skip
 
 SCHEMA = "https://vega.github.io/schema/vega-lite/v5.json"
 HIGHLIGHT, OTHER = "#2f6db5", "#b8c4d6"
@@ -86,15 +88,16 @@ def _timeline(title: str, rows: list[dict], unit: str | None) -> dict:
     return spec
 
 
-def _value(computed: Computed, by_id: dict[str, Fact]) -> dict | None:
+def _value(computed: Computed, by_id: dict[str, Fact]) -> Chart | None:
     f = by_id[computed.main[0]]
     if len(computed.series) < 2:
-        return _bars(_common([(f.dims or {}, f.period)]) or "값", [_row(fact_label(f) or f"{f.period}", f, True)], f.unit)
+        spec = _bars(_common([(f.dims or {}, f.period)]) or "값", [_row(fact_label(f) or f"{f.period}", f, True)], f.unit)
+        return Chart(kind="bar", spec=spec, fact_ids=[f.id])
     rows = [_row(p["period"], f.model_copy(update={"value": p["value"]}), p["period"] == f.period) for p in computed.series]
-    return _timeline(f"{fact_label(f)} ({f.period}년 강조)".strip(), rows, f.unit)
+    return Chart(kind="timeline", spec=_timeline(f"{fact_label(f)} ({f.period}년 강조)".strip(), rows, f.unit), fact_ids=[f.id])
 
 
-def _trend(computed: Computed, by_id: dict[str, Fact]) -> dict | None:
+def _trend(computed: Computed, by_id: dict[str, Fact]) -> Chart | None:
     points = sorted((f for f in computed.result.facts if f.source_ref and f.value is not None), key=lambda f: f.period or "")
     series = [f for f in points if f.dims == by_id[computed.main[0]].dims]
     ends = {computed.main[0], computed.main[1]}
@@ -109,19 +112,20 @@ def _trend(computed: Computed, by_id: dict[str, Fact]) -> dict | None:
         {"transform": [{"filter": "datum['강조'] == '예'"}], "mark": {"type": "text", "dy": -10},
          "encoding": {"x": x, "y": y, "text": {"field": "표시"}}},
     ]
-    return spec
+    return Chart(kind="line", spec=spec, fact_ids=[f.id for f in series])
 
 
-def _compare(computed: Computed, by_id: dict[str, Fact]) -> dict | None:
+def _compare(computed: Computed, by_id: dict[str, Fact]) -> Chart | None:
     a, b, diff = (by_id[i] for i in computed.main[:3])
     subject = diff.derivation.split("-")[0].strip()
     names = _differing([(a.dims or {}, a.period), (b.dims or {}, b.period)])
     rows = [_row(names[0], a, a.id == subject), _row(names[1], b, b.id == subject)]
-    return _bars(f"{_common([(a.dims or {}, a.period), (b.dims or {}, b.period)])} 비교".strip(), rows, a.unit,
+    spec = _bars(f"{_common([(a.dims or {}, a.period), (b.dims or {}, b.period)])} 비교".strip(), rows, a.unit,
                  sort=names, horizontal=False)
+    return Chart(kind="bar", spec=spec, fact_ids=[a.id, b.id])
 
 
-def _share(computed: Computed, by_id: dict[str, Fact]) -> dict | None:
+def _share(computed: Computed, by_id: dict[str, Fact]) -> Chart | None:
     *parts, total, share = (by_id[i] for i in computed.main)
     if any(f.value is None for f in [*parts, total]):
         return None
@@ -143,10 +147,10 @@ def _share(computed: Computed, by_id: dict[str, Fact]) -> dict | None:
     for n, r in enumerate(rows):
         r["순서"] = n
     spec.pop("width")
-    return spec
+    return Chart(kind="pie", spec=spec, fact_ids=[f.id for f in [*parts, total, share]])
 
 
-def _extreme(computed: Computed, by_id: dict[str, Fact]) -> dict | None:
+def _extreme(computed: Computed, by_id: dict[str, Fact]) -> Chart | None:
     ranking = computed.ranking
     if not ranking:
         return None
@@ -155,24 +159,62 @@ def _extreme(computed: Computed, by_id: dict[str, Fact]) -> dict | None:
     rows = []
     for n, (name, r) in enumerate(zip(names, ranking)):
         value = r["value"] if digits is None else round(r["value"], digits)
-        shown = Fact(id="x", value=value, unit=r["unit"], source_ref="chart", round=digits)
-        rows.append({"이름": name, "값": value, "표시": format_fact(shown), "강조": "예" if n == 0 else "아니오"})
+        rows.append({"이름": name, "값": value, "표시": format_number(value, r["unit"], digits), "강조": "예" if n == 0 else "아니오"})
+    fact_ids = list(computed.picked.values())  # the winner and the runner-up are facts; the other candidates are rows only
     if all(r["dims"] == ranking[0]["dims"] for r in ranking):  # ranked over periods: keep time order
         order = sorted(range(len(rows)), key=lambda n: ranking[n]["period"] or "")
-        return _timeline(f"{fact_label(Fact(id='x', dims=ranking[0]['dims'], note='title'))} 시점별", [rows[n] for n in order],
+        spec = _timeline(f"{fact_label(Fact(id='x', dims=ranking[0]['dims'], note='title'))} 시점별", [rows[n] for n in order],
                          ranking[0]["unit"])
+        return Chart(kind="timeline", spec=spec, fact_ids=fact_ids)
     title = _common([(r["dims"], r["period"]) for r in ranking])
     word = "비중" if by_id[computed.picked["winner"]].derivation else ""
-    return _bars(f"{title} {word} 순위".replace("  ", " ").strip(), rows, ranking[0]["unit"], sort=[r["이름"] for r in rows])
+    spec = _bars(f"{title} {word} 순위".replace("  ", " ").strip(), rows, ranking[0]["unit"], sort=[r["이름"] for r in rows])
+    return Chart(kind="bar", spec=spec, fact_ids=fact_ids)
+
+
+# ---------------------------------------------------------------- v2 ops over periods
+
+
+def _span_name(term) -> str:
+    return span_text(*term.periods)
+
+
+def _one_term(computed: Computed, by_id: dict[str, Fact]) -> Chart | None:
+    """avg / sum: the periods as bars, the aggregate in the title (every bar is a fact of the answer)."""
+    term = computed.terms[0]
+    cells = [by_id[i] for i in term.cell_ids]
+    value = by_id[term.value_id]
+    word = {"avg": "평균", "sum": "합계"}.get(term.agg or "", "")
+    rows = [_row(f.period or "", f, True) for f in cells]
+    title = f"{fact_label(cells[0])} {_span_name(term)} {word} {format_fact(value)}".replace("  ", " ").strip()
+    return Chart(kind="timeline", spec=_timeline(title, rows, cells[0].unit), fact_ids=[f.id for f in cells] + [value.id])
+
+
+def _two_terms(computed: Computed, by_id: dict[str, Fact]) -> Chart | None:
+    """pavg / psum / vsa / shr: the two numbers compared as bars, the later one highlighted."""
+    earlier, later = computed.terms
+    a, b = by_id[earlier.value_id], by_id[later.value_id]
+    word = {"avg": " 평균", "sum": " 합계"}
+    names = [f"{_span_name(earlier)}{word.get(earlier.agg or '', '')}", f"{_span_name(later)}{word.get(later.agg or '', '')}"]
+    if computed.op == "shr":
+        names = [_span_name(earlier), _span_name(later)]
+    rows = [_row(names[0], a, False), _row(names[1], b, True)]
+    label = fact_label(by_id[earlier.cell_ids[0]])
+    what = "비중" if computed.op == "shr" else ""
+    title = f"{label} {what} 비교".replace("  ", " ").strip()
+    spec = _bars(title, rows, a.unit, sort=names, horizontal=False)
+    return Chart(kind="bar", spec=spec, fact_ids=[a.id, b.id])
 
 
 _CHARTS = {"value": _value, "trend": _trend, "compare": _compare, "share": _share, "extreme": _extreme}
+_OP_CHARTS = {"avg": _one_term, "sum": _one_term, "pavg": _two_terms, "psum": _two_terms, "vsa": _two_terms, "shr": _two_terms}
 
 
-def chart_spec(kind: QuestionType, computed: Computed) -> dict | None:
-    """Vega-Lite v5 spec for the answer, or None when there is nothing to draw."""
+def chart_spec(kind: QuestionType, computed: Computed) -> Chart | None:
+    """The chart for the answer (kind, Vega-Lite v5 spec, the facts drawn), or None when there is nothing to draw."""
     by_id = {f.id: f for f in computed.result.facts}
+    builder = _OP_CHARTS[computed.op] if computed.op else _CHARTS[kind]
     try:
-        return _CHARTS[kind](computed, by_id)
+        return builder(computed, by_id)
     except (KeyError, IndexError, StopIteration):  # an unexpected fact layout: answer without a chart
         return None

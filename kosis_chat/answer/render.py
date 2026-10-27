@@ -22,13 +22,18 @@ def _number(value: float, digits: int | None) -> str:
     return f"{value:,.{digits}f}"
 
 
+def format_number(value: float, unit: str | None, digits: int | None = None) -> str:
+    """'123,456가구' for a plain number (charts use it for values that are not facts of the answer)."""
+    return f"{_number(value, digits)}{unit or ''}"
+
+
 def format_fact(fact: Fact) -> str:
     """'123,456가구'; a change without its sign (the sentence says 늘었다/줄었다); a symbol as "'-'(자료 없음)"."""
     if fact.value is None:
         raw = fact.raw or "-"
         return f"'{raw}'({SYMBOL_MEANING.get(raw, '수치 아님')})"
     value = abs(fact.value) if is_change(fact) else fact.value
-    return f"{_number(value, fact.round)}{fact.unit or ''}"
+    return format_number(value, fact.unit, fact.round)
 
 
 _CHANGE = re.compile(r"\s*(?:f\d+\s*-\s*f\d+|\(f\d+\s*/\s*f\d+\s*-\s*1\)\s*\*\s*100)\s*")
@@ -44,6 +49,27 @@ def direction(fact: Fact) -> str:
     if fact.value is None or fact.value == 0:
         return "같음"
     return "증가" if fact.value > 0 else "감소"
+
+
+def period_text(period: str) -> str:
+    """'2024' -> '2024년'; '202406' -> '2024년 6월'."""
+    return f"{period[:4]}년 {int(period[4:])}월" if len(period) == 6 and period.isdigit() else f"{period}년"
+
+
+def span_text(first: str, last: str) -> str:
+    """'2019년~2023년'; a half or a quarter of a year by name ('2024년 상반기', '2025년 1분기'), else '2024년 1월~6월'."""
+    if first == last:
+        return period_text(first)
+    if len(first) == 6 and len(last) == 6 and first[:4] == last[:4]:
+        a, b = int(first[4:]), int(last[4:])
+        if (a, b) == (1, 6):
+            return f"{first[:4]}년 상반기"
+        if (a, b) == (7, 12):
+            return f"{first[:4]}년 하반기"
+        if b - a == 2 and a % 3 == 1:
+            return f"{first[:4]}년 {a // 3 + 1}분기"
+        return f"{first[:4]}년 {a}월~{b}월"
+    return f"{period_text(first)}~{period_text(last)}"
 
 
 def item_label(label: str) -> str:
@@ -98,7 +124,9 @@ def default_sentence(applied: dict[str, str]) -> str:
     """The conditions the rules chose, in one sentence written by code."""
     out = []
     for key, value in applied.items():
-        if key == "period" and (m := messages._LATEST.fullmatch(value)):
+        if key == "period" and (m := messages._PREVIOUS.fullmatch(value)):
+            out.append(f"질문에 시점이 없어 가장 최근 시점인 {m.group(1)}년을 그 직전 시점 {m.group(2)}년과 비교합니다.")
+        elif key == "period" and (m := messages._LATEST.fullmatch(value)):
             out.append(f"질문에 시점이 없어 가장 최근 시점인 {m.group(1)}년 기준으로 답합니다.")
         elif key == "period" and (m := messages._RECENT.fullmatch(value)):
             out.append(f"질문에 시점이 없어 최근 {m.group(1)}개 시점({m.group(2)}년)으로 답합니다.")

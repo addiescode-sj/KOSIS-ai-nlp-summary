@@ -31,15 +31,16 @@ def oracle_answer(item: GoldenItem) -> StatAnswer:
     source = read_source(item.path)
     if item.kind == "not_answerable":
         refusal = Refusal(reason=item.allowed_reasons[0], message="oracle")
-        return StatAnswer(outcome="refused", refusal=refusal, source=source)
+        return StatAnswer(outcome="refused", refusal=refusal, source=source, numbers_origin="none")
     if item.kind == "clarify":
-        return StatAnswer(outcome="clarify", clarify_options=item.clarify_options, source=source)
+        return StatAnswer(outcome="clarify", clarify_options=item.clarify_options, source=source, numbers_origin="none")
     return StatAnswer(
         outcome="answered",
         result=StatResult(facts=item.required_facts + item.aux_facts),
         parts=[FactPart(fact_id=f.id) for f in item.required_facts],
         default_applied=item.default_applied,
         source=source,
+        numbers_origin="code",
     )
 
 

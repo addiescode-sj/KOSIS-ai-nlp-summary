@@ -119,7 +119,12 @@ def validate(table: TableInput) -> list[Problem]:
         problems.append(Problem("meta.file_sha256", "required field is missing"))
     if not table.cells:
         problems.append(Problem("cells", "table has no cells"))
+    seen: dict[str, int] = {}
     for i, cell in enumerate(table.cells):
+        # Two rows with one source_ref would silently overwrite each other in the calculation indexes (T0-03 v2).
+        first = seen.setdefault(cell.source_ref, i)
+        if first != i:
+            problems.append(Problem(f"cells[{i}].source_ref", f"duplicate of cells[{first}] ({cell.source_ref})"))
         for name in ("item", "period_raw", "unit", "source_ref"):
             if not str(getattr(cell, name) or "").strip():
                 problems.append(Problem(f"cells[{i}].{name}", "required field is missing or empty"))

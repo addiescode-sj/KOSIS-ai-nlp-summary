@@ -1,6 +1,7 @@
 """Wrap the free-text Answer in the shared StatAnswer contract (src/kosis_ai/schemas.py, T0-03), stage 1 of adoption.
 
-The model's sentence is kept as one TextPart and numbers are not Facts yet (T1-07 / T1-11 move them into StatResult).
+The model's sentence is kept as one TextPart and numbers are not Facts yet (T1-07 / T1-11 move them into StatResult),
+so every answer built here records numbers_origin="model": its numbers are the model's and unverified.
 A text answer is "answered"; refusals and ask-backs come from the model's JSON or the rule verdict (T1-08, --judge rules).
 """
 
@@ -152,6 +153,7 @@ def to_stat_answer(question: str, answer: Answer, *, org_id: str | None = None) 
             return StatAnswer(
                 outcome="answered", query=StatQuery(question=question), parts=[TextPart(text=body)],
                 text=render_text(body, source), source=source, default_applied=judged_defaults or parsed.default_applied,
+                numbers_origin="model",
             )
         if parsed.outcome == "refused":
             body = strip_model_source(parsed.refusal_message)
@@ -161,6 +163,7 @@ def to_stat_answer(question: str, answer: Answer, *, org_id: str | None = None) 
                 outcome="refused", query=StatQuery(question=question), parts=[TextPart(text=body)],
                 text=render_text(body, source), source=source,
                 refusal=Refusal(reason=parsed.refusal_reason, message=body, available=parsed.available),
+                numbers_origin="model",
             )
         body = strip_model_source(parsed.clarify_question)
         if not body.strip():
@@ -169,6 +172,7 @@ def to_stat_answer(question: str, answer: Answer, *, org_id: str | None = None) 
         return StatAnswer(
             outcome="clarify", query=StatQuery(question=question), parts=[TextPart(text=body)],
             text=render_text(body, source), source=source, clarify_options=parsed.clarify_options,
+            numbers_origin="model",
         )
     body = strip_model_source(answer.text)
     if not body.strip():
@@ -180,4 +184,5 @@ def to_stat_answer(question: str, answer: Answer, *, org_id: str | None = None) 
         text=render_text(body, source),
         source=source,
         default_applied=judged_defaults,
+        numbers_origin="model",
     )

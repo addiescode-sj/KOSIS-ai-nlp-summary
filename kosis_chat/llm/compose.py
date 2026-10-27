@@ -31,7 +31,9 @@ SYSTEM_PROMPT = """당신은 KOSIS 통계표의 계산 결과를 한국어 답�
 EXAMPLE = '{"answer": "2023년 서울특별시의 1인 가구는 {f1}입니다."}'
 RETRY = "[이전 답변의 문제]\n{problems}\n위 문제를 고쳐 같은 형식의 JSON 객체 하나만 다시 출력하세요."
 _PLACEHOLDER = re.compile(r"\{\s*(f\d+)\s*\}")
-_KIND_WORDS = {"growth": "증감률", "difference": "차이", "share": "비중", "ratio": "배수"}
+_KIND_WORDS = {"growth": "증감률", "difference": "차이", "share": "비중", "ratio": "배수", "avg": "평균", "sum": "합계"}
+_SUM = re.compile(r"^f\d+(?:\s*\+\s*f\d+)+$")
+_AVG = re.compile(r"^\(f\d+(?:\s*\+\s*f\d+)+\)\s*/\s*\d+$")
 
 
 class ComposeOutput(BaseModel):
@@ -41,6 +43,10 @@ class ComposeOutput(BaseModel):
 
 def _kind(fact: Fact) -> str:
     expr = fact.derivation or ""
+    if _SUM.match(expr):
+        return _KIND_WORDS["sum"]
+    if _AVG.match(expr):
+        return _KIND_WORDS["avg"]
     if "* 100" in expr and "- 1)" in expr:
         return _KIND_WORDS["growth"]
     if "* 100" in expr:

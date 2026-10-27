@@ -242,7 +242,8 @@ def test_golden_injected_errors_are_all_caught():
             bad = oracle.model_copy(update={"refusal": Refusal(reason=reason, message="m")})
             expect = "wrong_reason"
         else:
-            bad = StatAnswer(outcome="answered", source=oracle.source)
+            # An answer that picked a condition instead of asking (v2: an answered answer must carry parts).
+            bad = StatAnswer(outcome="answered", parts=[TextPart(text="2024년 기준")], source=oracle.source)
             expect = "assumed_condition"
         g = grade(item, bad, read_cells(item.path))
         total += 1

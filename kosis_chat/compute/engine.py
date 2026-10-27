@@ -3,7 +3,12 @@
 compute(table, request) returns facts the answer may cite: cell facts with their source_ref and derived facts whose
 derivation names other fact ids (recomputed by eval/grade.py). Nothing is guessed: a cell that is missing or holds a
 symbol, units that differ, or rates that would be summed raise CalcRefused with a RefusalReason.
-Rounding follows the golden set: a difference keeps the inputs' decimals, a rate, share or multiple has 1 decimal.
+Rounding follows the golden set: a difference keeps the inputs' decimals, a rate, share or multiple has 1 decimal,
+an average has at least 1, a sum keeps the inputs' decimals.
+
+v2 ops (request.op): each term becomes one number (a cell, an average or sum over its cells, or a share of a total),
+then the op combines them: one term is reported as is; two are compared (difference, growth rate; vsa also the
+level in % of the average); shr compares two shares in %p. A sum over periods of a stock or a rate is refused.
 """
 
 from __future__ import annotations
@@ -11,7 +16,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field, replace
 
-from kosis_chat.compute.request import CalcRequest
+from kosis_chat.answer.render import span_text
+from kosis_chat.compute.request import CalcRequest, Term
 from kosis_chat.data.preprocessing import clean_cell
 from kosis_chat.data.schema import Cell, TableInput
 from kosis_chat.data.serializer import display_value
@@ -35,6 +41,17 @@ class CalcRefused(Exception):
 
 
 @dataclass(frozen=True)
+class TermResult:
+    """What one term of an op became: its cell fact ids and the id of the number it stands for."""
+
+    cell_ids: list[str]
+    value_id: str  # the aggregate / share fact, or the single cell
+    periods: tuple[str, str]  # first and last period of the term's cells
+    digits: int  # decimals the number keeps
+    agg: str | None = None  # "avg" / "sum" / None (a cell or a share)
+
+
+@dataclass(frozen=True)
 class Computed:
     result: StatResult
     main: list[str]  # fact ids the answer should cite, in order (the rest are context)
@@ -44,6 +61,9 @@ class Computed:
     ranking: list[dict] = field(default_factory=list)
     # value: the same cell in every period, for the chart: {"period", "value"} in period order (facts keep one)
     series: list[dict] = field(default_factory=list)
+    # v2 ops: the op and what each term became, in request order (templates and charts read them)
+    op: str | None = None
+    terms: list[TermResult] = field(default_factory=list)
 
 
 def _indexed(table: TableInput) -> tuple[TableInput, dict[str, Cell], bool]:
@@ -268,6 +288,86 @@ def _extreme(table: TableInput, req: CalcRequest) -> Computed:
     return Computed(StatResult(facts=facts), main, req.note, picked, ranking)
 
 
+# ---------------------------------------------------------------- v2 ops over periods
+
+AGG_WORDS = {"avg": "평균", "sum": "합계"}
+
+
+def _check_summable(reads: list[_Read]) -> None:
+    """A sum over periods needs a flow (births, marriages): a stock counts the same units again, a rate is meaningless."""
+    kinds = {r.kind for r in reads if r.kind}
+    rate = any(k not in COUNT_KINDS for k in kinds)
+    if rate or "count_stock" in kinds:
+        what = "·".join(dict.fromkeys(r.cell.item for r in reads))
+        raise CalcRefused("not_aggregatable", messages.refusal_message("not_aggregatable", what=what))
+
+
+def _term(table: TableInput, term: Term, ids: _Ids) -> tuple[list[Fact], TermResult]:
+    """Facts of one term: its cells (and total), then the number it stands for (the last fact returned)."""
+    if term.total:
+        facts, share, _ = _share_parts(table, term.cells, term.total, ids)
+        periods = (facts[-1].period or "", facts[-1].period or "")
+        return [*facts, share], TermResult([f.id for f in facts[:-1]], share.id, periods, PERCENT_DIGITS)
+    reads = sorted((_read(table, ref) for ref in term.cells), key=lambda r: r.cell.period_raw)
+    _check_units(reads)
+    values = [_numeric(r) for r in reads]
+    facts = [_cell_fact(ids(), r) for r in reads]
+    periods = (reads[0].cell.period_raw, reads[-1].cell.period_raw)
+    if term.agg is None:
+        return facts, TermResult([facts[0].id], facts[0].id, periods, reads[0].digits)
+    if term.agg == "sum":
+        _check_summable(reads)
+    digits = max(r.digits for r in reads)
+    span = span_text(*periods)
+    unit = reads[0].unit
+    if term.agg == "avg":
+        total = " + ".join(f.id for f in facts)
+        agg = _derived(ids(), f"({total}) / {len(facts)}", sum(values) / len(values), max(1, digits), unit,
+                       note=f"{span} {len(facts)}개 시점 평균")
+    else:
+        agg = _derived(ids(), " + ".join(f.id for f in facts), sum(values), digits, unit, note=f"{span} {len(facts)}개 시점 합계")
+    return [*facts, agg], TermResult([f.id for f in facts], agg.id, periods, agg.round, term.agg)
+
+
+def _op(table: TableInput, req: CalcRequest) -> Computed:
+    ids = _Ids()
+    facts: list[Fact] = []
+    terms: list[TermResult] = []
+    for term in req.terms:
+        got, result = _term(table, term, ids)
+        facts += got
+        terms.append(result)
+    by_id = {f.id: f for f in facts}
+    if len(terms) == 1:
+        value = by_id[terms[0].value_id]
+        main = [*terms[0].cell_ids, value.id] if len(terms[0].cell_ids) <= 2 else [value.id]
+        return Computed(StatResult(facts=facts), main, req.note, op=req.op, terms=terms)
+    # Two terms: the later (the second) against the earlier (the first): difference, then growth rate when it is
+    # not a rate, and for vsa the level of the period in % of the average.
+    a, b = (by_id[t.value_id] for t in terms)
+    unit = a.unit
+    digits = max(t.digits for t in terms)
+    if req.op == "shr":
+        diff = _derived(ids(), f"{b.id} - {a.id}", b.value - a.value, PERCENT_DIGITS, "%p",
+                        note=f"{span_text(*terms[0].periods)} 대비 {span_text(*terms[1].periods)} 비중 변화")
+        facts.append(diff)
+        return Computed(StatResult(facts=facts), [a.id, b.id, diff.id], req.note, op=req.op, terms=terms)
+    what = f"{span_text(*terms[0].periods)} {AGG_WORDS.get(terms[0].agg, '')}".strip()
+    diff = _derived(ids(), f"{b.id} - {a.id}", b.value - a.value, digits, _diff_unit(unit), note=f"{what} 대비 차이")
+    facts.append(diff)
+    main = [a.id, b.id, diff.id]
+    if unit != "%" and a.value:
+        growth = _derived(ids(), f"({b.id} / {a.id} - 1) * 100", (b.value / a.value - 1) * 100, PERCENT_DIGITS, "%",
+                          note=f"{what} 대비 증감률")
+        facts.append(growth)
+        main.append(growth.id)
+        if req.op == "vsa":
+            level = _derived(ids(), f"{b.id} / {a.id} * 100", b.value / a.value * 100, PERCENT_DIGITS, "%",
+                             note=f"{what}을 100으로 본 수준")
+            facts.append(level)
+    return Computed(StatResult(facts=facts), main, req.note, op=req.op, terms=terms)
+
+
 _HANDLERS = {"value": _value, "trend": _trend, "compare": _compare, "share": _share, "extreme": _extreme}
 
 
@@ -281,4 +381,5 @@ def _with_context(table: TableInput, computed: Computed, refs: list[str]) -> Com
 
 
 def compute(table: TableInput, request: CalcRequest) -> Computed:
-    return _with_context(table, _HANDLERS[request.type](table, request), request.context)
+    handler = _op if request.op else _HANDLERS[request.type]
+    return _with_context(table, handler(table, request), request.context)

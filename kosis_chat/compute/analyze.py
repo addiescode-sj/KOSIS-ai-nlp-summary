@@ -8,13 +8,26 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field, replace
 
-from kosis_chat.compute.request import CalcRequest
+from kosis_chat.compute.request import CalcRequest, Term
 from kosis_chat.compute.roles import is_province, pick_of, reference_index
 from kosis_chat.data.schema import Cell, TableInput
 from kosis_chat.judge.answerability import resolve
-from kosis_chat.judge.question import CHANGE_WORDS, ITEM_AXIS, TREND_WORDS, Periods, TableIndex, is_total, parse, squash
+from kosis_chat.judge.question import (
+    AVG_WORDS,
+    CHANGE_WORDS,
+    ITEM_AXIS,
+    SUM_WORDS,
+    TOTAL_WORDS,
+    TREND_WORDS,
+    Periods,
+    TableIndex,
+    in_range,
+    is_total,
+    parse,
+    squash,
+)
 
-from kosis_ai.schemas import QuestionType, StatQuery  # isort: skip
+from kosis_ai.schemas import Op, QuestionType, StatQuery  # isort: skip
 
 PERIOD_AXIS = "시점"  # Plan.over when an extreme question ranks periods ("가장 낮았던 해")
 RECENT_POINTS = 5
@@ -25,6 +38,7 @@ COMPARE_WORDS = re.compile(r"비교|차이|몇\s*배|보다|더\s*(?:높|낮|많
 ASKS_PERIOD = re.compile(r"해는|해가|연도|년도|언제|시점은")
 _LATEST = re.compile(r"latest[^(]*\((\d{4,6})")
 _RECENT = re.compile(r"recent (\d+) points \((\d{4,6})~(\d{4,6})\)")
+_PREVIOUS = re.compile(r"latest \((\d{4,6})\) vs previous \((\d{4,6})\)")
 # "3인 이하", "5인 이상", "65세 이상": a range over numbered labels of one category.
 _NUM_RANGE = re.compile(r"(\d+)\s*(인|세)\s*(이하|이상|미만|초과)")
 _NUM_LABEL = re.compile(r"^(\d+)\s*(인|세)\s*(이상)?(?:\s*\(.*\))?$")
@@ -42,6 +56,10 @@ class Plan:
     missing_years: list[str] = field(default_factory=list)  # asked years the table does not have
     default_applied: dict[str, str] = field(default_factory=dict)
     unresolved: list[str] = field(default_factory=list)
+    # v2: an operation over periods and its period groups (table periods, in question order; see schemas.Op).
+    # vsa: groups[0] is the averaged range, groups[1] the single period compared with it.
+    op: Op | None = None
+    groups: list[list[str]] = field(default_factory=list)
 
 
 class Unresolved(Exception):
@@ -123,24 +141,74 @@ def _order_in_question(question: str, index: TableIndex, name: str, named: list[
     return sorted(named, key=at)
 
 
+def _range_periods(index: TableIndex, start: str, end: str) -> list[str]:
+    if end == "9999":
+        end = max(x[:4] for x in index.periods)
+    return [x for x in index.periods if in_range(x, start, end)]
+
+
+def _single_periods(index: TableIndex, single: str) -> list[str]:
+    return [x for x in index.periods if x == single or (len(single) == 4 and x[:4] == single)]
+
+
 def _periods(p: Periods, index: TableIndex, default: dict[str, str]) -> tuple[list[str], list[str]]:
     """(table periods asked, asked years the table lacks)."""
     years = sorted({x[:4] for x in index.periods})
     if p.ranges:
-        a, b = p.ranges[0]
-        b = years[-1] if b == "9999" else b
-        found = [x for x in index.periods if a <= x[:4] <= b]
+        found = [x for a, b in p.ranges for x in _range_periods(index, a, b)]
+        if p.singles:  # "2025년 ... 2020~2024년 평균보다": the single period belongs to the question too
+            found += [x for s in p.singles for x in _single_periods(index, s)]
         # Only the asked ends: a census table has no 2016~2019 by design, which is not worth a note.
-        return found, [y for y in dict.fromkeys((a, b)) if y not in years]
+        ends = [y for a, b in p.ranges for y in (a, b) if b != "9999" and len(a) == 4]
+        return sorted(dict.fromkeys(found)), [y for y in dict.fromkeys(ends) if y not in years]
     if p.singles:
-        found = [x for s in p.singles for x in index.periods if x == s or (len(s) == 4 and x[:4] == s)]
+        found = [x for s in p.singles for x in _single_periods(index, s)]
         return list(dict.fromkeys(found)), [s for s in p.singles if not any(x[:4] == s[:4] for x in index.periods)]
     period = default.get("period", "")
+    if m := _PREVIOUS.search(period):
+        return [m.group(2), m.group(1)], []
     if m := _RECENT.search(period):
         return [x for x in index.periods if m.group(2) <= x <= m.group(3)], []
     if m := _LATEST.search(period):
         return [m.group(1)], []
     return [], []
+
+
+def _period_groups(p: Periods, index: TableIndex, kind: QuestionType) -> list[list[str]]:
+    """The period groups an op works on, in question order: one per range (a decade, a half, a quarter), and
+    for a share the two single periods compared."""
+    groups = [_range_periods(index, a, b) for a, b in p.ranges]
+    if kind == "share" and not groups and len(p.singles) >= 2:
+        groups = [_single_periods(index, s) for s in p.singles[:2]]
+    return [g for g in groups if g]
+
+
+def _operation(question: str, rest: str, p: Periods, index: TableIndex, kind: QuestionType) -> tuple[Op | None, list[list[str]]]:
+    """(op, period groups) when the question aggregates periods; (None, []) for the five plain types.
+
+    rest is the question with matched labels removed, so "평균" in a label ('평균 가구원수') does not count."""
+    groups = _period_groups(p, index, kind)
+    average = bool(AVG_WORDS.search(rest))
+    total = bool(SUM_WORDS.search(rest) or (TOTAL_WORDS.search(rest) and p.ranges))
+    if kind == "share":
+        return ("shr", groups) if len(groups) == 2 and not average and not total else (None, [])
+    if average and groups:
+        if len(groups) >= 2:
+            return "pavg", groups[:2]
+        single = [x for s in p.singles for x in _single_periods(index, s)]
+        if single and single[0] not in groups[0]:
+            return "vsa", [groups[0], single[:1]]
+        return "avg", groups
+    if average and p.recent_n:  # "최근 5년 평균": the last n numeric periods are chosen when the request is built
+        return "avg", []
+    if p.spans and not average:  # "2024년 상반기" on a monthly table: the months are summed
+        if len(groups) >= 2 and not total:
+            return "psum", groups[:2]
+        if len(groups) == 1 and not (TREND_WORDS.search(rest) or CHANGE_WORDS.search(rest)):
+            return "sum", groups
+    if total and groups:
+        return ("psum", groups[:2]) if len(groups) >= 2 else ("sum", groups)
+    return None, []
 
 
 def rule_plan(question: str, index: TableIndex, default_applied: dict[str, str] | None = None) -> Plan:
@@ -155,6 +223,11 @@ def rule_plan(question: str, index: TableIndex, default_applied: dict[str, str] 
     periods, missing = _periods(parsed.periods, index, default)
     kind = _question_type(question, parsed.periods, codes)
     plan = Plan(question, kind, codes, periods, missing_years=missing, default_applied=default)
+    plan.op, plan.groups = _operation(question, parsed.rest, parsed.periods, index, kind)
+    if plan.op == "sum" and parsed.periods.spans and not parsed.periods.singles:
+        plan.type = "value"  # "2024년 상반기 혼인 건수": one number for one named period
+    elif plan.op and plan.op != "shr" and kind not in ("value", "trend"):
+        plan.type = "trend"  # an average or sum over periods is a trend question, whatever its wording suggested
     if kind == "extreme":
         plan.pick = pick_of(question)
         plan.over = PERIOD_AXIS if ASKS_PERIOD.search(question) else _ranked_axis(index, codes)
@@ -265,6 +338,8 @@ def build_request(plan: Plan, index: TableIndex, table: TableInput) -> CalcReque
     problems: list[str] = []
     note = f"{'·'.join(plan.missing_years)}년은 표에 없음" if plan.missing_years else None
     kind = plan.type
+    if plan.op:
+        return _op_request(plan, index, lookup, note)
     if kind in ("value", "trend"):
         fixed = _fixed(plan, index, set(), problems)
         if problems:
@@ -382,6 +457,51 @@ def _extreme_request(plan: Plan, index: TableIndex, lookup: _Lookup, note: str |
                        note=note)
 
 
+def _op_request(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | None) -> CalcRequest:
+    """Terms for the op from the plan's period groups; the cells of one series, fixed like a value question."""
+    problems: list[str] = []
+    if plan.op == "shr":
+        found = _share_axis(plan, index)
+        if found is None:
+            raise Unresolved(["비중의 분자·분모"])
+        name, parts, total = found
+        fixed = _fixed(replace(plan, codes={k: v for k, v in plan.codes.items() if k != name}), index, {name}, problems)
+        if problems:
+            raise Unresolved(problems)
+        terms = []
+        for group in sorted(plan.groups, key=lambda g: g[0]):  # the earlier share first
+            period = group[-1]
+            refs = [_ref(lookup, _with(fixed, name, c), period, problems) for c in parts]
+            whole = _ref(lookup, _with(fixed, name, total), period, problems)
+            if problems:
+                raise Unresolved(problems)
+            terms.append(Term(cells=refs, total=whole))
+        return CalcRequest(type="share", op="shr", terms=terms, note=note)
+    fixed = _fixed(plan, index, set(), problems)
+    if problems:
+        raise Unresolved(problems)
+    groups = plan.groups
+    if not groups and plan.op == "avg":  # "최근 n년 평균"
+        numeric = lookup.numeric_periods(fixed)
+        n = int(m.group(1)) if (m := re.search(r"최근\s*(\d+)\s*년", plan.question)) else RECENT_POINTS
+        groups = [numeric[-n:]]
+    if plan.op in ("pavg", "psum"):
+        groups = sorted(groups, key=lambda g: g[0])  # the earlier group first: the later one is compared with it
+    terms = []
+    for n, group in enumerate(groups):
+        refs = [r for p in group if (r := _ref(lookup, fixed, p, []))]
+        if not refs:
+            raise Unresolved([f"기간 {group[0]}~{group[-1]}에 칸 없음"])
+        agg = None if plan.op == "vsa" and n == 1 else ("sum" if plan.op in ("sum", "psum") else "avg")
+        if agg and len(refs) < 2:
+            raise Unresolved([f"{agg}에 시점 부족 {group}"])
+        terms.append(Term(cells=refs, agg=agg))
+    try:
+        return CalcRequest(type=plan.type, op=plan.op, terms=terms, note=note)
+    except ValueError as exc:  # the groups do not fit the op (one range for pavg): not a question for this op
+        raise Unresolved([f"{plan.op}: {exc.errors()[0]['msg'] if hasattr(exc, 'errors') else exc}"]) from exc
+
+
 # ---------------------------------------------------------------- plan -> StatQuery (the record in labels)
 
 
@@ -406,4 +526,6 @@ def to_query(plan: Plan, index: TableIndex, request: CalcRequest | None = None) 
         reference=request.reference if request is not None else None,
         over=over,
         pick=plan.pick,
+        op=plan.op,
+        period_groups=[list(g) for g in plan.groups] if plan.op else [],
     )
