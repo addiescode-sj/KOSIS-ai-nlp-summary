@@ -16,7 +16,7 @@ from kosis_chat.llm import compose
 from kosis_chat.llm.model import LLMResult, MockClient
 from kosis_chat.pipeline import StatPipeline
 
-from kosis_ai.schemas import Fact, FactPart, TextPart  # isort: skip
+from kosis_ai.schemas import Fact, FactPart, PlanV3, TextPart  # isort: skip
 
 
 def ref(item, region, period):
@@ -247,6 +247,17 @@ def test_pipeline_answer_carries_a_chart_and_the_page_shows_it(household_path, m
     assert row["chart"]["data"]["values"][0]["이름"] == "제주특별자치도"
     page = view_run.build(run_dir).read_text(encoding="utf-8")
     assert "vega-embed@6.26.0" in page and "제주특별자치도" in page and "2023년 1인 가구가 가장 많은 시도는?" in page
+    assert PlanV3.model_validate(row["decision_metadata"]["plan"]).present == "extreme"  # the plan is saved
+    assert '"plan": {' in page and '"op": "rank"' in page and "function planHtml" in page  # and handed to the page
+
+
+def test_plan_is_saved_only_when_code_computed(households):
+    answered = pipeline(households, [reply("서울은 {f1}입니다.")]).ask("2023년 서울특별시 1인 가구 수는?")
+    plan = PlanV3.model_validate(answered.decision_metadata["plan"])
+    assert plan.steps[0].op == "select" and plan.show
+    json.dumps(answered.decision_metadata["plan"])  # plain JSON for results.jsonl
+    refused = pipeline(households, []).ask("2030년 서울 1인 가구 수는?")
+    assert refused.stat_answer.outcome == "refused" and "plan" not in refused.decision_metadata
 
 
 # ---------------------------------------------------------------- T0-03 v2: who wrote the numbers

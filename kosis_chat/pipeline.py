@@ -269,6 +269,7 @@ class StatPipeline:
         query = to_query(plan, self.index, built)
         meta["type"] = plan.type
         meta["pattern"] = built.pattern
+        meta["plan"] = built.plan.model_dump(mode="json", exclude_none=True)  # the plan code computed (S9)
         alternatives = [] if computed else scenario_alternatives(self.table, self.index, built, verdict.default_applied)
         built = with_alternatives(built, alternatives)
         try:

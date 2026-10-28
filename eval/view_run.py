@@ -1,4 +1,5 @@
-"""One HTML page per run folder: every question with its answer, the facts behind it, the grade and the chart.
+"""One HTML page per run folder: every question with its answer, the facts behind it, the grade, the chart, the
+caveats and table (S6) and the plan code computed (decision_metadata.plan).
 
     python -m eval.view_run --run eval/results/<run_id>
 
@@ -38,7 +39,8 @@ border-left:3px solid #2f6db5;padding:8px 10px;margin:6px 0;overflow-wrap:anywhe
 .body{display:grid;grid-template-columns:minmax(0,1fr);gap:10px} .chart{overflow-x:auto}
 table{border-collapse:collapse;font-size:12px;width:100%} th,td{border-bottom:1px solid #eceff4;padding:3px 6px;text-align:left;vertical-align:top}
 th{color:#5b6475;font-weight:600} details{font-size:12px;margin-top:6px} pre{white-space:pre-wrap;font-size:11px;background:#f8f9fb;padding:6px}
-.err{color:#9b1c1c;font-size:12px}
+.err{color:#9b1c1c;font-size:12px} .cav{font-size:12px;color:#7a5800;margin:2px 0} .ctx{color:#5b6475;font-size:11px}
+.sub{font-size:12px;font-weight:600;color:#5b6475;margin:6px 0 2px}
 </style></head><body>
 <header><h1>__TITLE__</h1><div class="meta" id="meta"></div>
 <div class="filters">판정 <select id="fv"><option value="">전체</option><option>PASS</option><option>PARTIAL</option><option>FAIL</option><option>-</option></select>
@@ -53,15 +55,33 @@ document.getElementById('meta').textContent = D.meta;
 const fill = (id, vals) => { const el = document.getElementById(id); [...new Set(vals)].sort().forEach(v => { const o = document.createElement('option'); o.textContent = v; el.appendChild(o); }); };
 fill('ft', D.rows.map(r => r.type)); fill('fr', D.rows.map(r => r.route));
 function fmt(f) { if (f.value === null || f.value === undefined) return f.raw ? `'${f.raw}'` : ''; return Number(f.value).toLocaleString('ko-KR', {maximumFractionDigits: 4}) + (f.unit || ''); }
+function stepText(s) {
+  const rest = Object.entries(s).filter(([k, v]) => k !== 'id' && k !== 'op' && !(Array.isArray(v) && !v.length) && !(v && typeof v === 'object' && !Array.isArray(v) && !Object.keys(v).length)).map(([k, v]) => `${k}=${JSON.stringify(v)}`);
+  return `<tr><td>${esc(s.id)}</td><td>${esc(s.op)}</td><td>${esc(rest.join(' '))}</td></tr>`;
+}
+function planHtml(p) {
+  if (!p) return '';
+  const head = `show ${(p.show || []).join(', ')} · present ${p.present || '-'}${p.note ? ' · ' + p.note : ''}`;
+  return `<div class="sub">계획 (${esc(head)})</div><table><tr><th>단계</th><th>종류</th><th>내용</th></tr>${(p.steps || []).map(stepText).join('')}</table>`;
+}
+function tableHtml(t, facts) {
+  if (!t) return '';
+  const byId = Object.fromEntries((facts || []).map(f => [f.id, f]));
+  const rows = t.rows.map(row => `<tr><td>${esc(row.label)}</td>${row.fact_ids.map(id => `<td>${id && byId[id] ? esc(fmt(byId[id])) : ''}</td>`).join('')}</tr>`).join('');
+  return `<div class="sub">표</div><table><tr><th></th>${t.columns.map(c => `<th>${esc(c)}</th>`).join('')}</tr>${rows}</table>`;
+}
 function card(r) {
-  const facts = (r.facts || []).map(f => `<tr><td>${esc(f.id)}</td><td>${esc(fmt(f))}</td><td>${esc(f.period || '')}</td>
+  const ctx = new Set(r.context || []);
+  const cav = (r.caveats || []).map(c => `<div class="cav">주의 [${esc(c.kind)}] ${esc(c.text)}</div>`).join('');
+  const facts = (r.facts || []).map(f => `<tr><td>${esc(f.id)}${ctx.has(f.id) ? ' <span class="ctx">보조</span>' : ''}</td><td>${esc(fmt(f))}</td><td>${esc(f.period || '')}</td>
     <td>${esc(Object.values(f.dims || {}).join(' / '))}</td><td>${esc(f.derivation || f.source_ref || '')}</td><td>${esc(f.note || '')}</td></tr>`).join('');
   return `<section class="card" data-id="${esc(r.id)}"><div class="head"><span class="id">${esc(r.id)}</span>
     <span class="tag">${esc(r.kind)}</span><span class="tag">${esc(r.type)}</span><span class="tag ${esc(r.verdict)}">${esc(r.verdict)}</span>
     <span class="tag">${esc(r.route)}</span>${r.errors.length ? `<span class="err">${esc(r.errors.join(', '))}</span>` : ''}</div>
-    <div class="q">${esc(r.question)}</div><div class="body"><div class="a">${esc(r.answer)}</div>
+    <div class="q">${esc(r.question)}</div><div class="body"><div class="a">${esc(r.answer)}</div>${cav}
     <div class="chart" id="c-${esc(r.id)}">${r.chart ? '' : '<span class="meta">그래프 없음</span>'}</div><div>
     ${facts ? `<table><tr><th>id</th><th>값</th><th>시점</th><th>분류</th><th>원본 칸·계산식</th><th>메모</th></tr>${facts}</table>` : ''}
+    ${tableHtml(r.table, r.facts)}${planHtml(r.plan)}
     <details><summary>상세 (채점 메모·모델 원문)</summary><pre>${esc(r.details.join('\\n'))}</pre><pre>${esc(r.raw.join('\\n---\\n'))}</pre></details></div></div></section>`;
 }
 function draw() {
@@ -103,6 +123,8 @@ def build(run: Path, run_index: int = 0) -> Path:
             "id": qid, "kind": r.get("kind", ""), "type": item.get("type") or "-", "question": item.get("question", ""),
             "answer": stat.get("text") or r.get("raw_answer") or r.get("call_error") or "",
             "facts": (stat.get("result") or {}).get("facts", []), "chart": r.get("chart"),
+            "plan": meta.get("plan"), "caveats": stat.get("caveats") or [], "table": stat.get("table"),
+            "context": stat.get("context_fact_ids") or [],
             "route": f"{meta.get('route', '-')}/{meta.get('compose', '-')}",
             "verdict": grade.get("verdict", "-"), "errors": grade.get("error_types", []),
             "details": grade.get("details", []), "raw": r.get("raw_responses") or [],
