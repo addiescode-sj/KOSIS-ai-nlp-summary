@@ -165,3 +165,4 @@ def test_pipeline_asks_back_when_the_plan_names_several_codes(household_path, mo
     stat = answer.stat_answer
     assert answer.decision_metadata["route"] == "llm_plan+clarify" and stat.outcome == "clarify"
     assert stat.clarify_options == ["서울특별시 > 중구", "부산광역시 > 중구"] and stat.numbers_origin == "none"
+    assert [(c.code, c.axis) for c in stat.clarify_choices] == [("11020", REGION), ("21010", REGION)]  # S6: with codes

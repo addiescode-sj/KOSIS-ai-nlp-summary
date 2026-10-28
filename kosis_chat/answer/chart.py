@@ -3,13 +3,16 @@
 value: one bar · trend: a line over every period · compare: two bars · share: a pie of the parts and the rest ·
 extreme: every candidate as a sorted bar · avg / sum: the periods as bars with the aggregate in the title ·
 pavg / psum / vsa / shr: the two numbers compared as bars · gap: the gap at each period as bars · grw: each target's
-change as bars · plan (written by the model): the cells it shows, as bars. The asked value is highlighted; numbers are the facts' own values. chart_spec returns the shared Chart (kind, Vega-Lite spec, the facts it draws) that StatAnswer carries.
+change as bars · plan (written by the model): the cells it shows, as bars. (S6) Whenever the main cells form a grid of
+two or more targets by two or more periods (answer/table.py), the chart is that grid: bars of the targets side by side
+at each period (grouped_bar, up to 3 periods) or one line per target (multi_line). The asked value is highlighted; numbers are the facts' own values. chart_spec returns the shared Chart (kind, Vega-Lite spec, the facts it draws) that StatAnswer carries.
 Render with any Vega-Lite v5 viewer (vega-embed, Streamlit st.vega_lite_chart, Altair); eval/view_run.py shows them.
 """
 
 from __future__ import annotations
 
 from kosis_chat.answer.render import fact_label, format_fact, format_number, item_label, period_text, span_text
+from kosis_chat.answer.table import grid
 from kosis_chat.compute import Computed
 
 from kosis_ai.schemas import Chart, Fact, QuestionType  # isort: skip
@@ -245,14 +248,49 @@ def _listed(computed: Computed, by_id: dict[str, Fact]) -> Chart | None:
     return Chart(kind="bar", spec=spec, fact_ids=[f.id for f in cells])
 
 
+# Patterns whose answer compares targets over periods: drawn as a grid when the cells form one.
+GRID_PATTERNS = ("gap", "grw", "plan", "trend", "compare")
 _CHARTS = {"value": _value, "trend": _trend, "compare": _compare, "share": _share, "extreme": _extreme,
            "avg": _one_term, "sum": _one_term, "pavg": _two_terms, "psum": _two_terms, "vsa": _two_terms, "shr": _two_terms,
            "gap": _gap, "grw": _grw, "plan": _listed}
 
 
+GROUPED_MAX_PERIODS = 3
+
+
+def _grid(computed: Computed) -> Chart | None:
+    g = grid(computed)
+    if g is None:
+        return None
+    rows = [{"대상": name, "시점": period_text(p), **_row(name, f, False)}
+            for name, facts in g.rows for p, f in zip(g.periods, facts) if f is not None and f.value is not None]
+    if not rows:
+        return None
+    first = next(f for _, facts in g.rows for f in facts if f is not None)
+    title = _common([(f.dims or {}, None) for _, facts in g.rows for f in facts if f is not None]) or fact_label(first)
+    spec = _base(title, rows)
+    y = {"field": "값", "type": "quantitative", "title": _unit_title(g.unit)}
+    color = {"field": "대상", "type": "nominal", "title": None}
+    tooltip = [{"field": "대상", "type": "nominal"}, {"field": "시점", "type": "ordinal"}, {"field": "표시", "type": "nominal", "title": "값"}]
+    if len(g.periods) <= GROUPED_MAX_PERIODS:
+        spec["mark"] = {"type": "bar"}
+        spec["encoding"] = {"x": {"field": "시점", "type": "ordinal", "title": None, "axis": {"labelAngle": 0}},
+                            "xOffset": {"field": "대상"}, "y": y, "color": color, "tooltip": tooltip}
+        kind = "grouped_bar"
+    else:
+        spec["mark"] = {"type": "line", "point": True}
+        spec["encoding"] = {"x": {"field": "시점", "type": "ordinal", "title": None, "sort": None}, "y": {**y, "scale": {"zero": False}},
+                            "color": color, "tooltip": tooltip}
+        kind = "multi_line"
+    ids = [f.id for _, facts in g.rows for f in facts if f is not None]
+    return Chart(kind=kind, spec=spec, fact_ids=ids)
+
+
 def chart_spec(kind: QuestionType, computed: Computed) -> Chart | None:
     """The chart for the answer (kind, Vega-Lite v5 spec, the facts drawn), or None when there is nothing to draw."""
     by_id = {f.id: f for f in computed.result.facts}
+    if computed.pattern in GRID_PATTERNS and (found := _grid(computed)) is not None:
+        return found
     builder = _CHARTS[computed.pattern or kind]
     try:
         return builder(computed, by_id)

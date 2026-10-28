@@ -207,7 +207,7 @@ def test_run_eval_stat_pipeline(household_path, mock_settings, tmp_path):
     run_dir = run_eval.run(gdir, "C", mock_settings, tmp_path / "results", client=MockClient([reply("서울은 {f1}입니다.")]),
                            pipeline="stat")
     manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["pipeline"] == "stat" and manifest["prompt_version"] == "compose-v1" and manifest["judge_mode"] == "rules"
+    assert manifest["pipeline"] == "stat" and manifest["prompt_version"] == "compose-v2" and manifest["judge_mode"] == "rules"
     (row,) = scorer.read_jsonl(run_dir / "results.jsonl")
     assert row["stat_answer"]["parts"][1] == {"kind": "fact", "fact_id": "f1"} and row["call_status"] == "ok"
     assert grade_run.main(["--run", str(run_dir)]) == 0
@@ -224,11 +224,7 @@ def test_run_eval_stat_pipeline(household_path, mock_settings, tmp_path):
     (build.compare([ref("T1", "11", "2023"), ref("T1", "00", "2023")], 1), "compare", 2, ["서울특별시"]),
     (build.share([ref("T1", "11", "2023")], ref("T0", "11", "2023")), "share", 2, ["1인"]),  # the part and a '그 외' slice
     (build.extreme([ref("T1", r, "2023") for r in ("11", "21", "39")], "max"), "extreme", 3, ["제주특별자치도"]),
-    (build.gap((ref("T1", "11", "2015"), ref("T1", "21", "2015")), (ref("T1", "11", "2024"), ref("T1", "21", "2024"))),
-     "compare", 2, ["2024년"]),  # the gap at each period, the later one highlighted
-    (build.growth((ref("T1", "11", "2015"), ref("T1", "11", "2024")), (ref("T1", "21", "2015"), ref("T1", "21", "2024"))),
-     "compare", 2, ["서울특별시"]),  # each target's growth rate, the one the gap names first highlighted
-])
+])  # gap and grw are drawn as a grid of targets by periods (S6, tests/test_answer_contract.py)
 def test_chart_for_each_type(households, built, kind, rows, highlighted):
     from kosis_chat.answer.chart import SCHEMA, chart_spec
     chart = chart_spec(kind, compute(clean(households), built))

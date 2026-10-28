@@ -157,7 +157,8 @@ def default_sentence(applied: dict[str, str]) -> str:
 
 
 def final_text(body: str, source: Source | None, applied: dict[str, str] | None = None, notes: list[str] | None = None) -> str:
+    """The default sentence, the body, one '참고:' line per note (S6: the caveats' texts), then the source."""
     lines = [s for s in (default_sentence(applied or {}), body) if s]
-    lines += [f"참고: {n}" for n in notes or [] if n]
+    lines += [f"참고: {n}" for n in dict.fromkeys(notes or []) if n]
     text = "\n".join(lines)
     return f"{text}\n\n출처: {source.citation()}" if source else text

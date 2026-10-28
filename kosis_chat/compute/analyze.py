@@ -369,6 +369,8 @@ def _fixed(plan: Plan, index: TableIndex, free: set[str], problems: list[str]) -
             out[name] = named[0]
         elif len(named) > 1:
             problems.append(f"{name}: {len(named)}개 중 하나")
+        elif (chosen := _defaulted(plan, axis)) is not None:  # the base scenario the judge chose (중위 추계)
+            out[name] = chosen
         elif (total := _total(index, name)) is not None:
             out[name] = total
         elif len(axis.labels) == 1:
@@ -376,6 +378,13 @@ def _fixed(plan: Plan, index: TableIndex, free: set[str], problems: list[str]) -
         else:
             problems.append(name)
     return out
+
+
+def _defaulted(plan: Plan, axis) -> str | None:
+    """The code of the label the judge's default_applied names for this category ('가정별': '중위 추계')."""
+    label = plan.default_applied.get(axis.name)
+    found = [c for c, text in axis.labels.items() if label and text.strip().startswith(label)]
+    return found[0] if len(found) == 1 else None
 
 
 def _one_period(plan: Plan, lookup: _Lookup, fixed_sets: list[dict[str, str]]) -> str | None:

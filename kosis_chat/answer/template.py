@@ -5,6 +5,8 @@ Each template cites the facts the calculation marked as main, so a template answ
 
 from __future__ import annotations
 
+import re
+
 from kosis_chat.answer.render import (
     derived_kind,
     direction,
@@ -225,15 +227,34 @@ def _grw(facts: list[Fact], computed: Computed) -> list:
     return parts + [_t(f"{_side(winner, loser)}의 {what} "), _f(d), _t(" 더 높습니다.")]
 
 
+_DERIVED_IDS = re.compile(r"f\d+")
+
+
 def _listed(facts: list[Fact], computed: Computed) -> list:
-    """plan (a plan the model wrote): every number it shows, named by its cell or by what was computed. A number is
-    shown without its sign, so a negative computed one gets its minus here (the shape says nothing of direction)."""
+    """plan (a plan the model wrote), worded by its blocks (S6): each cell as '시점 대상 값', each computed number as
+    '<what it was computed from>의 <what it is> 값' ('2005년 경기도·부산광역시의 차이'), from the facts' own labels.
+    A number is shown without its sign, so a negative computed one gets its minus here."""
+    by_id = {f.id: f for f in computed.result.facts}
+
+    def name_of(fact: Fact) -> str:
+        if not fact.derivation:
+            return f"{period_text(fact.period) + ' ' if fact.period else ''}{fact_label(fact)}".strip()
+        operands = [by_id[i] for i in dict.fromkeys(_DERIVED_IDS.findall(fact.derivation)) if i in by_id]
+        cells = [o for o in operands if not o.derivation]
+        if len(cells) == len(operands) == 2:
+            a, b = cells
+            if a.period == b.period:
+                where = f"{period_text(a.period) + ' ' if a.period else ''}{_side(a, b)}·{_side(b, a)}"
+            else:
+                where = f"{fact_label(a)} {period_text(a.period or '')}·{period_text(b.period or '')}"
+            return f"{where.strip()}의 {derived_kind(fact)}"
+        return derived_kind(fact)
+
     parts: list = []
     for n, fact in enumerate(facts):
-        if fact.derivation:
-            name = derived_kind(fact) + (" -" if fact.value is not None and fact.value < 0 else "")
-        else:
-            name = f"{period_text(fact.period) + ' ' if fact.period else ''}{fact_label(fact)}".strip()
+        name = name_of(fact)
+        if fact.derivation and fact.value is not None and fact.value < 0:
+            name += " -"
         parts += [_t(f"{', ' if n else ''}{name}" + ("" if name.endswith("-") else " ")), _f(fact)]
     return parts + [_t("입니다.")]
 

@@ -35,8 +35,14 @@ RefusalReason = Literal[
     "out_of_scope",  # outside the provided tables
 ]
 MeasureKind = Literal["count_stock", "count_flow", "ratio", "average", "index"]
-# How a chart is drawn (kosis_chat/answer/chart.py): bars by name, bars in period order, a line over periods, a pie.
-ChartKind = Literal["bar", "timeline", "line", "pie"]
+# How a chart is drawn (kosis_chat/answer/chart.py): bars by name, bars in period order, a line over periods, a pie,
+# (S6) one line per series over periods, and bars of several targets side by side at each period.
+ChartKind = Literal["bar", "timeline", "line", "pie", "multi_line", "grouped_bar"]
+# What a caveat warns about (S6, kosis_chat/answer/caveats.py): asked periods the table lacks, a condition the question
+# left out and code filled in, a simple average of rates, a provisional value, a symbol cell shown, a series that
+# changed its basis, an event start the model gave, and an alternative (another scenario, a look-alike label).
+CaveatKind = Literal["missing_years", "default_applied", "simple_average", "provisional", "symbol_cell", "series_break",
+                     "event_source", "alternative"]
 Outcome = Literal["answered", "refused", "clarify"]
 # Who wrote the numbers the answer shows (v2). code: every number is a Fact rendered by code (FactPart);
 # model: the model wrote the sentence, so its numbers are unverified; none: a sentence code wrote without citing
@@ -50,6 +56,7 @@ QUESTION_KINDS = get_args(QuestionKind)
 REFUSAL_REASONS = get_args(RefusalReason)
 NUMBERS_ORIGINS = get_args(NumbersOrigin)
 CHART_KINDS = get_args(ChartKind)
+CAVEAT_KINDS = get_args(CaveatKind)
 VALUE_KINDS = get_args(ValueKind)
 MAX_DIMS = 8  # dim1..dim8 columns in the Parquet files
 MAX_ROUND = 10  # decimals a derived fact may keep (the golden set uses 0..5)
@@ -595,6 +602,46 @@ class TextPart(Contract):
 AnswerPart = Annotated[FactPart | TextPart, Field(discriminator="kind")]
 
 
+class Caveat(Contract):
+    """A word of care shown with the answer (S6). text is code's sentence; it names periods but no other numbers
+    (a number belongs in a fact); fact_ids are the facts it is about."""
+
+    kind: CaveatKind
+    text: str = Field(min_length=1)
+    fact_ids: list[str] = Field(default_factory=list)
+
+
+class ClarifyChoice(Contract):
+    """One option of an ask-back with the code it stands for (S6); clarify_options keeps the labels."""
+
+    code: str = Field(min_length=1)
+    label: str = Field(min_length=1)
+    axis: str = Field(min_length=1)
+
+
+class TableRow(Contract):
+    label: str = Field(min_length=1)
+    fact_ids: list[str | None] = Field(min_length=1)  # one per column; None where the row has no fact
+
+
+class TablePart(Contract):
+    """The answer's facts as a table (S6): rows and columns hold fact ids, the numbers stay in the facts."""
+
+    kind: Literal["table"] = "table"
+    columns: list[str] = Field(min_length=1)
+    rows: list[TableRow] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _shape(self) -> TablePart:
+        bad = [r.label for r in self.rows if len(r.fact_ids) != len(self.columns)]
+        if bad:
+            raise ValueError(f"table rows need one cell per column: {bad}")
+        return self
+
+    def fact_ids(self) -> list[str]:
+        return [i for r in self.rows for i in r.fact_ids if i is not None]
+
+
 class Chart(Contract):
     """A chart code drew from the answer's facts (v2). spec is Vega-Lite v5 JSON; fact_ids names the facts whose
     values the chart shows (StatAnswer checks they exist). Rows drawn from the table for context only (the other
@@ -613,6 +660,19 @@ class Chart(Contract):
         return self
 
 
+_NUMBER = re.compile(r"\d[\d,]*(?:\.\d+)?")
+_PERIOD_AFTER = re.compile(r"\s*(?:년|월|분기|반기)")
+
+
+def _caveat_numbers(text: str, result: StatResult) -> list[str]:
+    """Numbers in a caveat that are neither a period ('2018년', '3월', '1분기'), nor part of a name ('코로나19'),
+    nor in a fact's labels ('65세')."""
+    labels = {n for f in result.facts for label in (f.dims or {}).values() for n in _NUMBER.findall(label)}
+    return [m.group(0) for m in _NUMBER.finditer(text)
+            if not _PERIOD_AFTER.match(text, m.end()) and not (m.start() and text[m.start() - 1].isalpha())
+            and m.group(0) not in labels]
+
+
 class StatAnswer(Contract):
     """Return value of summarize_stat (T1-11) and of the stage 3 tool."""
 
@@ -623,6 +683,7 @@ class StatAnswer(Contract):
     text: str = ""  # final rendered answer
     refusal: Refusal | None = None
     clarify_options: list[str] = Field(default_factory=list)
+    clarify_choices: list[ClarifyChoice] = Field(default_factory=list)  # S6: the options with their codes
     default_applied: dict[str, str] = Field(default_factory=dict)  # e.g. {"period": "latest (2025)"}
     source: Source | None = None
     # v2 record of trust: see NumbersOrigin. numbers_verified is True only when code checked every number in the
@@ -632,6 +693,10 @@ class StatAnswer(Contract):
     numbers_verified: bool = False
     defaults_verified: bool = False
     chart: Chart | None = None  # v2: drawn from result by code; only an answered answer with code numbers has one
+    # S6: words of care, the facts shown beside the answer (not asked for, never computed with), and a table of facts.
+    caveats: list[Caveat] = Field(default_factory=list)
+    context_fact_ids: list[str] = Field(default_factory=list)
+    table: TablePart | None = None
 
     @model_validator(mode="after")
     def _contract(self) -> StatAnswer:
@@ -667,4 +732,20 @@ class StatAnswer(Contract):
             unknown = [i for i in self.chart.fact_ids if self.result.get(i) is None]
             if unknown:
                 raise ValueError(f"chart.fact_ids reference unknown facts: {unknown}")
+        self._s6_contract()
         return self
+
+    def _s6_contract(self) -> None:
+        if self.clarify_choices and [c.label for c in self.clarify_choices] != self.clarify_options:
+            raise ValueError("clarify_choices labels must equal clarify_options")
+        named = {"caveats": [i for c in self.caveats for i in c.fact_ids], "context_fact_ids": self.context_fact_ids,
+                 "table": self.table.fact_ids() if self.table else []}
+        for where, ids in named.items():
+            unknown = [i for i in ids if self.result.get(i) is None]
+            if unknown:
+                raise ValueError(f"{where} reference unknown facts: {unknown}")
+        stray = [c.text for c in self.caveats if _caveat_numbers(c.text, self.result)]
+        if stray:
+            raise ValueError(f"caveat text names numbers that are not periods: {stray}")
+        if (self.context_fact_ids or self.table) and self.outcome != "answered":
+            raise ValueError("context facts and a table belong to an answered answer")

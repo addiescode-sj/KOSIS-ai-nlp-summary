@@ -5,6 +5,9 @@ judge (rules) -> analyze (rules, the model fills what they leave open) -> comput
 the finished StatAnswer in Answer.stat_answer. A question neither the rules nor the fill can place is planned by the
 model as v3 blocks (analyze_plan, S5b; code still computes), and only when that fails too goes to the compact-v2
 chatbot. A plan that names something several codes could be asks back (outcome clarify).
+S6: the answer also records its caveats (shown as '참고:' lines), the facts shown beside it (context_fact_ids: the
+other scenarios of a projection the question did not choose, a newer period), a table of targets by periods, and an
+ask-back's options with their codes (clarify_choices).
 """
 
 from __future__ import annotations
@@ -13,13 +16,16 @@ import time
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from kosis_chat.answer.caveats import caveats_of
 from kosis_chat.answer.chart import chart_spec
 from kosis_chat.answer.render import final_text, render_parts
+from kosis_chat.answer.table import table_part
 from kosis_chat.answer.template import template_parts
 from kosis_chat.answer.verify import label_digits, verify
 from kosis_chat.chatbot import Answer, Chatbot, judge_record
 from kosis_chat.compute import CalcRefused, compute
 from kosis_chat.compute.analyze import Plan, Unresolved, build_plan, rule_plan, to_query
+from kosis_chat.compute.context import scenario_alternatives, with_alternatives
 from kosis_chat.compute.resolve import NeedsClarify
 from kosis_chat.config import Settings, load_settings
 from kosis_chat.contract import to_source
@@ -31,7 +37,7 @@ from kosis_chat.llm import analyze_fill, analyze_plan, compose, event_lookup
 from kosis_chat.llm.model import STATUS_OK, LLMClient, build_client
 from kosis_chat.llm.structured import StructuredResult, ask_structured
 
-from kosis_ai.schemas import PlanV3, Refusal, StatAnswer, StatQuery  # isort: skip
+from kosis_ai.schemas import ClarifyChoice, PlanV3, Refusal, StatAnswer, StatQuery  # isort: skip
 
 VERSION = compose.VERSION
 FALLBACK_PROMPT = "compact-v2"
@@ -200,11 +206,12 @@ class StatPipeline:
 
         return lookup
 
-    def _compose(self, question: str, computed, note: str | None, calls: _Calls, meta: dict) -> tuple[list, bool]:
+    def _compose(self, question: str, computed, cautions: list[str], context_ids: list[str], calls: _Calls,
+                 meta: dict) -> tuple[list, bool]:
         """(parts, verified): the model's sentence once it passes verification, else a code template.
 
         verified is what StatAnswer.numbers_verified records: the parts the answer shows passed verify()."""
-        user = compose.user_prompt(question, computed, note)
+        user = compose.user_prompt(question, computed, cautions, context_ids)
         problems: list[str] = []
         for attempt in range(2):
             if problems:
@@ -262,25 +269,34 @@ class StatPipeline:
         query = to_query(plan, self.index, built)
         meta["type"] = plan.type
         meta["pattern"] = built.pattern
+        alternatives = [] if computed else scenario_alternatives(self.table, self.index, built, verdict.default_applied)
+        built = with_alternatives(built, alternatives)
         try:
             computed = computed or compute(self.table, built)
         except CalcRefused as exc:
             stat = StatAnswer(outcome="refused", query=query, refusal=Refusal(reason=exc.reason, message=exc.message),
                               text=final_text(exc.message, source), source=source, numbers_origin="none")
             return self._done(stat, verdict, meta | {"route": f"{meta['route']}+calc_refused"}, calls, started)
-        parts, verified = self._compose(question, computed, computed.note, calls, meta)
+        context = set(built.context)
+        context_ids = [f.id for f in computed.result.facts if f.source_ref in context and f.id not in computed.main]
+        caveats = caveats_of(computed, self.table, alternatives, context_ids)
+        # The default sentence already names the conditions the rules chose; a plan's own defaults are shown here.
+        shown = [c.text for c in caveats if c.kind != "default_applied" or not verdict.default_applied]
+        parts, verified = self._compose(question, computed, shown, context_ids, calls, meta)
         meta["label_digits"] = label_digits(parts, computed)
         meta["numbers_verified"] = verified
         body = render_parts(parts, computed.result)
         chart = chart_spec(plan.type, computed)
+        table = table_part(computed)
         stat = StatAnswer(
             outcome="answered", query=query, result=computed.result, parts=parts,
-            text=final_text(body, source, verdict.default_applied, [computed.note]),
+            text=final_text(body, source, verdict.default_applied, shown),
             default_applied=verdict.default_applied, source=source,
             numbers_origin="code", numbers_verified=verified, defaults_verified=True,  # rule_plan computed with them
-            chart=chart,
+            chart=chart, caveats=caveats, context_fact_ids=context_ids, table=table,
         )
         meta["chart"] = chart.kind if chart else None
+        meta["caveats"] = [c.kind for c in caveats]
         return replace(self._done(stat, verdict, meta, calls, started), chart=chart.spec if chart else None)
 
     def _verdict_answer(self, question: str, verdict: Verdict) -> StatAnswer:
@@ -300,8 +316,9 @@ class StatPipeline:
         options = [label for _, label in asked.options]
         body = "\n".join([asked.message, *(f"- {o}" for o in options)])
         source = to_source(self.table.meta, org_id=self.org_id)
+        choices = [ClarifyChoice(code=code, label=label, axis=asked.axis) for code, label in asked.options]
         return StatAnswer(outcome="clarify", query=StatQuery(question=question), clarify_options=options,
-                          text=final_text(body, source), source=source, numbers_origin="none")
+                          clarify_choices=choices, text=final_text(body, source), source=source, numbers_origin="none")
 
     def _done(self, stat: StatAnswer, verdict: Verdict, meta: dict, calls: _Calls, started: float) -> Answer:
         return Answer(
