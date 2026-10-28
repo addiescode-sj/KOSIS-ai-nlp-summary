@@ -1,0 +1,20 @@
+{"run": "20261026-160620-840837-raw-dash", "question_id": "S-TRN-03", "issue": "ignored_part", "source": "human", "note": "원인을 물었는데 안내 없이 추이만 답함 (Notion: HCX-007 vs 파이프라인)"}
+{"run": "20261026-160620-840837-raw-dash", "question_id": "S-TRN-01", "issue": "missing_detail", "source": "human", "note": "연도별 값을 계산해 두고 문장에는 처음·끝만 씀 (Notion: HCX-007 vs 파이프라인)"}
+{"run": "20261026-160620-840837-raw-dash", "question_id": "S-TRN-01", "issue": "awkward_label", "source": "human", "note": "합계출산율을 출산율로 줄여 씀, '만큼' 어색 (Notion: HCX-007 vs 파이프라인)"}
+{"run": "20261026-160620-840837-raw-dash", "question_id": "S-VAL-08", "issue": "missing_detail", "source": "human", "note": "'다 더하면' 질문에 지역 합계 = 전국 값이라는 설명이 없음, 개선 여지 (Notion: HCX-007 vs 파이프라인)"}
+{"run": "20261026-150118-180405-raw-dash", "question_id": "S-CLR-02", "issue": "unsupported_judgement", "source": "human", "note": "'높은 편이라고 할 수 있습니다' 근거 없는 평가 (Notion: 환각 보정)"}
+{"run": "20261026-150118-180405-raw-dash", "question_id": "S-TRN-05", "issue": "awkward_label", "source": "human", "note": "'여자 1985 비율은' 템플릿 문장 (Notion: 환각 보정)"}
+{"run": "20261026-160620-840837-raw-dash", "question_id": "S-DEF-01", "issue": "format_error", "source": "candidate", "note": "단위 중복"}
+{"run": "20261026-160620-840837-raw-dash", "question_id": "S-EDG-02", "issue": "format_error", "source": "candidate", "note": "연월 코드 노출"}
+{"run": "20261026-160620-840837-raw-dash", "question_id": "S-EDG-03", "issue": "format_error", "source": "candidate", "note": "연월 코드 노출"}
+{"run": "20261026-160620-840837-raw-dash", "question_id": "S-EDG-05", "issue": "format_error", "source": "candidate", "note": "연월 코드 노출"}
+{"run": "20261026-160620-840837-raw-dash", "question_id": "S-CX-MON-02", "issue": "format_error", "source": "candidate", "note": "연월 코드 노출"}
+{"run": "20261026-160620-840837-raw-dash", "question_id": "S-CMP-04", "issue": "format_error", "source": "candidate", "note": "조사 불일치 (가구과)"}
+{"run": "20261026-160620-840837-raw-dash", "question_id": "S-SHR-01", "issue": "format_error", "source": "candidate", "note": "내부 라벨 일반가구_계"}
+{"run": "20261026-160620-840837-raw-dash", "question_id": "S-SHR-03", "issue": "format_error", "source": "candidate", "note": "내부 라벨 일반가구_계"}
+{"run": "20261026-160620-840837-raw-dash", "question_id": "S-SHR-04", "issue": "format_error", "source": "candidate", "note": "내부 라벨 일반가구_계"}
+{"run": "20261026-160620-840837-raw-dash", "question_id": "S-SHR-06", "issue": "format_error", "source": "candidate", "note": "내부 라벨 일반가구_계"}
+{"run": "20261026-160620-840837-raw-dash", "question_id": "S-CX-SHR-01", "issue": "format_error", "source": "candidate", "note": "내부 라벨 일반가구_계"}
+{"run": "20261026-160620-840837-raw-dash", "question_id": "S-REF-05", "issue": "format_error", "source": "candidate", "note": "미완성 조사 템플릿"}
+{"run": "20261026-160620-840837-raw-dash", "question_id": "S-REF-06", "issue": "format_error", "source": "candidate", "note": "미완성 조사 템플릿"}
+{"run": "20261026-160620-840837-raw-dash", "question_id": "S-CX-REF-02", "issue": "format_error", "source": "candidate", "note": "미완성 조사 템플릿"}

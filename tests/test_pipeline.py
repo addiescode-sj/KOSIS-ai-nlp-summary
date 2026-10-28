@@ -119,7 +119,7 @@ def test_model_sentence_with_code_numbers(households):
     assert stat.query.type == "value" and stat.query.filters == {"행정구역별(읍면동)": "서울특별시"}
     assert to_stat_answer("q", answer) is stat
     _, user = bot.client.calls[0]
-    assert "{f1} [반드시 인용] 2023년 서울특별시 1인 = 3,102가구" in user
+    assert "{f1} [반드시 인용] 2023년 서울특별시 1인 가구 = 3,102가구" in user
 
 
 def test_one_retry_after_a_typed_number(households):
@@ -133,7 +133,7 @@ def test_template_after_two_failures(households):
     bot = pipeline(households, [reply("3102가구"), reply("3102가구")])
     answer = bot.ask("2023년 서울특별시 1인 가구 수는?")
     assert answer.decision_metadata["compose"] == "template"
-    assert answer.stat_answer.text.startswith("2023년 서울특별시 1인은 3,102가구입니다.")
+    assert answer.stat_answer.text.startswith("2023년 서울특별시 1인 가구는 3,102가구입니다.")
 
 
 def test_rule_refusal_sends_no_call(households):
@@ -222,7 +222,7 @@ def test_run_eval_stat_pipeline(household_path, mock_settings, tmp_path):
     (build.value(ref("T1", "11", "2023")), "value", 4, ["2023"]),  # every numeric period (2025 is blank)
     (build.trend([ref("T1", "21", p) for p in ("2015", "2020", "2023")]), "trend", 3, ["2015", "2023"]),
     (build.compare([ref("T1", "11", "2023"), ref("T1", "00", "2023")], 1), "compare", 2, ["서울특별시"]),
-    (build.share([ref("T1", "11", "2023")], ref("T0", "11", "2023")), "share", 2, ["1인"]),  # the part and a '그 외' slice
+    (build.share([ref("T1", "11", "2023")], ref("T0", "11", "2023")), "share", 2, ["1인 가구"]),  # the part and a '그 외' slice
     (build.extreme([ref("T1", r, "2023") for r in ("11", "21", "39")], "max"), "extreme", 3, ["제주특별자치도"]),
 ])  # gap and grw are drawn as a grid of targets by periods (S6, tests/test_answer_contract.py)
 def test_chart_for_each_type(households, built, kind, rows, highlighted):
@@ -342,15 +342,15 @@ def test_average_question_is_answered_with_a_chart_in_the_contract(households):
 
 
 @pytest.mark.parametrize("question, pattern, text", [
-    ("2015년부터 2024년까지 서울특별시 1인 가구의 연평균은?", "avg", "2015년~2024년 서울특별시 1인 평균은 3,101.5가구입니다."),
+    ("2015년부터 2024년까지 서울특별시 1인 가구의 연평균은?", "avg", "2015년~2024년 서울특별시 1인 가구 평균은 3,101.5가구입니다."),
     ("서울특별시 1인 가구는 2015~2020년 평균보다 2023~2024년 평균이 얼마나 많아?", "pavg",
-     "서울특별시 1인은 2015년~2020년 평균 3,100.5가구에서 2023년~2024년 평균 3,102.5가구로 2.0가구 늘었습니다(증가율 0.1%)."),
+     "서울특별시 1인 가구는 2015년~2020년 평균 3,100.5가구에서 2023년~2024년 평균 3,102.5가구로 2.0가구 늘었습니다(증가율 0.1%)."),
     ("2024년 서울특별시 1인 가구는 2015~2023년 평균보다 얼마나 많아?", "vsa",
-     "2024년 서울특별시 1인은 3,103가구로 2015년~2023년 평균 3,101.0가구보다 2.0가구 많습니다(증가율 0.1%)."),
+     "2024년 서울특별시 1인 가구는 3,103가구로 2015년~2023년 평균 3,101.0가구보다 2.0가구 많습니다(증가율 0.1%)."),
     ("전국 일반가구 중 1인 가구 비중은 2015년보다 2024년에 몇 %p 늘었어?", "shr",
-     "전국 일반가구_계 가운데 1인 비중은 2015년 11.0%에서 2024년 11.0%로 변함이 없습니다(차이 0.0%p)."),  # made-up values: equal shares
+     "전국 일반가구 전체 가운데 1인 가구 비중은 2015년 11.0%에서 2024년 11.0%로 변함이 없습니다(차이 0.0%p)."),  # made-up values: equal shares
     ("서울과 부산의 1인 가구 격차는 2015년보다 2024년에 얼마나 변했어?", "gap",
-     ("서울특별시와 부산광역시의 1인 격차는 2015년 1,000가구(서울특별시 3,100가구, 부산광역시 4,100가구)에서 2024년 "
+     ("서울특별시와 부산광역시의 1인 가구 격차는 2015년 1,000가구(서울특별시 3,100가구, 부산광역시 4,100가구)에서 2024년 "
       "1,000가구(서울특별시 3,103가구, 부산광역시 4,103가구)로 변함이 없습니다(차이 0가구).")),  # made-up values: equal gaps
     ("2015년 대비 2024년 1인 가구 증가율은 서울과 부산 중 어디가 더 높아?", "grw",
      "2015년~2024년 서울특별시는 3,100가구에서 3,103가구로 0.1% 증가했고, 부산광역시는 4,100가구에서 4,103가구로 0.1% 증가했습니다."),

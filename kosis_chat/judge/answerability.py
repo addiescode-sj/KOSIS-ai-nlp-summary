@@ -62,6 +62,10 @@ class Verdict:
         return cls("refused", rule, Refusal(reason=reason, message=message, available=available), final=True)
 
 
+# T1-14: docs/question_types.md criteria the rules did not implement yet
+EVALUATIVE = re.compile(r"(높|많|낮|적)은\s*편")  # "높은 편이야?": no comparison basis -> clarify
+
+
 # ---------------------------------------------------------------- resolving labels to codes
 
 
@@ -216,7 +220,7 @@ def _same_name(p: Parsed, resolved: Resolved, **_) -> Verdict | None:
     if not resolved.ambiguous:
         return None
     label, options = resolved.ambiguous[0]
-    question = messages.CLARIFY_LABEL.format(label=label)
+    question = messages.with_josa(messages.CLARIFY_LABEL.format(label=label))
     return Verdict("clarify", "same_name", clarify_question=question, clarify_options=tuple(options), final=True)
 
 
@@ -238,6 +242,14 @@ def _vague_item(p: Parsed, index: TableIndex, resolved: Resolved, **_) -> Verdic
             return Verdict("clarify", "vague_item", clarify_question=messages.CLARIFY_ITEM, clarify_options=options,
                            final=True)
     return None
+
+
+def _evaluative(p: Parsed, **_) -> Verdict | None:
+    """'1990년생 누적 혼인 비율은 높은 편이야?': '편' needs a basis the question does not give (T1-14)."""
+    if not (m := EVALUATIVE.search(p.question)):
+        return None
+    question = messages.CLARIFY_COMPARE.format(word=m.group(0).replace(" ", "")[:-1].strip())
+    return Verdict("clarify", "evaluative", clarify_question=question, clarify_options=messages.COMPARE_OPTIONS, final=True)
 
 
 def _unit_mismatch(p: Parsed, index: TableIndex, resolved: Resolved, **_) -> Verdict | None:
@@ -316,8 +328,8 @@ def _symbol(p: Parsed, index: TableIndex, resolved: Resolved, cells: list[Cell],
 
 # Order matters: the first rule that fires decides (a period that is not there beats a label that is shared).
 RULES = (
-    _causal, _out_of_scope, _no_period, _partial_range, _same_name, _vague_item, _unit_mismatch, _not_aggregatable,
-    _no_cell, _symbol,
+    _causal, _out_of_scope, _no_period, _partial_range, _same_name, _vague_item, _evaluative, _unit_mismatch,
+    _not_aggregatable, _no_cell, _symbol,
 )  # fmt: skip
 
 

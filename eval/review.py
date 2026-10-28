@@ -17,12 +17,16 @@ SHEET_COLUMNS = (
     "question",
     "expected",
     "raw_answer",
+    "stat_answer",
     "automatic_checks",
     "error_types",
     "final_verdict",
     "review_note",
+    "quality_score",  # T1-26/T1-21 rubric, 0-2 (eval/README.md); blind: the judge score is never shown here
+    "quality_note",
     "reviewer",
 )
+QUALITY_SCORES = ("0", "1", "2")
 
 
 def _expected(item: dict) -> str:
@@ -31,10 +35,14 @@ def _expected(item: dict) -> str:
 
 
 def export_sheet(run_dir: Path, sheet: Path) -> int:
-    """Write pending rows (with expected facts beside the answer) to a UTF-8 CSV; returns the row count."""
+    """Write rows still to review (pending, or confirmed without a quality score) to a UTF-8 CSV; returns the count.
+
+    A confirmed row comes back with its verdict filled in so only the quality score has to be added.
+    """
     results = read_jsonl(run_dir / "results.jsonl")
     golden = {i["id"]: i for i in read_jsonl(run_dir / "golden.jsonl")}
-    rows = [r for r in results if r["review_status"] != "confirmed"]
+    rows = [r for r in results if r["review_status"] != "confirmed"
+            or (r.get("quality_score") is None and r.get("call_status") == "ok")]  # a failed call has no answer to score
     with sheet.open("w", encoding="utf-8-sig", newline="") as f:  # BOM so Excel opens Korean correctly
         writer = csv.DictWriter(f, fieldnames=SHEET_COLUMNS)
         writer.writeheader()
@@ -48,11 +56,15 @@ def export_sheet(run_dir: Path, sheet: Path) -> int:
                     "question": item["question"],
                     "expected": _expected(item),
                     "raw_answer": r["raw_answer"],
+                    # Shared-contract copy of the answer (read only; runs saved before it was added leave it empty).
+                    "stat_answer": json.dumps(r["stat_answer"], ensure_ascii=False) if r.get("stat_answer") else "",
                     "automatic_checks": json.dumps(r["automatic_checks"], ensure_ascii=False),
-                    "error_types": "",
-                    "final_verdict": "",
-                    "review_note": "",
-                    "reviewer": "",
+                    "error_types": ";".join(r.get("error_types") or []) if r["review_status"] == "confirmed" else "",
+                    "final_verdict": (r.get("final_verdict") or "") if r["review_status"] == "confirmed" else "",
+                    "review_note": r.get("review_note") or "",
+                    "quality_score": "",
+                    "quality_note": r.get("quality_note") or "",
+                    "reviewer": (r.get("reviewer") or "") if r["review_status"] == "confirmed" else "",
                 }
             )
     return len(rows)
@@ -85,12 +97,15 @@ def apply_sheet(run_dir: Path, sheet: Path) -> tuple[int, list[str]]:
                 problems.append(f"{where}: {exc}")
                 continue
             verdict = (row.get("final_verdict") or "").strip().upper() or derived
-            if verdict not in VERDICTS:
+            quality = (row.get("quality_score") or "").strip()  # sheets from before T1-21 have no such column
+            if quality and quality not in QUALITY_SCORES:
+                problems.append(f"{where}: quality_score {quality!r} not in {QUALITY_SCORES}")
+            elif verdict not in VERDICTS:
                 problems.append(f"{where}: verdict {verdict!r} not in {VERDICTS}")
             elif verdict != derived:
                 problems.append(f"{where}: verdict {verdict} conflicts with error types (rules give {derived})")
             else:
-                updates.append((target, {"verdict": verdict, "errors": errors, "row": row}))
+                updates.append((target, {"verdict": verdict, "errors": errors, "row": row, "quality": quality}))
     if problems:
         return 0, problems
     for target, u in updates:
@@ -101,6 +116,8 @@ def apply_sheet(run_dir: Path, sheet: Path) -> tuple[int, list[str]]:
             review_note=(u["row"].get("review_note") or "").strip(),
             reviewer=u["row"]["reviewer"].strip(),
         )
+        if u["quality"]:
+            target.update(quality_score=int(u["quality"]), quality_note=(u["row"].get("quality_note") or "").strip())
     write_jsonl(run_dir / "results.jsonl", results)
     return len(updates), []
 
@@ -121,7 +138,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "export":
         count = export_sheet(run_dir, sheet)
         print(f"{count} pending rows -> {sheet}")
-        print("Fill error_types (';'-separated) and reviewer; final_verdict may be left blank (derived from rules).")
+        print("Fill error_types (';'-separated), quality_score (0-2) and reviewer; final_verdict may be left blank.")
         return 0
     confirmed, problems = apply_sheet(run_dir, sheet)
     if problems:
