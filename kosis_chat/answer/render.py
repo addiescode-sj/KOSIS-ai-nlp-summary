@@ -51,6 +51,27 @@ def direction(fact: Fact) -> str:
     return "증가" if fact.value > 0 else "감소"
 
 
+_KIND_WORDS = {"growth": "증감률", "difference": "차이", "share": "비중", "ratio": "배수", "avg": "평균", "sum": "합계"}
+_SUM = re.compile(r"^f\d+(?:\s*\+\s*f\d+)+$")
+_AVG = re.compile(r"^\(f\d+(?:\s*\+\s*f\d+)+\)\s*/\s*\d+$")
+
+
+def derived_kind(fact: Fact) -> str:
+    """What a computed fact is, read from its derivation: 차이, 증감률, 비중, 배수, 평균 or 합계."""
+    expr = fact.derivation or ""
+    if _SUM.match(expr):
+        return _KIND_WORDS["sum"]
+    if _AVG.match(expr):
+        return _KIND_WORDS["avg"]
+    if "* 100" in expr and "- 1)" in expr:
+        return _KIND_WORDS["growth"]
+    if "* 100" in expr:
+        return _KIND_WORDS["share"]
+    if "/" in expr:
+        return _KIND_WORDS["ratio"]
+    return _KIND_WORDS["difference"]
+
+
 def period_text(period: str) -> str:
     """'2024' -> '2024년'; '202406' -> '2024년 6월'."""
     return f"{period[:4]}년 {int(period[4:])}월" if len(period) == 6 and period.isdigit() else f"{period}년"

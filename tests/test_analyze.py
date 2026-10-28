@@ -4,12 +4,13 @@ from dataclasses import replace
 
 import pytest
 
+from conftest import write_table
 from kosis_chat.compute import compute
 from kosis_chat.compute.analyze import PERIOD_AXIS, Unresolved, build_plan, rule_plan, to_query
 from kosis_chat.data.loader import load_table
 from kosis_chat.data.preprocessing import clean
 from kosis_chat.judge.answerability import judge
-from kosis_chat.judge.question import CHANGE_WORDS, build_index
+from kosis_chat.judge.question import CHANGE_WORDS, asked_periods, build_index
 
 REGION = "행정구역별(읍면동)"
 
@@ -205,3 +206,89 @@ def test_share_of_a_sub_region_uses_its_parent(table, index):
     assert cells(built, "t") == [ref("T0", "11", "2023")]  # the parent even when the question does not name it
     _, built = analyze("2023년 일반가구 중 서울특별시 가구 비중은?", table, index)
     assert cells(built, "t") == [ref("T0", "00", "2023")]  # a province has no parent: the total
+
+
+# ---------------------------------------------------------------- general rules from the S5b review (10/28)
+# Questions worded unlike the golden set, on made-up tables, so the rules are not fitted to the golden questions.
+
+BIRTH_REGIONS = (("00", "전국"), ("11", "서울특별시"), ("21", "부산광역시"))
+
+
+@pytest.fixture
+def births(tmp_path):
+    """A monthly table that also holds each year's value (the sum of its months), counted in '출생건수'."""
+    rows = []
+    for r_no, (code, label) in enumerate(BIRTH_REGIONS):
+        for year in (2023, 2024):
+            months = [100 * (3 - r_no) + m + (year - 2023) * 50 for m in range(1, 13)]
+            values = {f"{year}{m:02d}": v for m, v in enumerate(months, 1)} | {str(year): sum(months)}
+            rows += [{"period": p, "prd_se": "M", "item_id": "T10", "item_name": "출생건수 (명)", "unit": "명",
+                      "dim1_name": "행정구역별", "dim1_code": code, "dim1_label": label, "value_raw": str(v), "value": float(v)}
+                     for p, v in values.items()]
+    catalog = {"survey_name": "가상 동향", "organization": "가상 기관", "table_name": "가상 월별 출생", "period": "월",
+               "url": "https://example.invalid/births"}
+    table = clean(load_table(write_table(tmp_path / "data", "FAKE_BIRTH", rows, catalog)))
+    return table, build_index(table)
+
+
+def birth(region, period):
+    return f"FAKE_BIRTH|T10|{region}|{period}"
+
+
+def test_a_count_is_found_by_the_counted_person(births):
+    table, index = births
+    plan, built = analyze("2024년 부산 출생아 수는?", table, index)
+    assert plan.codes["항목"] == ["T10"] and cells(built) == [birth("21", "2024")]
+    plan, _ = analyze("2023년 전국 출생아 중 서울특별시 출생아 비중은?", table, index)
+    assert plan.codes["항목"] == ["T10"]
+
+
+def test_a_year_on_a_monthly_table_is_its_yearly_value_unless_months_are_asked(births):
+    table, index = births
+    _, built = analyze("2023년 서울과 부산의 출생아 수 차이는?", table, index)
+    assert cells(built) == [birth("11", "2023"), birth("21", "2023")]
+    plan, _ = analyze("2024년 부산 출생아 수 월별 추이는?", table, index)
+    assert plan.periods == ["2024"] + [f"2024{m:02d}" for m in range(1, 13)]
+
+
+def test_a_month_without_a_year_takes_the_year_before_it(births):
+    table, index = births
+    plan, built = analyze("부산 출생아 수는 2024년 3월 대비 9월에 몇 퍼센트 늘었어?", table, index)
+    assert plan.type == "trend" and cells(built) == [birth("21", "202403"), birth("21", "202409")]
+    assert asked_periods("2024년 1~6월 혼인").singles == ("2024",)  # the end of a month range is not a month
+    assert asked_periods("3월 출생아 비중").singles == ()  # no year before it: not guessed
+
+
+def test_months_as_a_part_of_their_year(births):
+    table, index = births
+    plan, built = analyze("2023년 서울 출생아 중 7월 출생아가 차지하는 비중은?", table, index)
+    assert plan.type == "share" and plan.pattern is None
+    assert cells(built, "p") == [birth("11", "202307")] and cells(built, "t") == [birth("11", "2023")]
+    share = compute(table, built).result.facts[-1]
+    assert share.unit == "%" and share.value == pytest.approx(round(207 / sum(200 + m for m in range(1, 13)) * 100, 1))
+
+
+def test_a_label_before_eui_myeot_percent_asks_a_share(births):
+    table, index = births
+    plan, built = analyze("2024년 부산 출생아 수는 전국의 몇 퍼센트야?", table, index)
+    assert plan.type == "share" and cells(built, "p") == [birth("21", "2024")] and cells(built, "t") == [birth("00", "2024")]
+
+
+@pytest.fixture
+def structure(tmp_path):
+    """A yearly table whose categories hold counts and their shares side by side (장래추계 주요 지표 layout)."""
+    labels = (("23", "인구(명): 65세 이상", {"2030": 1000, "2040": 1500}), ("33", "- 구성비(%): 65세 이상", {"2030": 20.1, "2040": 30.6}))
+    rows = [{"period": p, "item_id": "T1", "item_name": "가상 지표", "unit": None, "dim1_name": "인구구조별", "dim1_code": code,
+             "dim1_label": label, "value_raw": str(v), "value": float(v)} for code, label, values in labels for p, v in values.items()]
+    catalog = {"survey_name": "가상 추계", "organization": "가상 기관", "table_name": "가상 인구구조", "period": "년",
+               "url": "https://example.invalid/structure"}
+    table = clean(load_table(write_table(tmp_path / "data", "FAKE_STRUCT", rows, catalog)))
+    return table, build_index(table)
+
+
+def test_a_share_word_inside_a_named_label_is_not_a_share_question(structure):
+    table, index = structure
+    plan, built = analyze("65세 이상 인구 구성비는 2030년보다 2040년에 몇 %p 높아져?", table, index)
+    assert plan.type == "trend" and plan.codes["인구구조별"] == ["33"]  # %p keeps the code measured in %
+    diff = next(f for f in compute(table, built).result.facts if f.derivation and "-" in f.derivation)
+    assert (diff.value, diff.unit) == (pytest.approx(10.5), "%p")

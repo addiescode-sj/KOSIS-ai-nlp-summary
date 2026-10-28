@@ -180,13 +180,20 @@ def test_model_fill_problems_are_said_back_once(pop_path):
     assert answer.stat_answer.result.facts[0].source_ref == "FAKE_TBL_001|T1|1|2023"
 
 
+# A plan the model writes over a code the table does not have: said back once, then given up (S5b).
+BAD_PLAN = json.dumps({"steps": [{"id": "a", "op": "select", "item": {"codes": ["T9"]},
+                                  "periods": {"kind": "list", "periods": ["2023"]}}], "show": ["a"], "present": "value"})
+
+
 def test_unplaced_question_goes_to_the_chatbot(pop_path):
-    fill = json.dumps({"codes": {"항목": ["T9"]}})  # not in the table: ignored, said back once, then the chatbot
+    fill = json.dumps({"codes": {"항목": ["T9"]}})  # not in the table: ignored, said back once, then the model's plan
     chat = json.dumps({"outcome": "answered", "message": "남자는 500명입니다."}, ensure_ascii=False)
-    answer = pipeline(load_table(pop_path), [fill, fill, chat]).ask("2023년 남자는?")
+    answer = pipeline(load_table(pop_path), [fill, fill, BAD_PLAN, BAD_PLAN, chat]).ask("2023년 남자는?")
     assert answer.stat_answer is None and answer.prompt_version == "compact-v2"
-    assert answer.decision_metadata["route"] == "fallback_chatbot" and answer.decision_metadata["fill"]["ignored"]
-    assert answer.decision_metadata["fill_retry"]["ignored"] == ["코드 없음 항목=T9"] and answer.attempts == 3
+    meta = answer.decision_metadata
+    assert meta["route"] == "fallback_chatbot" and meta["fill"]["ignored"] and answer.attempts == 5
+    assert meta["fill_retry"]["ignored"] == ["코드 없음 항목=T9"]
+    assert meta["plan_problems"] == meta["plan_retry_problems"] == ["'T9'은(는) 항목 목록에 없는 값입니다. 목록에서 '=' 앞의 코드를 씁니다."]
     assert to_stat_answer("2023년 남자는?", answer, org_id="101").text.startswith("남자는 500명입니다.")
 
 
@@ -268,12 +275,14 @@ def test_rule_refusal_has_no_numbers(households):
 
 def test_chatbot_fallback_records_model_numbers_and_sums_usage(pop_path):
     fill = LLMResult(text=json.dumps({"codes": {"항목": ["T9"]}}), usage={"promptTokens": 10, "completionTokens": 2})
+    plan = LLMResult(text=BAD_PLAN, usage={"promptTokens": 20, "completionTokens": 4})
     chat = LLMResult(text=json.dumps({"outcome": "answered", "message": "남자는 500명입니다."}, ensure_ascii=False),
                      usage={"promptTokens": 30, "completionTokens": 5, "model": "mock"})  # only the counts are summed
-    answer = pipeline(load_table(pop_path), [fill, fill, chat]).ask("2023년 남자는?")  # fill, its retry, the chatbot
+    # fill and its retry, the model's plan and its retry, the chatbot
+    answer = pipeline(load_table(pop_path), [fill, fill, plan, plan, chat]).ask("2023년 남자는?")
     meta = answer.decision_metadata
     assert meta["route"] == "fallback_chatbot" and meta["numbers_origin"] == "model" and meta["numbers_verified"] is False
-    assert answer.usage == {"promptTokens": 50, "completionTokens": 9} and answer.attempts == 3
+    assert answer.usage == {"promptTokens": 90, "completionTokens": 17} and answer.attempts == 5
     stat = to_stat_answer("2023년 남자는?", answer, org_id="101")
     assert stat.numbers_origin == "model" and stat.result.facts == [] and not stat.numbers_verified
 

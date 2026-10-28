@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING
 
 from kosis_chat.compute.build import Built, Pattern
 from kosis_chat.data.preprocessing import clean_cell
@@ -21,6 +22,9 @@ from kosis_chat.judge import messages
 from kosis_chat.judge.question import COUNT_KINDS, cell_measure
 
 from kosis_ai.schemas import Fact, RefusalReason, StatResult  # isort: skip  (question.py puts src/ on the path)
+
+if TYPE_CHECKING:  # resolve.py imports this module
+    from kosis_chat.compute.resolve import EventLookup
 
 PERCENT_DIGITS = 1  # growth rate, share and multiple
 _DECIMALS = re.compile(r"\.(\d+)")
@@ -206,11 +210,13 @@ def _with_context(table: TableInput, computed: Computed, refs: list[str]) -> Com
     return replace(computed, result=StatResult(facts=facts))
 
 
-def compute(table: TableInput, built: Built) -> Computed:
-    """Facts of the built plan; Computed also keeps what templates and charts read beside the facts."""
+def compute(table: TableInput, built: Built, lookup: EventLookup | None = None) -> Computed:
+    """Facts of the built plan; Computed also keeps what templates and charts read beside the facts.
+
+    lookup answers an event the calendar does not have (a plan the model wrote may name one)."""
     from kosis_chat.compute.plan_engine import run_plan
 
-    run = run_plan(table, built.plan)
+    run = run_plan(table, built.plan, lookup)
     by_id = {f.id: f for f in run.facts}
     extra: dict = {}
     if built.pattern == "value":

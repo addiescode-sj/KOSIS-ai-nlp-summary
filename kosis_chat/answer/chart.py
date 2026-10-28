@@ -3,7 +3,7 @@
 value: one bar · trend: a line over every period · compare: two bars · share: a pie of the parts and the rest ·
 extreme: every candidate as a sorted bar · avg / sum: the periods as bars with the aggregate in the title ·
 pavg / psum / vsa / shr: the two numbers compared as bars · gap: the gap at each period as bars · grw: each target's
-change as bars. The asked value is highlighted; numbers are the facts' own values. chart_spec returns the shared Chart (kind, Vega-Lite spec, the facts it draws) that StatAnswer carries.
+change as bars · plan (written by the model): the cells it shows, as bars. The asked value is highlighted; numbers are the facts' own values. chart_spec returns the shared Chart (kind, Vega-Lite spec, the facts it draws) that StatAnswer carries.
 Render with any Vega-Lite v5 viewer (vega-embed, Streamlit st.vega_lite_chart, Altair); eval/view_run.py shows them.
 """
 
@@ -230,9 +230,24 @@ def _grw(computed: Computed, by_id: dict[str, Fact]) -> Chart | None:
     return Chart(kind="bar", spec=spec, fact_ids=[v1.id, v2.id])
 
 
+def _listed(computed: Computed, by_id: dict[str, Fact]) -> Chart | None:
+    """plan (a plan the model wrote): the cells it shows as bars when there are two or more in one unit; a chart of
+    mixed numbers (values and their difference) would mislead, so the computed ones are left out."""
+    cells = [by_id[i] for i in computed.main if not by_id[i].derivation and by_id[i].value is not None]
+    if len(cells) < 2 or len({f.unit for f in cells}) != 1:
+        return None
+    names = _differing([(f.dims or {}, f.period) for f in cells])
+    if len(set(names)) != len(names):
+        names = [f"{period_text(f.period or '')} {name}".strip() for f, name in zip(cells, names)]
+    rows = [_row(name, f, False) for name, f in zip(names, cells)]
+    title = _common([(f.dims or {}, f.period) for f in cells]) or "값"
+    spec = _bars(title, rows, cells[0].unit, sort=names, horizontal=False)
+    return Chart(kind="bar", spec=spec, fact_ids=[f.id for f in cells])
+
+
 _CHARTS = {"value": _value, "trend": _trend, "compare": _compare, "share": _share, "extreme": _extreme,
            "avg": _one_term, "sum": _one_term, "pavg": _two_terms, "psum": _two_terms, "vsa": _two_terms, "shr": _two_terms,
-           "gap": _gap, "grw": _grw}
+           "gap": _gap, "grw": _grw, "plan": _listed}
 
 
 def chart_spec(kind: QuestionType, computed: Computed) -> Chart | None:

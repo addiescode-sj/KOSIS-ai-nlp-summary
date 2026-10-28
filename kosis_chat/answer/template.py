@@ -5,7 +5,16 @@ Each template cites the facts the calculation marked as main, so a template answ
 
 from __future__ import annotations
 
-from kosis_chat.answer.render import direction, fact_label, format_fact, item_label, josa, period_text, span_text
+from kosis_chat.answer.render import (
+    derived_kind,
+    direction,
+    fact_label,
+    format_fact,
+    item_label,
+    josa,
+    period_text,
+    span_text,
+)
 from kosis_chat.compute import Computed
 
 from kosis_ai.schemas import Fact, FactPart, QuestionType, TextPart  # isort: skip
@@ -216,9 +225,22 @@ def _grw(facts: list[Fact], computed: Computed) -> list:
     return parts + [_t(f"{_side(winner, loser)}의 {what} "), _f(d), _t(" 더 높습니다.")]
 
 
+def _listed(facts: list[Fact], computed: Computed) -> list:
+    """plan (a plan the model wrote): every number it shows, named by its cell or by what was computed. A number is
+    shown without its sign, so a negative computed one gets its minus here (the shape says nothing of direction)."""
+    parts: list = []
+    for n, fact in enumerate(facts):
+        if fact.derivation:
+            name = derived_kind(fact) + (" -" if fact.value is not None and fact.value < 0 else "")
+        else:
+            name = f"{period_text(fact.period) + ' ' if fact.period else ''}{fact_label(fact)}".strip()
+        parts += [_t(f"{', ' if n else ''}{name}" + ("" if name.endswith("-") else " ")), _f(fact)]
+    return parts + [_t("입니다.")]
+
+
 _TEMPLATES = {"value": _value, "trend": _trend, "compare": _compare, "share": _share, "extreme": _extreme,
               "avg": _one_term, "sum": _one_term, "pavg": _two_terms, "psum": _two_terms, "vsa": _two_terms, "shr": _shr,
-              "gap": _gap, "grw": _grw}
+              "gap": _gap, "grw": _grw, "plan": _listed}
 
 
 def template_parts(kind: QuestionType, computed: Computed) -> list:

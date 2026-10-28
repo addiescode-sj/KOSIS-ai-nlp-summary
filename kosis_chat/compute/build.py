@@ -17,8 +17,10 @@ from kosis_ai.schemas import AggregateStep, CombineStep, PlanV3, QuestionType, R
 
 # What the plan does, for the sentence and the chart: the five plain types, one number over periods (avg, sum), two
 # period groups compared (pavg, psum), a period against an average (vsa), two shares compared (shr), the gap between
-# two targets at two periods (gap), and the change of two targets compared (grw).
-Pattern = Literal["value", "trend", "compare", "share", "extreme", "avg", "sum", "pavg", "psum", "vsa", "shr", "gap", "grw"]
+# two targets at two periods (gap), and the change of two targets compared (grw); plan: a plan the model wrote
+# (analyze_plan, S5b), whose shape has no name, so its sentence and chart list the numbers it shows.
+Pattern = Literal["value", "trend", "compare", "share", "extreme", "avg", "sum", "pavg", "psum", "vsa", "shr", "gap", "grw",
+                  "plan"]
 Agg = Literal["avg", "sum"]
 AGG_WORDS = {"avg": "평균", "sum": "합계"}
 
@@ -202,3 +204,11 @@ def growth(first: tuple[str, str], second: tuple[str, str], amount: bool = False
     steps.append(CombineStep(id="d", a="v1", b="v2", fn="pp_diff" if not amount else "diff",
                              orient="smaller_first" if decline else "larger_first", note=f"{unit_word} 차이"))
     return Built(_plan(steps, ["a1", "b1", "a2", "b2", "v1", "v2", "d"], "compare", note), "grw")
+
+
+# ---------------------------------------------------------------- a plan the model wrote (S5b)
+
+
+def written(plan: PlanV3) -> Built:
+    """A plan from analyze_plan, run as it is; the shape has no name (pattern "plan")."""
+    return Built(plan, "plan")

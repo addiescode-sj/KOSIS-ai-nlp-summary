@@ -10,7 +10,13 @@ import re
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from kosis_chat.answer.render import direction, fact_label, format_fact, is_change
+from kosis_chat.answer.render import (
+    derived_kind,
+    direction,
+    fact_label,
+    format_fact,
+    is_change,
+)
 from kosis_chat.compute import Computed
 
 from kosis_ai.schemas import Fact, FactPart, TextPart  # isort: skip
@@ -31,9 +37,6 @@ SYSTEM_PROMPT = """당신은 KOSIS 통계표의 계산 결과를 한국어 답�
 EXAMPLE = '{"answer": "2023년 서울특별시의 1인 가구는 {f1}입니다."}'
 RETRY = "[이전 답변의 문제]\n{problems}\n위 문제를 고쳐 같은 형식의 JSON 객체 하나만 다시 출력하세요."
 _PLACEHOLDER = re.compile(r"\{\s*(f\d+)\s*\}")
-_KIND_WORDS = {"growth": "증감률", "difference": "차이", "share": "비중", "ratio": "배수", "avg": "평균", "sum": "합계"}
-_SUM = re.compile(r"^f\d+(?:\s*\+\s*f\d+)+$")
-_AVG = re.compile(r"^\(f\d+(?:\s*\+\s*f\d+)+\)\s*/\s*\d+$")
 
 
 class ComposeOutput(BaseModel):
@@ -41,25 +44,10 @@ class ComposeOutput(BaseModel):
     answer: str = Field(min_length=1, description="{f번호}를 넣은 답변 문장")
 
 
-def _kind(fact: Fact) -> str:
-    expr = fact.derivation or ""
-    if _SUM.match(expr):
-        return _KIND_WORDS["sum"]
-    if _AVG.match(expr):
-        return _KIND_WORDS["avg"]
-    if "* 100" in expr and "- 1)" in expr:
-        return _KIND_WORDS["growth"]
-    if "* 100" in expr:
-        return _KIND_WORDS["share"]
-    if "/" in expr:
-        return _KIND_WORDS["ratio"]
-    return _KIND_WORDS["difference"]
-
-
 def fact_line(fact: Fact, main: bool) -> str:
     tag = "[반드시 인용]" if main else "[참고]"
     if fact.derivation:
-        what = f"{_kind(fact)} ({fact.derivation})"
+        what = f"{derived_kind(fact)} ({fact.derivation})"
         way = f" ({direction(fact)})" if is_change(fact) else ""
     else:
         what = f"{fact.period}년 {fact_label(fact, skip_totals=False)}"

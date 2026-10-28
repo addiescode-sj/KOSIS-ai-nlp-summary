@@ -2,7 +2,9 @@
 
 judge (rules) -> analyze (rules, the model fills what they leave open) -> compute -> compose (model, {f1} citations)
 -> verify (one retry, then a code template) -> render. StatPipeline.ask returns the same Answer as Chatbot.ask, with
-the finished StatAnswer in Answer.stat_answer. A question the analysis cannot place goes to the compact-v2 chatbot.
+the finished StatAnswer in Answer.stat_answer. A question neither the rules nor the fill can place is planned by the
+model as v3 blocks (analyze_plan, S5b; code still computes), and only when that fails too goes to the compact-v2
+chatbot. A plan that names something several codes could be asks back (outcome clarify).
 """
 
 from __future__ import annotations
@@ -18,17 +20,18 @@ from kosis_chat.answer.verify import label_digits, verify
 from kosis_chat.chatbot import Answer, Chatbot, judge_record
 from kosis_chat.compute import CalcRefused, compute
 from kosis_chat.compute.analyze import Plan, Unresolved, build_plan, rule_plan, to_query
+from kosis_chat.compute.resolve import NeedsClarify
 from kosis_chat.config import Settings, load_settings
 from kosis_chat.contract import to_source
 from kosis_chat.data import preprocessing
 from kosis_chat.data.schema import TableInput
 from kosis_chat.judge.answerability import Verdict, judge
 from kosis_chat.judge.question import build_index
-from kosis_chat.llm import analyze_fill, compose
+from kosis_chat.llm import analyze_fill, analyze_plan, compose, event_lookup
 from kosis_chat.llm.model import STATUS_OK, LLMClient, build_client
 from kosis_chat.llm.structured import StructuredResult, ask_structured
 
-from kosis_ai.schemas import Refusal, StatAnswer, StatQuery  # isort: skip
+from kosis_ai.schemas import PlanV3, Refusal, StatAnswer, StatQuery  # isort: skip
 
 VERSION = compose.VERSION
 FALLBACK_PROMPT = "compact-v2"
@@ -163,6 +166,40 @@ class StatPipeline:
                 meta["unresolved_after_fill"] = exc.what
         return None
 
+    def _written(self, question: str, rule: Plan, calls: _Calls, meta: dict) -> analyze_plan.Placed | NeedsClarify | None:
+        """The model's own plan (analyze-plan-v1), said back once when it fails; None when it still fails."""
+        lookup = self._lookup(calls, meta)
+        user = analyze_plan.user_prompt(question, self.index, rule)
+        meta["route"] = "llm_plan"
+        clarify = None
+        for key in ("plan", "plan_retry"):
+            result = self._ask_model(calls, analyze_plan.SYSTEM_PROMPT, user, PlanV3)
+            if result.status != STATUS_OK:
+                meta[f"{key}_status"] = result.status
+                return None
+            meta[key] = result.value.model_dump(exclude_defaults=True)
+            placed = analyze_plan.place(question, result.value, self.table, self.index, lookup)
+            if not placed.problems:
+                return placed
+            meta[f"{key}_problems"] = placed.problems
+            clarify = placed.clarify
+            user = analyze_plan.retry_prompt(user, placed.problems)
+        # what several codes could be is asked back; an event nobody knows, or a plan that is still wrong, is not
+        return clarify if clarify is not None and len(clarify.options) >= 2 else None
+
+    def _lookup(self, calls: _Calls, meta: dict):
+        """When an event the calendar lacks began, asked of the model once per question (event-lookup-v1)."""
+        known: dict[str, str | None] = meta.setdefault("event_lookup", {})
+
+        def lookup(name: str) -> str | None:
+            if name not in known:
+                result = self._ask_model(calls, event_lookup.SYSTEM_PROMPT, event_lookup.user_prompt(name),
+                                         event_lookup.EventStart)
+                known[name] = result.value.start if result.status == STATUS_OK else None
+            return known[name]
+
+        return lookup
+
     def _compose(self, question: str, computed, note: str | None, calls: _Calls, meta: dict) -> tuple[list, bool]:
         """(parts, verified): the model's sentence once it passes verification, else a code template.
 
@@ -198,9 +235,17 @@ class StatPipeline:
         if verdict.final:
             return self._done(self._verdict_answer(question, verdict), verdict, meta | {"route": "rules_final"}, _Calls(), started)
         calls = _Calls()
-        plan = rule_plan(question, self.index, verdict.default_applied)
-        plan, built = self._place(plan, calls, meta)
-        if built is None:  # neither the rules nor the model placed the question: the compact-v2 chatbot answers
+        rule = rule_plan(question, self.index, verdict.default_applied)
+        plan, built = self._place(rule, calls, meta)
+        computed = None
+        if built is None:  # neither the rules nor the fill placed it: the model writes the plan
+            written = self._written(question, rule, calls, meta)
+            if isinstance(written, NeedsClarify):
+                return self._done(self._clarify_answer(question, written), verdict, meta | {"route": "llm_plan+clarify"},
+                                  calls, started)
+            if written is not None:
+                plan, built, computed = written.query_plan, written.built, written.computed
+        if built is None:  # no plan from the rules or the model: the compact-v2 chatbot answers
             answer = self.fallback.ask(question, golden_scope)
             # The chatbot's own record wins (its model wrote the numbers; its outcome_origin says whether a rule or
             # the model decided); the analysis calls made before it are added, not lost.
@@ -218,7 +263,7 @@ class StatPipeline:
         meta["type"] = plan.type
         meta["pattern"] = built.pattern
         try:
-            computed = compute(self.table, built)
+            computed = computed or compute(self.table, built)
         except CalcRefused as exc:
             stat = StatAnswer(outcome="refused", query=query, refusal=Refusal(reason=exc.reason, message=exc.message),
                               text=final_text(exc.message, source), source=source, numbers_origin="none")
@@ -250,6 +295,13 @@ class StatPipeline:
         source = to_source(self.table.meta, org_id=self.org_id)
         return StatAnswer(outcome="clarify", query=query, clarify_options=options, text=final_text(body, source), source=source,
                           numbers_origin="none")
+
+    def _clarify_answer(self, question: str, asked: NeedsClarify) -> StatAnswer:
+        options = [label for _, label in asked.options]
+        body = "\n".join([asked.message, *(f"- {o}" for o in options)])
+        source = to_source(self.table.meta, org_id=self.org_id)
+        return StatAnswer(outcome="clarify", query=StatQuery(question=question), clarify_options=options,
+                          text=final_text(body, source), source=source, numbers_origin="none")
 
     def _done(self, stat: StatAnswer, verdict: Verdict, meta: dict, calls: _Calls, started: float) -> Answer:
         return Answer(

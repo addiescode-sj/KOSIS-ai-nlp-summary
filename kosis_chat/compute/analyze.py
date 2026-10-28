@@ -21,6 +21,7 @@ from kosis_chat.judge.question import (
     SUM_WORDS,
     TOTAL_WORDS,
     TREND_WORDS,
+    Match,
     Periods,
     TableIndex,
     in_range,
@@ -36,8 +37,15 @@ RECENT_POINTS = 5
 EXTREME_WORDS = re.compile(r"가장|제일|최고|최저|최대|최소|1위|꼴찌")
 MOST_RECENT = re.compile(r"(?:가장|제일)\s*최근")  # "가장 최근 ~" names a period, not a ranking
 SHARE_WORDS = re.compile(r"비중|차지|구성비")
+# "서울이 전국의 몇 퍼센트": a share when a label the question names comes right before 의 (not "몇 퍼센트 늘었어",
+# not "평균의 몇 %", where 평균 is no label).
+_OF_PERCENT = re.compile(r"의몇(?:퍼센트|%|프로)")
+# "%p" asks for a difference of percentages: of two codes a question word matched, the ones measured in %.
+_PERCENT_POINT = re.compile(r"%\s*p|퍼센트\s*포인트|%\s*포인트")
 COMPARE_WORDS = re.compile(r"비교|차이|몇\s*배|보다|더\s*(?:높|낮|많|적|크|작)")
 ASKS_PERIOD = re.compile(r"해는|해가|연도|년도|언제|시점은")
+# A year on a monthly table that also holds the year's value is that value, unless the question asks for the months.
+BY_MONTH = re.compile(r"월별|매월|매달|달마다|월간")
 _LATEST = re.compile(r"latest[^(]*\((\d{4,6})")
 _RECENT = re.compile(r"recent (\d+) points \((\d{4,6})~(\d{4,6})\)")
 _PREVIOUS = re.compile(r"latest \((\d{4,6})\) vs previous \((\d{4,6})\)")
@@ -81,10 +89,29 @@ class Unresolved(Exception):
 # ---------------------------------------------------------------- rules: question -> plan
 
 
-def _question_type(question: str, periods: Periods, codes: dict[str, list[str]]) -> QuestionType:
+def _asks_share(question: str, matches: list[Match]) -> bool:
+    """A share word that is not part of a label the question names ('65세 이상 인구 구성비' names a cell that is
+    already a share), or "<label>의 몇 퍼센트"."""
+    words = {m.group(0) for m in SHARE_WORDS.finditer(question)}
+    if any(not any(w in squash(m.label) for m in matches) for w in words):
+        return True
+    q = squash(question)
+    return any(q[: m.start()].endswith(match.form) for m in _OF_PERCENT.finditer(q) for match in matches)
+
+
+def _percent_only(question: str, index: TableIndex, codes: dict[str, list[str]]) -> None:
+    if not _PERCENT_POINT.search(question):
+        return
+    for name, named in codes.items():
+        percent = [c for c in named if (index.measure_of(name, c) or (None,))[0] == "%"]
+        if 0 < len(percent) < len(named):
+            codes[name] = percent
+
+
+def _question_type(question: str, periods: Periods, codes: dict[str, list[str]], matches: list[Match]) -> QuestionType:
     if EXTREME_WORDS.search(MOST_RECENT.sub(" ", question)):
         return "extreme"
-    if SHARE_WORDS.search(question):
+    if _asks_share(question, matches):
         return "share"
     if periods.ranges or len(periods.singles) >= 2 or (periods.recent and TREND_WORDS.search(question)):
         return "trend"
@@ -157,22 +184,26 @@ def _range_periods(index: TableIndex, start: str, end: str) -> list[str]:
     return [x for x in index.periods if in_range(x, start, end)]
 
 
-def _single_periods(index: TableIndex, single: str) -> list[str]:
+def _single_periods(index: TableIndex, single: str, months: bool = False) -> list[str]:
+    """Table periods of one asked period: a year is its value when the table has one ('2024' on a monthly table
+    with yearly totals), else (or when months is set) all its months."""
+    if single in index.periods and not months:
+        return [single]
     return [x for x in index.periods if x == single or (len(single) == 4 and x[:4] == single)]
 
 
-def _periods(p: Periods, index: TableIndex, default: dict[str, str]) -> tuple[list[str], list[str]]:
+def _periods(p: Periods, index: TableIndex, default: dict[str, str], months: bool = False) -> tuple[list[str], list[str]]:
     """(table periods asked, asked years the table lacks)."""
     years = sorted({x[:4] for x in index.periods})
     if p.ranges:
         found = [x for a, b in p.ranges for x in _range_periods(index, a, b)]
         if p.singles:  # "2025년 ... 2020~2024년 평균보다": the single period belongs to the question too
-            found += [x for s in p.singles for x in _single_periods(index, s)]
+            found += [x for s in p.singles for x in _single_periods(index, s, months)]
         # Only the asked ends: a census table has no 2016~2019 by design, which is not worth a note.
         ends = [y for a, b in p.ranges for y in (a, b) if b != "9999" and len(a) == 4]
         return sorted(dict.fromkeys(found)), [y for y in dict.fromkeys(ends) if y not in years]
     if p.singles:
-        found = [x for s in p.singles for x in _single_periods(index, s)]
+        found = [x for s in p.singles for x in _single_periods(index, s, months)]
         return list(dict.fromkeys(found)), [s for s in p.singles if not any(x[:4] == s[:4] for x in index.periods)]
     period = default.get("period", "")
     if m := _PREVIOUS.search(period):
@@ -184,28 +215,31 @@ def _periods(p: Periods, index: TableIndex, default: dict[str, str]) -> tuple[li
     return [], []
 
 
-def _period_groups(p: Periods, index: TableIndex, kind: QuestionType) -> list[list[str]]:
+def _period_groups(p: Periods, index: TableIndex, kind: QuestionType, months: bool = False) -> list[list[str]]:
     """The period groups an op works on, in question order: one per range (a decade, a half, a quarter), and
     for a share the two single periods compared."""
     groups = [_range_periods(index, a, b) for a, b in p.ranges]
     if kind == "share" and not groups and len(p.singles) >= 2:
-        groups = [_single_periods(index, s) for s in p.singles[:2]]
+        groups = [_single_periods(index, s, months) for s in p.singles[:2]]
     return [g for g in groups if g]
 
 
-def _operation(question: str, rest: str, p: Periods, index: TableIndex, kind: QuestionType) -> tuple[Pattern | None, list[list[str]]]:
+def _operation(question: str, rest: str, p: Periods, index: TableIndex, kind: QuestionType,
+               months: bool = False) -> tuple[Pattern | None, list[list[str]]]:
     """(pattern, period groups) when the question aggregates periods; (None, []) for the five plain types.
 
     rest is the question with matched labels removed, so "평균" in a label ('평균 가구원수') does not count."""
-    groups = _period_groups(p, index, kind)
+    groups = _period_groups(p, index, kind, months)
     average = bool(AVG_WORDS.search(rest))
     total = bool(SUM_WORDS.search(rest) or (TOTAL_WORDS.search(rest) and p.ranges))
     if kind == "share":
+        if _part_of_year([x for g in groups for x in g]):  # "2025년 중 12월 비중": one share, not two compared
+            return None, []
         return ("shr", groups) if len(groups) == 2 and not average and not total else (None, [])
     if average and groups:
         if len(groups) >= 2:
             return "pavg", groups[:2]
-        single = [x for s in p.singles for x in _single_periods(index, s)]
+        single = [x for s in p.singles for x in _single_periods(index, s, months)]
         if single and single[0] not in groups[0]:
             return "vsa", [groups[0], single[:1]]
         return "avg", groups
@@ -229,12 +263,16 @@ def rule_plan(question: str, index: TableIndex, default_applied: dict[str, str] 
         codes[found[0]] = found[1]
     _both_sexes(question, index, codes)
     _drop_children(index, codes)
+    _percent_only(question, index, codes)
     default = dict(default_applied or {})
-    periods, missing = _periods(parsed.periods, index, default)
-    kind = _question_type(question, parsed.periods, codes)
+    kind = _question_type(question, parsed.periods, codes, parsed.matches)
+    p = parsed.periods
+    # "2024년 혼인 추이" on a monthly table: the months of the one year asked
+    months = bool(BY_MONTH.search(question)) or (kind == "trend" and len(p.singles) == 1 and not p.ranges)
+    periods, missing = _periods(p, index, default, months)
     plan = Plan(question, kind, codes, periods, missing_years=missing, default_applied=default,
                 events=list(parsed.periods.events))
-    plan.pattern, plan.groups = _operation(question, parsed.rest, parsed.periods, index, kind)
+    plan.pattern, plan.groups = _operation(question, parsed.rest, parsed.periods, index, kind, months)
     if plan.pattern == "sum" and parsed.periods.spans and not parsed.periods.singles:
         plan.type = "value"  # "2024년 상반기 혼인 건수": one number for one named period
     elif plan.pattern and plan.pattern != "shr" and kind not in ("value", "trend"):
@@ -445,7 +483,18 @@ def _share_axis(plan: Plan, index: TableIndex) -> tuple[str, list[str], str] | N
     return None
 
 
+def _part_of_year(periods: list[str]) -> tuple[list[str], str] | None:
+    """(months, year) when the periods are one year and months of it: the months are a part of the year's value."""
+    years = [p for p in periods if len(p) == 4]
+    months = [p for p in periods if len(p) == 6]
+    if len(years) == 1 and months and all(m[:4] == years[0] for m in months):
+        return months, years[0]
+    return None
+
+
 def _share_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | None) -> Built:
+    if span := _part_of_year(plan.periods):  # a year and months of it named: the months are the part, whatever else
+        return _period_share(plan, index, lookup, span, note)  # the question names ("서울 출생아 중 7월")
     found = _share_axis(plan, index)
     if found is None:
         raise Unresolved(["비중의 분자·분모"])
@@ -460,6 +509,20 @@ def _share_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | None
     if problems:
         raise Unresolved(problems)
     return build.share(refs[:-1], refs[-1], note)
+
+
+def _period_share(plan: Plan, index: TableIndex, lookup: _Lookup, span: tuple[list[str], str], note: str | None) -> Built:
+    """A part of a year ("2025년 혼인 중 12월"): the months' cells over the year's cell of one series."""
+    problems: list[str] = []
+    fixed = _fixed(plan, index, set(), problems)
+    if problems:
+        raise Unresolved(problems)
+    months, year = span
+    parts = [_ref(lookup, fixed, m, problems) for m in months]
+    whole = _ref(lookup, fixed, year, problems)
+    if problems:
+        raise Unresolved(problems)
+    return build.share(parts, whole, note)
 
 
 def _extreme_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | None) -> Built:

@@ -28,6 +28,8 @@ COUNT_KINDS = ("count_stock", "count_flow")
 _COHORT = re.compile(r"(?:19|20)\d{2}\s*년생")
 _YEAR = re.compile(r"(?<!\d)((?:19|20)\d{2})(?!\d)")
 _MONTH = re.compile(r"(?<!\d)((?:19|20)\d{2})\s*년\s*(\d{1,2})\s*월")
+# A month without its year takes the year named before it: "2025년 1월 대비 12월", "2025년 전국 혼인 중 12월".
+_BARE_MONTH = re.compile(r"(?<![\d~\-])(?<![~\-]\s)(\d{1,2})\s*월(?!\s*\d)")  # not the end of a month range "1~6월"
 _RANGE = re.compile(r"((?:19|20)\d{2})\s*년?\s*(?:~|-|부터)\s*((?:19|20)\d{2})")
 _SINCE = re.compile(r"((?:19|20)\d{2})\s*년?\s*이후")
 _RECENT_N = re.compile(r"최근\s*(\d+)\s*년")
@@ -65,6 +67,11 @@ _REGION_AXIS = re.compile(r"행정구역|시도|시군구|지역")
 # Categories that are alternative scenarios (장래추계 고위/중위/저위), not parts of a whole.
 SCENARIO_AXIS = re.compile(r"가정|시나리오|추계")
 TOTAL_LABELS = ("합계", "계", "총계", "전체")
+# A count label 'X건수' is also asked by the counted person: '출생건수' as '출생아 수' / '출생아', '사망건수' as '사망자 수'
+# (KOSIS itself names the same count 출생아수 / 사망자수 in other tables; no table holds both forms, checked over the
+# 2,364 tables of data/table_metadata on 10/28).
+_COUNT_SUFFIX = "건수"
+_COUNTED_FORMS = ("수", "아수", "자수", "아", "자")
 _TOKEN = re.compile(r"[0-9A-Za-z가-힣~\-]+")
 _PARTICLE = re.compile(r"(?<=[가-힣]{2})(?:은|는|이|가|을|를|의|에|도|만|와|과)$")
 
@@ -157,6 +164,20 @@ def _event_periods(text: str) -> tuple[str, list[str], list[tuple[str, str]], li
     return _event_pattern().sub(" ", text), singles, ranges, found, first
 
 
+def _bare_months(text: str) -> list[str]:
+    """'YYYYMM' for each month named without a year, with the last year written before it; none before it: skipped."""
+    out = []
+    written = [m.span() for m in _MONTH.finditer(text)]
+    for m in _BARE_MONTH.finditer(text):
+        if any(a <= m.start(1) < b for a, b in written):
+            continue
+        month = int(m.group(1))
+        years = [y.group(1) for y in _YEAR.finditer(text[: m.start()])]
+        if years and 1 <= month <= 12:
+            out.append(f"{years[-1]}{month:02d}")
+    return out
+
+
 def asked_periods(question: str) -> Periods:
     text = _COHORT.sub(" ", question)  # "1985년생" is a cohort label, not a period
     text, event_singles, event_ranges, events, event_at = _event_periods(text)
@@ -171,7 +192,8 @@ def asked_periods(question: str) -> Periods:
     text = _QUARTER.sub(" ", text)
     for m in _MONTH.finditer(text):
         singles.append(f"{m.group(1)}{int(m.group(2)):02d}")
-    text = _MONTH.sub(" ", text)
+    singles += _bare_months(text)
+    text = _BARE_MONTH.sub(" ", _MONTH.sub(" ", text))
     ranges = [(a, b) for a, b in _RANGE.findall(text)] + event_ranges
     text = _RANGE.sub(" ", text)
     ranges += [(a, "9999") for a in _SINCE.findall(text)]
@@ -321,6 +343,9 @@ def label_forms(label: str, regional_total: bool = False) -> tuple[set[str], set
     short = _REGION_SUFFIX.sub("", core)
     if short != core and len(short) >= 2:
         exact.add(squash(short))
+    stem = squash(core)[: -len(_COUNT_SUFFIX)]
+    if squash(core).endswith(_COUNT_SUFFIX) and len(stem) >= 2:
+        exact.update(stem + form for form in _COUNTED_FORMS)
     if regional_total and core in TOTAL_LABELS:
         exact.add("전국")
     bare = re.sub(r"\([^()]*\)", " ", core)
