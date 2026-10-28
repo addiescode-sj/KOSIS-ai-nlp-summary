@@ -22,7 +22,14 @@ FACT_ERRORS = ("wrong_value", "wrong_unit", "wrong_period", "wrong_dims")
 NEEDS_REVIEW = {"not_answerable": "insufficient_reason", "clarify": "missing_clarification"}
 _NUMBER = re.compile(r"\d[\d,]*(?:\.\d+)?")
 _IDENT = re.compile(r"[A-Za-z_]\w*")
-_OPS = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul, ast.Div: operator.truediv}
+def _power(base: float, exponent: float) -> float:
+    if base < 0 and not float(exponent).is_integer():
+        raise ValueError(f"{base} ** {exponent} is not a real number")
+    return base**exponent
+
+
+# ** is for an average annual growth rate (v3); the schema only allows a constant exponent.
+_OPS = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul, ast.Div: operator.truediv, ast.Pow: _power}
 SLOT_FIELDS = ("type", "items", "dims", "periods", "ranked")
 PERIOD_AXIS = "시점"
 _UNIT_PAREN = re.compile(r"\s*\([^()]*\)\s*$")
@@ -46,7 +53,7 @@ class Grade(BaseModel):
 
 
 def evaluate(expr: str, values: dict[str, float]) -> float:
-    """Evaluate a derivation such as '(f2 / f1 - 1) * 100' over fact values; only + - * / and parentheses."""
+    """Evaluate a derivation such as '(f2 / f1 - 1) * 100' over fact values; + - * / ** and parentheses."""
 
     def ev(node: ast.AST) -> float:
         if isinstance(node, ast.BinOp) and type(node.op) in _OPS:
@@ -143,17 +150,30 @@ def count_unsupported(answer: StatAnswer, cells: dict[str, Cell], details: list[
                 count += 1
                 if expected is not None:
                     details.append(f"unsupported {f.id}: {f.derivation} = {expected}, answer says {f.value}")
-    periods = {f.period for f in answer.result.facts if f.period}
-    # '2024년 12월' is how a month period '202412' is written (T1-14): its year and month are periods too
-    periods |= {x for p in list(periods) if len(p) == 6 and p.isdigit() for x in (p[:4], str(int(p[4:])))}
+    allowed = allowed_text_numbers(answer.result.facts)
     for part in answer.parts:
         if isinstance(part, TextPart):
-            # ponytail: any non-period digit in text counts; widen the allow-list if T1-10 permits e.g. ordinals.
             for num in _NUMBER.findall(part.text):
-                if num not in periods:
+                if num not in allowed:
                     count += 1
                     details.append(f"unsupported text number {num!r} in {part.text!r}")
     return count
+
+
+def allowed_text_numbers(facts: list[Fact]) -> set[str]:
+    """Numbers connecting text may contain without being claims: a fact's period as written in Korean ('202503' ->
+    '2025년 3월', '1분기') and digits that belong to a fact's labels ('1인 가구', '1985년생'). Same rule as
+    kosis_chat.answer.verify.allowed_numbers, kept here so the grader does not depend on the pipeline."""
+    allowed: set[str] = set()
+    for f in facts:
+        if f.period:
+            allowed |= {f.period, f.period[:4]}
+            if len(f.period) == 6 and f.period.isdigit():
+                month = int(f.period[4:])
+                allowed |= {str(month), str((month - 1) // 3 + 1)}
+        for label in (f.dims or {}).values():
+            allowed |= set(_NUMBER.findall(label))
+    return allowed
 
 
 def _norm(label: str) -> str:

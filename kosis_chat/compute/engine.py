@@ -1,17 +1,20 @@
-"""Numbers by code (T1-07): read the requested cells and compute value / trend / compare / share / extreme.
+"""Numbers by code (T1-07): read cells and turn them into facts the answer may cite.
 
-compute(table, request) returns facts the answer may cite: cell facts with their source_ref and derived facts whose
-derivation names other fact ids (recomputed by eval/grade.py). Nothing is guessed: a cell that is missing or holds a
-symbol, units that differ, or rates that would be summed raise CalcRefused with a RefusalReason.
-Rounding follows the golden set: a difference keeps the inputs' decimals, a rate, share or multiple has 1 decimal.
+compute(table, built) runs the plan the rules built (build.py) on the v3 block engine (plan_engine.py) and returns
+cell facts with their source_ref and derived facts whose derivation names other fact ids (recomputed by
+eval/grade.py). Nothing is guessed: a cell that is missing or holds a symbol, units that differ, or rates that would
+be summed raise CalcRefused with a RefusalReason. This module keeps the cell reading and fact making the blocks use.
+Rounding follows the golden set: a difference keeps the inputs' decimals, a rate, share or multiple has 1 decimal,
+an average has at least 1, a sum keeps the inputs' decimals.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING
 
-from kosis_chat.compute.request import CalcRequest
+from kosis_chat.compute.build import Built, Pattern
 from kosis_chat.data.preprocessing import clean_cell
 from kosis_chat.data.schema import Cell, TableInput
 from kosis_chat.data.serializer import display_value
@@ -19,6 +22,9 @@ from kosis_chat.judge import messages
 from kosis_chat.judge.question import COUNT_KINDS, cell_measure
 
 from kosis_ai.schemas import Fact, RefusalReason, StatResult  # isort: skip  (question.py puts src/ on the path)
+
+if TYPE_CHECKING:  # resolve.py imports this module
+    from kosis_chat.compute.resolve import EventLookup
 
 PERCENT_DIGITS = 1  # growth rate, share and multiple
 _DECIMALS = re.compile(r"\.(\d+)")
@@ -35,6 +41,17 @@ class CalcRefused(Exception):
 
 
 @dataclass(frozen=True)
+class TermResult:
+    """What one number of a period pattern became: its cell fact ids and the id of the number it stands for."""
+
+    cell_ids: list[str]
+    value_id: str  # the aggregate / share fact, or the single cell
+    periods: tuple[str, str]  # first and last period of the term's cells
+    digits: int  # decimals the number keeps
+    agg: str | None = None  # "avg" / "sum" / None (a cell or a share)
+
+
+@dataclass(frozen=True)
 class Computed:
     result: StatResult
     main: list[str]  # fact ids the answer should cite, in order (the rest are context)
@@ -44,6 +61,11 @@ class Computed:
     ranking: list[dict] = field(default_factory=list)
     # value: the same cell in every period, for the chart: {"period", "value"} in period order (facts keep one)
     series: list[dict] = field(default_factory=list)
+    pattern: Pattern | None = None  # the shape the rules built (build.py): templates and charts choose by it
+    # period patterns: what each compared number became, earlier first (templates and charts read them)
+    terms: list[TermResult] = field(default_factory=list)
+    plan: object | None = None  # the PlanV3 that made these facts
+    cautions: list[str] = field(default_factory=list)  # allowed numbers that need a word of care (S6 shows them)
 
 
 def _indexed(table: TableInput) -> tuple[TableInput, dict[str, Cell], bool]:
@@ -160,51 +182,6 @@ def _series(table: TableInput, cell: Cell) -> list[dict]:
     return [{"period": r.cell.period_raw, "value": r.value} for r in reads if r.value is not None]
 
 
-def _value(table: TableInput, req: CalcRequest) -> Computed:
-    read = _read(table, req.cells[0])
-    _numeric(read)
-    return Computed(StatResult(facts=[_cell_fact("f1", read)]), ["f1"], req.note, series=_series(table, read.cell))
-
-
-def _trend(table: TableInput, req: CalcRequest) -> Computed:
-    reads = sorted((_read(table, ref) for ref in req.cells), key=lambda r: r.cell.period_raw)
-    _check_units(reads)
-    ids = _Ids()
-    facts = [_cell_fact(ids(), r) for r in reads]
-    numeric = [(f, r) for f, r in zip(facts, reads) if r.value is not None]
-    if len(numeric) < 2:
-        _numeric(next(r for r in reads if r.value is None))
-    (first, a), (last, b) = numeric[0], numeric[-1]
-    digits = max(a.digits, b.digits)
-    diff = _derived(ids(), f"{last.id} - {first.id}", b.value - a.value, digits, _diff_unit(a.unit))
-    facts.append(diff)
-    main = [first.id, last.id, diff.id]
-    if a.unit != "%" and a.value:
-        growth = _derived(ids(), f"({last.id} / {first.id} - 1) * 100", (b.value / a.value - 1) * 100, PERCENT_DIGITS, "%")
-        facts.append(growth)
-        main.append(growth.id)
-    return Computed(StatResult(facts=facts), main, req.note)
-
-
-def _compare(table: TableInput, req: CalcRequest) -> Computed:
-    reads = [_read(table, ref) for ref in req.cells]
-    _check_units(reads)
-    values = [_numeric(r) for r in reads]
-    facts = [_cell_fact("f1", reads[0]), _cell_fact("f2", reads[1])]
-    if req.reference is not None:
-        s, r = 1 - req.reference, req.reference  # subject minus the named reference, signed
-    else:
-        s, r = (0, 1) if values[0] >= values[1] else (1, 0)  # larger minus smaller
-    sid, rid = facts[s].id, facts[r].id
-    digits = max(reads[0].digits, reads[1].digits)
-    facts.append(_derived("f3", f"{sid} - {rid}", values[s] - values[r], digits, _diff_unit(reads[0].unit)))
-    main = ["f1", "f2", "f3"]
-    if values[r] and values[s] / values[r] > 0:
-        facts.append(_derived("f4", f"{sid} / {rid}", values[s] / values[r], PERCENT_DIGITS, "배"))
-        main.append("f4")
-    return Computed(StatResult(facts=facts), main, req.note)
-
-
 def _share_parts(table: TableInput, parts: list[str], total: str, ids: _Ids) -> tuple[list[Fact], Fact, float]:
     reads = [_read(table, ref) for ref in parts]
     total_read = _read(table, total)
@@ -224,53 +201,6 @@ def _share_parts(table: TableInput, parts: list[str], total: str, ids: _Ids) -> 
     return [*facts, total_fact], _derived(ids(), expr, share, PERCENT_DIGITS, "%"), share
 
 
-def _share(table: TableInput, req: CalcRequest) -> Computed:
-    facts, share, _ = _share_parts(table, req.cells, req.total, _Ids())
-    return Computed(StatResult(facts=[*facts, share]), [f.id for f in facts] + [share.id], req.note)
-
-
-def _extreme(table: TableInput, req: CalcRequest) -> Computed:
-    word = "가장 높음" if req.pick == "max" else "가장 낮음"
-    ranked: list[tuple[float, list[Fact], str]] = []  # (score, facts, id of the scored fact)
-    for i, ref in enumerate(req.candidates):
-        ids = _Ids()
-        try:
-            if req.candidate_totals:
-                facts, share, score = _share_parts(table, [ref], req.candidate_totals[i], ids)
-                ranked.append((score, [*facts, share], share.id))
-            else:
-                read = _read(table, ref)
-                ranked.append((_numeric(read), [_cell_fact(ids(), read)], "f1"))
-        except CalcRefused as exc:
-            if exc.reason != "missing_value":  # a symbol cell is skipped; anything else is a bad request
-                raise
-    if len(ranked) < 2:
-        raise CalcRefused("missing_value", messages.refusal_message("missing_value", raw="-", meaning="비교할 값이 부족함"))
-    ranked.sort(key=lambda x: x[0], reverse=req.pick == "max")
-    facts: list[Fact] = []
-    picked: dict[str, str] = {}
-    for place, (_, group, scored) in zip(("winner", "runner_up"), ranked[:2]):
-        offset = len(facts)
-        renamed = {f.id: f"f{offset + n}" for n, f in enumerate(group, start=1)}
-        for f in group:
-            note = (f"{len(ranked)}개 중 {word}" if place == "winner" else "두 번째") if f.id == scored else None
-            expr = f.derivation
-            if expr:
-                expr = re.sub(r"\bf\d+\b", lambda m: renamed[m.group(0)], expr)
-            facts.append(f.model_copy(update={"id": renamed[f.id], "derivation": expr, "note": note or f.note}))
-        picked[place] = renamed[scored]
-    main = [f.id for f in facts[: len(ranked[0][1])]]
-    ranking = []
-    for score, group, scored in ranked:
-        cell = next(f for f in group if f.source_ref)
-        unit = next(f.unit for f in group if f.id == scored)
-        ranking.append({"dims": dict(cell.dims or {}), "period": cell.period, "value": score, "unit": unit})
-    return Computed(StatResult(facts=facts), main, req.note, picked, ranking)
-
-
-_HANDLERS = {"value": _value, "trend": _trend, "compare": _compare, "share": _share, "extreme": _extreme}
-
-
 def _with_context(table: TableInput, computed: Computed, refs: list[str]) -> Computed:
     """Context cells (a 전국 value, a newer period shown as '-') join the facts, symbols included; never cited first."""
     facts = list(computed.result.facts)
@@ -280,5 +210,30 @@ def _with_context(table: TableInput, computed: Computed, refs: list[str]) -> Com
     return replace(computed, result=StatResult(facts=facts))
 
 
-def compute(table: TableInput, request: CalcRequest) -> Computed:
-    return _with_context(table, _HANDLERS[request.type](table, request), request.context)
+def compute(table: TableInput, built: Built, lookup: EventLookup | None = None) -> Computed:
+    """Facts of the built plan; Computed also keeps what templates and charts read beside the facts.
+
+    lookup answers an event the calendar does not have (a plan the model wrote may name one)."""
+    from kosis_chat.compute.plan_engine import run_plan
+
+    run = run_plan(table, built.plan, lookup)
+    by_id = {f.id: f for f in run.facts}
+    extra: dict = {}
+    if built.pattern == "value":
+        read = _read(table, built.plan.steps[0].cells[0])
+        _numeric(read)
+        extra["series"] = _series(table, read.cell)
+    if built.pattern == "extreme":
+        ranked = run.results["k"]
+        extra.update(picked=ranked.picked, ranking=ranked.ranking)
+    if built.terms:
+        terms = []
+        for t in built.terms:
+            value = run.ids_of(t.value)[0]
+            cell_ids = run.ids_of(t.cells)
+            digits = by_id[value].round if by_id[value].derivation else run.results[t.cells].reads[0].digits
+            terms.append(TermResult(cell_ids, value, t.periods, digits, t.agg))
+        extra["terms"] = terms
+    computed = Computed(StatResult(facts=run.facts), run.main, built.plan.note, pattern=built.pattern,
+                        cautions=run.cautions, **extra)
+    return replace(_with_context(table, computed, built.context), plan=built.plan)

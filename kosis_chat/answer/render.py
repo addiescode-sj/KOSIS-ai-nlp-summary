@@ -22,13 +22,18 @@ def _number(value: float, digits: int | None) -> str:
     return f"{value:,.{digits}f}"
 
 
+def format_number(value: float, unit: str | None, digits: int | None = None) -> str:
+    """'123,456가구' for a plain number (charts use it for values that are not facts of the answer)."""
+    return f"{_number(value, digits)}{unit or ''}"
+
+
 def format_fact(fact: Fact) -> str:
     """'123,456가구'; a change without its sign (the sentence says 늘었다/줄었다); a symbol as "'-'(자료 없음)"."""
     if fact.value is None:
         raw = fact.raw or "-"
         return f"'{raw}'({SYMBOL_MEANING.get(raw, '수치 아님')})"
     value = abs(fact.value) if is_change(fact) else fact.value
-    return f"{_number(value, fact.round)}{fact.unit or ''}"
+    return format_number(value, fact.unit, fact.round)
 
 
 _CHANGE = re.compile(r"\s*(?:f\d+\s*-\s*f\d+|\(f\d+\s*/\s*f\d+\s*-\s*1\)\s*\*\s*100)\s*")
@@ -46,6 +51,48 @@ def direction(fact: Fact) -> str:
     return "증가" if fact.value > 0 else "감소"
 
 
+_KIND_WORDS = {"growth": "증감률", "difference": "차이", "share": "비중", "ratio": "배수", "avg": "평균", "sum": "합계"}
+_SUM = re.compile(r"^f\d+(?:\s*\+\s*f\d+)+$")
+_AVG = re.compile(r"^\(f\d+(?:\s*\+\s*f\d+)+\)\s*/\s*\d+$")
+
+
+def derived_kind(fact: Fact) -> str:
+    """What a computed fact is, read from its derivation: 차이, 증감률, 비중, 배수, 평균 or 합계."""
+    expr = fact.derivation or ""
+    if _SUM.match(expr):
+        return _KIND_WORDS["sum"]
+    if _AVG.match(expr):
+        return _KIND_WORDS["avg"]
+    if "* 100" in expr and "- 1)" in expr:
+        return _KIND_WORDS["growth"]
+    if "* 100" in expr:
+        return _KIND_WORDS["share"]
+    if "/" in expr:
+        return _KIND_WORDS["ratio"]
+    return _KIND_WORDS["difference"]
+
+
+def period_text(period: str) -> str:
+    """'2024' -> '2024년'; '202406' -> '2024년 6월'."""
+    return f"{period[:4]}년 {int(period[4:])}월" if len(period) == 6 and period.isdigit() else f"{period}년"
+
+
+def span_text(first: str, last: str) -> str:
+    """'2019년~2023년'; a half or a quarter of a year by name ('2024년 상반기', '2025년 1분기'), else '2024년 1월~6월'."""
+    if first == last:
+        return period_text(first)
+    if len(first) == 6 and len(last) == 6 and first[:4] == last[:4]:
+        a, b = int(first[4:]), int(last[4:])
+        if (a, b) == (1, 6):
+            return f"{first[:4]}년 상반기"
+        if (a, b) == (7, 12):
+            return f"{first[:4]}년 하반기"
+        if b - a == 2 and a % 3 == 1:
+            return f"{first[:4]}년 {a // 3 + 1}분기"
+        return f"{first[:4]}년 {a}월~{b}월"
+    return f"{period_text(first)}~{period_text(last)}"
+
+
 _HOUSEHOLD = re.compile(r"\d+인(?: 이상)?")
 
 
@@ -57,13 +104,6 @@ def item_label(label: str) -> str:
     if _HOUSEHOLD.fullmatch(core) and "(가구)" in label:
         return f"{core} 가구"
     return core
-
-
-def period_text(period: str) -> str:
-    """'202412' -> '2024년 12월', '2024' -> '2024년': a month code is never shown as a year (T1-14)."""
-    if len(period) == 6 and period.isdigit():
-        return f"{period[:4]}년 {int(period[4:])}월"
-    return f"{period}년"
 
 
 def fact_label(fact: Fact, skip_totals: bool = True) -> str:
@@ -96,7 +136,9 @@ def default_sentence(applied: dict[str, str]) -> str:
     """The conditions the rules chose, in one sentence written by code."""
     out = []
     for key, value in applied.items():
-        if key == "period" and (m := messages._LATEST.fullmatch(value)):
+        if key == "period" and (m := messages._PREVIOUS.fullmatch(value)):
+            out.append(f"질문에 시점이 없어 가장 최근 시점인 {m.group(1)}년을 그 직전 시점 {m.group(2)}년과 비교합니다.")
+        elif key == "period" and (m := messages._LATEST.fullmatch(value)):
             out.append(f"질문에 시점이 없어 가장 최근 시점인 {m.group(1)}년 기준으로 답합니다.")
         elif key == "period" and (m := messages._RECENT.fullmatch(value)):
             out.append(f"질문에 시점이 없어 최근 {m.group(1)}개 시점({m.group(2)}년)으로 답합니다.")
@@ -106,7 +148,8 @@ def default_sentence(applied: dict[str, str]) -> str:
 
 
 def final_text(body: str, source: Source | None, applied: dict[str, str] | None = None, notes: list[str] | None = None) -> str:
+    """The default sentence, the body, one '참고:' line per note (S6: the caveats' texts), then the source."""
     lines = [s for s in (default_sentence(applied or {}), body) if s]
-    lines += [f"참고: {n}" for n in notes or [] if n]
+    lines += [f"참고: {n}" for n in dict.fromkeys(notes or []) if n]
     text = "\n".join(lines)
     return f"{text}\n\n출처: {source.citation()}" if source else text

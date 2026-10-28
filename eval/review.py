@@ -17,6 +17,7 @@ SHEET_COLUMNS = (
     "question",
     "expected",
     "raw_answer",
+    "stat_answer",
     "automatic_checks",
     "error_types",
     "final_verdict",
@@ -55,6 +56,8 @@ def export_sheet(run_dir: Path, sheet: Path) -> int:
                     "question": item["question"],
                     "expected": _expected(item),
                     "raw_answer": r["raw_answer"],
+                    # Shared-contract copy of the answer (read only; runs saved before it was added leave it empty).
+                    "stat_answer": json.dumps(r["stat_answer"], ensure_ascii=False) if r.get("stat_answer") else "",
                     "automatic_checks": json.dumps(r["automatic_checks"], ensure_ascii=False),
                     "error_types": ";".join(r.get("error_types") or []) if r["review_status"] == "confirmed" else "",
                     "final_verdict": (r.get("final_verdict") or "") if r["review_status"] == "confirmed" else "",

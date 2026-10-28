@@ -10,6 +10,7 @@ import pytest
 from kosis_chat.data import preprocessing, serializer
 from kosis_chat.data.loader import UNKNOWN_UNIT, infer_unit, load_table, sha256_of
 from kosis_chat.data.schema import SchemaError, validate
+from tests.conftest import pop_rows, write_table
 
 
 def test_parquet_loads_with_catalog_meta_and_raw_values(pop_path):
@@ -118,3 +119,53 @@ def test_markdown_shows_meta_header_and_unit_per_row(pop_path):
     assert "| 항목 | 성별 | 시점 | 값 | 단위 |" in text
     assert "| 가상 성비 | 계 | 2023 | 90.9 | % |" in text
     assert "| 가상 인구 | 여자 | 2024 | 560p | 명 |" in text  # raw value, not our parse
+
+
+def test_parse_value_flags_caution_marks():
+    assert preprocessing.parse_value("*") == (None, "flagged")
+
+
+def test_clean_uses_parquet_value_kind(pop_path, household_path):
+    flags = {c.value_raw: (c.value, c.value_flag) for c in preprocessing.clean(load_table(pop_path)).cells}
+    assert flags["1,000"] == (1000.0, "ok")
+    assert flags["-"] == (None, "missing")
+    assert flags["x"] == (None, "suppressed")
+    assert flags["560p"] == (560.0, "provisional")  # other_text falls back to parse_value
+    blank = [c for c in preprocessing.clean(load_table(household_path)).cells if c.period_raw == "2025"]
+    assert blank and {(c.value, c.value_flag) for c in blank} == {(None, "missing")}
+
+
+@pytest.mark.parametrize(
+    ("kind", "flag"),
+    [("ok", "ok"), ("blank", "missing"), ("dash", "missing"), ("ellipsis", "missing"),
+     ("x_secret", "suppressed"), ("asterisk", "flagged")],
+)
+def test_value_kind_to_flag(pop_path, kind, flag):
+    cell = replace(load_table(pop_path).cells[0], value_kind=kind)
+    assert preprocessing.clean_cell(cell).value_flag == flag
+
+
+@pytest.mark.parametrize(
+    ("raw", "shown"),
+    [("65975.0000", "65975"), ("12.5000", "12.5"), ("0.0000", "0"), ("1,000", "1,000"), ("90.9", "90.9"),
+     ("560p", "560p"), ("X", "X"), ("-", "-"), ("*", "*"), ("", ""), ("100", "100")],
+)
+def test_display_value_drops_trailing_decimal_zeros(raw, shown):
+    assert serializer.display_value(raw) == shown
+
+
+def test_markdown_drops_zip_decimal_zeros(household_path):
+    long_text = serializer.to_markdown(load_table(household_path))
+    wide_text = serializer.to_wide_markdown(load_table(household_path))
+    assert ".0000" not in long_text and ".0000" not in wide_text
+
+
+def test_duplicate_source_ref_is_rejected(data_dir):
+    rows = pop_rows()
+    path = write_table(data_dir, "FAKE_TBL_003", rows + [rows[0]], {
+        "survey_name": "가상 인구조사", "organization": "가상 기관", "table_name": "가상 중복 표",
+        "period": "년 (2022 ~ 2024)", "url": "https://example.invalid/fake-table-003"})
+    with pytest.raises(SchemaError) as err:
+        load_table(path)
+    (problem,) = err.value.problems
+    assert problem.where == f"cells[{len(rows)}].source_ref" and problem.message.startswith("duplicate of cells[0] (FAKE_TBL_003|T1|")

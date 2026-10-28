@@ -8,6 +8,7 @@ import json
 import pytest
 
 from eval import review, run_eval, scorer
+from kosis_ai.schemas import StatAnswer
 from kosis_chat.data.loader import sha256_of
 from kosis_chat.llm.model import LLMResult, MockClient
 
@@ -111,7 +112,7 @@ def test_oracle_scope_is_required_and_recorded(golden, mock_settings, tmp_path):
 
 def test_round_trip_run_review_score(golden, mock_settings, tmp_path):
     replies = [
-        "2023년 여자 가상 인구는 550명입니다. 출처: KOSIS / 가상 인구조사 / 가상 성별 인구",
+        "2023년 여자 가상 인구는 550명입니다.\n\n출처: KOSIS / 가상 인구조사 / 가상 성별 인구",
         "2030년 자료는 표에 없습니다.",
         LLMResult(text="", status="timeout", error="slow"),
     ]
@@ -124,10 +125,20 @@ def test_round_trip_run_review_score(golden, mock_settings, tmp_path):
     assert results[0]["automatic_checks"]["expected_value_hits"] == [{"value": 550, "found_in_text": True}]
     assert results[0]["automatic_checks"]["source_mentioned"] is True
     assert results[2]["review_status"] == "confirmed" and results[2]["error_types"] == ["run_failure"]
+    stat = StatAnswer.model_validate(results[0]["stat_answer"])
+    assert results[0]["raw_answer"] == replies[0]
+    assert stat.parts[0].text == replies[0].split("\n\n출처:")[0]
+    assert stat.text.endswith(f"출처: {stat.source.citation()}")
+    assert manifest["git_commit"] == "unknown"
+    assert results[0]["final_automatic_checks"]["answer_chars"] == len(stat.text)
+    assert results[0]["raw_automatic_checks"]["answer_chars"] == len(replies[0])
+    assert results[2]["stat_answer"] is None  # a failed call has no answer
 
     sheet = run_dir / "review.csv"
     assert review.export_sheet(run_dir, sheet) == 2  # the timeout row is already confirmed
     rows = list(csv.DictReader(sheet.open(encoding="utf-8-sig")))
+    assert StatAnswer.model_validate_json(rows[0]["stat_answer"]) == stat
+    assert rows[0]["raw_answer"] == replies[0]
     rows[0].update(reviewer="tester")  # q1: no errors -> PASS
     rows[1].update(reviewer="tester", error_types="insufficient_reason")  # q2 -> PARTIAL
     with sheet.open("w", encoding="utf-8-sig", newline="") as f:
@@ -254,3 +265,55 @@ def test_no_form_leaves_prompt_unchanged(golden, mock_settings, tmp_path):
     run_dir = run_eval.run(golden, "B0", mock_settings, tmp_path / "results", client=client)
     assert "[답변 형식]" not in client.calls[0][1]
     assert json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))["form"] is None
+
+
+def test_json_run_preserves_raw_and_continues_after_failed_format(golden, mock_settings, tmp_path, monkeypatch):
+    from kosis_chat.llm import structured
+    replies = [
+        '{"outcome":"answered","answer":"550명입니다."}', "broken", "still broken",
+        '{"outcome":"clarify","clarify_question":"어느 시점인가요?","clarify_options":["2022년","2023년"]}',
+    ]
+    waits = []
+    monkeypatch.setattr(structured.time, "sleep", waits.append)
+    directory = run_eval.run(golden, "B-json", mock_settings, tmp_path / "results", client=MockClient(replies), answer_format="json", interval=5)
+    rows = scorer.read_jsonl(directory / "results.jsonl")
+    manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["answer_format"] == "json" and manifest["prompt_version"] == "structured-v1"
+    assert manifest["interval_seconds"] == 5 and "format_retry_wait_s" in manifest["timing"]
+    assert rows[0]["raw_answer"] == replies[0] and "550명" in rows[0]["stat_answer"]["text"]
+    assert rows[1]["call_status"] == "format_error" and rows[1]["error_types"] == ["run_failure"]
+    assert rows[1]["stat_answer"] is None and rows[1]["raw_responses"] == ["broken", "still broken"]
+    assert len(rows[1]["format_errors"]) == 2 and rows[1]["final_verdict"] == "FAIL"
+    assert rows[2]["stat_answer"]["outcome"] == "clarify" and waits == [5, 5, 5]
+    assert rows[0]["raw_automatic_checks"]["answer_chars"] == len(replies[0])
+    assert rows[0]["automatic_checks"]["answer_chars"] == len(rows[0]["stat_answer"]["text"])
+    assert rows[0]["final_automatic_checks"] == rows[0]["automatic_checks"]
+
+
+def test_contract_validation_error_is_isolated_per_row(golden, mock_settings, tmp_path):
+    client = MockClient([
+        '{"outcome":"answered","answer":"설명입니다."}',
+        '{"outcome":"answered","answer":"출처: old"}',
+        '{"outcome":"answered","answer":"다음 답변"}',
+    ])
+    directory = run_eval.run(golden, "B-contract-error", mock_settings, tmp_path / "results", client=client, answer_format="json")
+    rows = scorer.read_jsonl(directory / "results.jsonl")
+    assert rows[0]["call_status"] == "ok" and rows[2]["call_status"] == "ok"
+    assert rows[1]["call_status"] == "format_error" and "StatAnswer validation" in rows[1]["format_errors"][-1]
+    assert rows[1]["raw_answer"] == '{"outcome":"answered","answer":"출처: old"}'
+
+
+def test_recheck_contract_reports_legacy_and_broken_rows(tmp_path, capsys):
+    from eval import recheck_contract
+    good = {"outcome": "answered", "query": {"question": "q"}, "parts": [{"kind": "text", "text": "x"}], "text": "x",
+            "source": {"org_id": "101", "tbl_id": "T", "survey_nm": "s", "tbl_nm": "t"}}
+    rows = [
+        {"question_id": "q1", "call_status": "ok", "decision_metadata": {"route": "rules"}, "stat_answer": good},
+        {"question_id": "q2", "call_status": "ok", "decision_metadata": {"route": "rules"}, "stat_answer": good | {"typo": 1}},
+        {"question_id": "q3", "call_status": "api_error", "decision_metadata": {}, "stat_answer": None},
+    ]
+    scorer.write_jsonl(tmp_path / "results.jsonl", rows)
+    assert recheck_contract.main(["--run", str(tmp_path)]) == 1
+    out = capsys.readouterr().out
+    assert "rows 3: load ok 1, load fail 1" in out and "None/rules: 1" in out and "(no answer: api_error): 1" in out
+    assert "FAIL q2" in out and "typo" in out

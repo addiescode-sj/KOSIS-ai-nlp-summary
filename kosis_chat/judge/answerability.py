@@ -14,6 +14,7 @@ from kosis_chat.data.schema import Cell, TableInput
 from kosis_chat.judge import messages
 from kosis_chat.judge.question import (
     ARITH_WORDS,
+    AVG_WORDS,
     CAUSAL_WORDS,
     CHANGE_WORDS,
     COUNT_KINDS,
@@ -21,12 +22,14 @@ from kosis_chat.judge.question import (
     OUT_OF_DOMAIN,
     SCENARIO_AXIS,
     SUM_WORDS,
+    TOTAL_WORDS,
     TREND_WORDS,
     VAGUE_WORDS,
     VALUE_ASKS,
     Parsed,
     TableIndex,
     build_index,
+    in_range,
     is_total,
     normalize,
     parse,
@@ -34,7 +37,6 @@ from kosis_chat.judge.question import (
 )
 
 from kosis_ai.schemas import Outcome, Refusal  # isort: skip  (question.py puts src/ on the path)
-from kosis_chat.answer.render import item_label  # isort: skip  (after question.py: render needs kosis_ai)
 
 _UNIT_SUFFIX = re.compile(r"\s*\([^()]*\)\s*$")
 RECENT_POINTS = 5  # "최근 추이" with no number of years, as in scope.py
@@ -62,8 +64,6 @@ class Verdict:
 
 # T1-14: docs/question_types.md criteria the rules did not implement yet
 EVALUATIVE = re.compile(r"(높|많|낮|적)은\s*편")  # "높은 편이야?": no comparison basis -> clarify
-AVERAGE_WORDS = re.compile(r"평균")
-OPEN_END = "9999"  # range end of "A년 이후"
 
 
 # ---------------------------------------------------------------- resolving labels to codes
@@ -177,21 +177,43 @@ def _out_of_scope(p: Parsed, **_) -> Verdict | None:
     return None
 
 
-def _no_period(p: Parsed, index: TableIndex, **_) -> Verdict | None:
-    missing = [s for s in p.periods.singles if not index.period_ok(s)]
-    missing += [a for a, b in p.periods.ranges if not any(a <= y[:4] <= b for y in index.periods)]
+def _available(index: TableIndex) -> str:
     years = sorted({y[:4] for y in index.periods})
-    if not missing and (AVERAGE_WORDS.search(p.question) or SUM_WORDS.search(p.rest)):
-        # an average or sum over A~B needs every year: a missing end is not replaced by the years that exist (T1-14)
-        missing = [end for a, b in p.periods.ranges if b != OPEN_END for end in (a, b) if end not in years]
+    return f"이 표의 시점: {years[0]}~{years[-1]}년"
+
+
+def _no_period(p: Parsed, index: TableIndex, **_) -> Verdict | None:
+    missing = [_period_text(s) for s in p.periods.singles if not index.period_ok(s)]
+    missing += [_range_text(a, b) for a, b in p.periods.ranges if not any(in_range(y, a, b) for y in index.periods)]
     if not missing:
         return None
-    asked = ", ".join(_period_text(s) for s in missing)
-    return Verdict.refuse("no_period", "no_period", available=f"이 표의 시점: {years[0]}~{years[-1]}년", asked=asked)
+    return Verdict.refuse("no_period", "no_period", available=_available(index), asked=", ".join(missing))
+
+
+def _sums_or_averages(p: Parsed) -> bool:
+    """The question aggregates several periods into one number (v2 ops avg / sum / pavg / psum / vsa)."""
+    return bool(AVG_WORDS.search(p.rest) or SUM_WORDS.search(p.rest) or TOTAL_WORDS.search(p.rest))
+
+
+def _partial_range(p: Parsed, index: TableIndex, **_) -> Verdict | None:
+    """An average or sum over "2010년부터 2024년까지" when the table starts in 2015: the number would be wrong, not
+    just incomplete, so it is refused (a plain trend over the same range is answered with a note)."""
+    if not _sums_or_averages(p):
+        return None
+    years = {y[:4] for y in index.periods}
+    missing = [y for a, b in p.periods.ranges if b != "9999" and len(a) == 4 for y in (a, b) if y not in years]
+    if not missing:
+        return None
+    asked = ", ".join(_period_text(y) for y in dict.fromkeys(missing))
+    return Verdict.refuse("partial_range", "no_period", available=_available(index), asked=asked)
 
 
 def _period_text(period: str) -> str:
     return f"{period[:4]}년 {int(period[4:])}월" if len(period) == 6 and period.isdigit() else f"{period}년"
+
+
+def _range_text(start: str, end: str) -> str:
+    return f"{_period_text(start)}~{_period_text(end)}" if end != "9999" else f"{_period_text(start)} 이후"
 
 
 def _same_name(p: Parsed, resolved: Resolved, **_) -> Verdict | None:
@@ -260,7 +282,7 @@ def _total_twin(p: Parsed, index: TableIndex, resolved: Resolved) -> dict:
 
 
 def _not_aggregatable(p: Parsed, index: TableIndex, resolved: Resolved, **_) -> Verdict | None:
-    if not SUM_WORDS.search(p.rest):
+    if not (SUM_WORDS.search(p.rest) or (TOTAL_WORDS.search(p.rest) and p.periods.ranges)):
         return None
     for name, codes in resolved.codes.items():
         axis = index.axes[name]
@@ -275,13 +297,11 @@ def _not_aggregatable(p: Parsed, index: TableIndex, resolved: Resolved, **_) -> 
     if kinds and all(_kind_class(k) == "rate" for k in kinds):
         what = "·".join(_show(label) for label in named) or "이 표의 값"
         return Verdict.refuse("not_aggregatable", "not_aggregatable", what=what)
-    # a stock (households, population) counted again each year: summing years double counts (T1-14)
-    years = [(a, b) for a, b in p.periods.ranges if b != OPEN_END and a < b]
-    if years and kinds == {"count_stock"}:
-        items = [index.axes[ITEM_AXIS].labels[c] for c in resolved.codes.get(ITEM_AXIS, ())] if ITEM_AXIS in index.axes else []
-        what = "·".join(f"'{item_label(label)}'" for label in items) or "·".join(_show(label) for label in named) or "이 표의 값"
-        message = messages.with_josa(messages.STOCK_OVER_TIME.format(what=what))
-        return Verdict("refused", "not_aggregatable", Refusal(reason="not_aggregatable", message=message), final=True)
+    # A stock (가구 수, 인구) summed over several periods counts the same households again (v2, CX-REF-03).
+    several = bool(p.periods.ranges) or len(p.periods.singles) >= 2
+    if several and kinds and all(k == "count_stock" for k in kinds):
+        what = "·".join(_show(label) for label in named) or "이 표의 값"
+        return Verdict.refuse("stock_over_periods", "not_aggregatable", what=what)
     return None
 
 
@@ -308,8 +328,8 @@ def _symbol(p: Parsed, index: TableIndex, resolved: Resolved, cells: list[Cell],
 
 # Order matters: the first rule that fires decides (a period that is not there beats a label that is shared).
 RULES = (
-    _causal, _out_of_scope, _no_period, _same_name, _vague_item, _evaluative, _unit_mismatch, _not_aggregatable, _no_cell,
-    _symbol,
+    _causal, _out_of_scope, _no_period, _partial_range, _same_name, _vague_item, _evaluative, _unit_mismatch,
+    _not_aggregatable, _no_cell, _symbol,
 )  # fmt: skip
 
 
@@ -330,6 +350,12 @@ def defaults(p: Parsed, index: TableIndex, resolved: Resolved, cells: list[Cell]
     numeric = sorted({c.period_raw for c in cells if c.value_kind == "ok"})
     if not numeric:
         return out
+    if p.periods.previous:  # "작년 대비": the latest period is this year, the one before it is last year
+        latest = numeric[-1]
+        before = [x for x in numeric if x < latest and len(x) == len(latest)]
+        if before:
+            out["period"] = f"latest ({latest}) vs previous ({before[-1]})"
+            return out
     if (p.periods.recent and TREND_WORDS.search(p.question)) or CHANGE_WORDS.search(p.question):
         points = numeric[-RECENT_POINTS:]
         out["period"] = f"recent {len(points)} points ({points[0]}~{points[-1]})"

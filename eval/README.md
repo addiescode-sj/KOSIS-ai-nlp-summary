@@ -73,7 +73,7 @@ python -m eval.run_eval --stage <이름> --golden eval/golden/stat_golden.jsonl 
 
 | 파일 | 내용 |
 | --- | --- |
-| `results.jsonl` | 문항별 답변(`raw_answer`), 호출 상태(`call_status`), 오류, 판정 |
+| `results.jsonl` | 문항별 답변(`raw_answer`), 호출 상태(`call_status`), 오류, 판정. `stat_answer`(공통 계약)에는 누가 숫자를 썼는지 `numbers_origin`(`code`: 계산 코드, `model`: 모델 문장, `none`: 거절·되묻기), 코드가 숫자를 검증했는지 `numbers_verified`, 기본값을 계산에 실제로 썼는지 `defaults_verified`가 남는다(T0-03 v2 이전 기록은 `null`/`false`) |
 | `manifest.json` | 모델·프롬프트 버전·직렬화·범위 모드(`scope_mode`)·골든셋·데이터 해시, form 경로와 sha256 |
 | `golden.jsonl` | 이번 실행에 쓴 골든셋 사본 |
 | `form.txt` | `--form`을 줬을 때 그 시점의 form 파일 사본 |
@@ -95,6 +95,9 @@ python -m eval.run_eval --stage <이름> --golden eval/golden/stat_golden.jsonl 
 ### 호출 실패 확인
 
 호출이 실패한 문항은 자동으로 FAIL(`run_failure`)이 된다. 판정 전에 실패 원인을 먼저 본다.
+계약(`src/kosis_ai/schemas.py`)을 바꾼 뒤에는 `python -m eval.recheck_contract --run eval\results\<실행 폴더>`로 저장된 `stat_answer`가 새 계약으로도 읽히는지 확인한다(안 읽히는 행과 이유, `numbers_origin`/경로 분포를 출력).
+`stat_answer.query.op`·`period_groups`는 기간 연산(평균·합·두 기간 비교·비중 변화, T0-03 v2)을, `stat_answer.chart`는 코드가 그린 그래프(kind·Vega-Lite spec·근거 fact)를 담는다. `chart` 열은 같은 spec이다.
+`call_status`가 `pipeline_error`면 API가 아니라 우리 코드가 그 문항에서 예외를 낸 것이다(T0-03 v2). 실행은 다음 문항으로 이어지고, 예외 내용은 `call_error`에, 전체 traceback은 `events.jsonl`의 `pipeline_error` 이벤트에 남는다.
 
 ```bat
 python -c "import json;[print(r['question_id'],r['call_status'],(r['call_error'] or '')[:150]) for r in map(json.loads,open(r'eval\results\<실행 폴더>\results.jsonl',encoding='utf-8')) if r['call_status']!='ok']"
@@ -132,7 +135,7 @@ python -m eval.review apply --run eval\results\<실행 폴더>
 | answerable | wrong_value, wrong_unit, wrong_period, wrong_dims, unsupported_claim, false_refusal | missing_aux, no_source |
 | not_answerable | missed_refusal, unsupported_claim, wrong_reason | insufficient_reason |
 | clarify | assumed_condition, unsupported_claim | missing_clarification |
-| default_allowed | wrong_value, wrong_unit, wrong_period, wrong_dims, disallowed_default, unsupported_claim | unstated_default, no_source |
+| default_allowed | wrong_value, wrong_unit, wrong_period, wrong_dims, disallowed_default, unsupported_claim | unstated_default, no_source, missing_aux |
 
 - form에서 출처를 생략하라고 지시한 실행은 `no_source`를 붙이지 않는다(실험 조건이므로). 대신 `review_note`에 적어 둔다.
 
@@ -169,7 +172,7 @@ python -m eval.harness --suite stat --golden eval/golden --oracle --stage oracle
 - 규칙(`eval/grade.py`)은 사람 판정과 같은 `RULES`/`decide_verdict`를 쓴다. LLM은 쓰지 않는다.
   - 셀 fact는 `source_ref`와 값으로 맞춘다. 셀이 없을 때, 기간만 다르면 `wrong_period`, 나머지는 `wrong_dims`가 된다.
   - 계산 fact는 입력 셀(`source_ref` 집합)로 짝을 짓고, 값은 골든 `round` 자릿수의 반 단위까지 허용한다. fact id나 식을 다르게 써도 된다.
-  - 숫자 오류(`unsupported_claim`)는 세 가지다. Parquet과 다른 셀 값, 다시 계산하면 안 맞는 계산 fact, 연결 문장(TextPart) 속 숫자(fact의 시점은 제외).
+  - 숫자 오류(`unsupported_claim`)는 세 가지다. Parquet과 다른 셀 값, 다시 계산하면 안 맞는 계산 fact, 연결 문장(TextPart) 속 숫자. 단 fact의 시점(월 시점 `202503`이면 `2025`·`3`·`1`분기도)과 fact 라벨에 든 숫자(`1인`, `1985년생`)는 제외한다(`grade.allowed_text_numbers`, 2026-10-27).
   - 거절은 `allowed_reasons` 안의 사유여야 PASS다. 되묻기 문항에 답하면 `assumed_condition`, 기본값을 밝히지 않으면 `unstated_default`가 된다.
   - 거절 문구가 충분한지, 되묻기 선택지가 좋은지는 코드로 판정하지 않는다. 리포트의 "사람 확인 필요"로 센다.
 - 슬롯 정확도(T1-23, 질의 이해): 답의 `query`(StatQuery)를 골든 정답 셀에서 뽑은 슬롯과 비교한다. 판정(PASS/FAIL)에는 영향이 없는 별도 지표다.

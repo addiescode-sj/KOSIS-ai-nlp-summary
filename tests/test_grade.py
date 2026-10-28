@@ -92,6 +92,20 @@ def test_missing_aux_is_partial(table, cells):
     aux = Fact(id="a1", value=1050, period="2023", source_ref="GRADE_TBL|T1|0|2023")
     g = grade(_item(table, aux_facts=[aux]), _answer(), cells)
     assert (g.verdict, g.error_types) == ("PARTIAL", ["missing_aux"])
+    g = grade(_item(table, kind="default_allowed", default_applied={"period": "latest (2023)"}, aux_facts=[aux]), _answer(default_applied={"period": "latest (2023)"}), cells)
+    assert (g.verdict, g.error_types) == ("PARTIAL", ["missing_aux"])  # no grader error for default_allowed either
+
+
+def test_text_numbers_from_periods_and_labels_are_not_claims(table, cells):
+    labelled = [F1.model_copy(update={"dims": {"항목": "1인 (가구)", "성별": "남자"}}), F2, F3]
+    item = _item(table, required_facts=labelled)
+    ok = grade(item, _answer(labelled, text="2023년 1인 가구는 남자 기준입니다."), cells)
+    assert ok.verdict == "PASS" and ok.number_errors == 0  # '2023' is the period, '1' is in the label
+    typed = grade(item, _answer(labelled, text="2023년 1인 가구는 3명 늘었습니다."), cells)
+    assert typed.number_errors == 1 and "'3'" in typed.details[0]
+    from eval.grade import allowed_text_numbers
+    monthly = Fact(id="f9", value=1, period="202503", dims={"항목": "혼인"}, source_ref="M|T3|00|202503")
+    assert allowed_text_numbers([monthly]) == {"202503", "2025", "3", "1"}  # 2025년 3월, 1분기
 
 
 def test_refusal_reason_and_review_flag(table, cells):
@@ -242,7 +256,8 @@ def test_golden_injected_errors_are_all_caught():
             bad = oracle.model_copy(update={"refusal": Refusal(reason=reason, message="m")})
             expect = "wrong_reason"
         else:
-            bad = StatAnswer(outcome="answered", source=oracle.source)
+            # An answer that picked a condition instead of asking (v2: an answered answer must carry parts).
+            bad = StatAnswer(outcome="answered", parts=[TextPart(text="2024년 기준")], source=oracle.source)
             expect = "assumed_condition"
         g = grade(item, bad, read_cells(item.path))
         total += 1

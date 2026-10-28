@@ -26,7 +26,9 @@ def allowed_numbers(computed: Computed) -> tuple[set[str], set[str]]:
     labels: set[str] = set()
     for f in computed.result.facts:
         if f.period:
-            periods |= {f.period, f.period[:4]} | ({str(int(f.period[4:]))} if len(f.period) == 6 else set())
+            periods |= {f.period, f.period[:4]}
+            if len(f.period) == 6:  # a monthly period is written '2024년 6월' or '2024년 2분기'
+                periods |= {str(int(f.period[4:])), str((int(f.period[4:]) - 1) // 3 + 1)}
         for label in (f.dims or {}).values():
             labels |= set(NUMBER.findall(label))
     return periods, labels

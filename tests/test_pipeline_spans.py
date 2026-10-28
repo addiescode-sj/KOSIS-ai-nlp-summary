@@ -36,8 +36,9 @@ def test_fallback_keeps_fill_tokens_and_marks_failed_steps(table, mock_settings)
     assert [(s["name"], s["status"]) for s in _spans(answer)][:3] == [
         ("judge", "ok"), ("analyze.rules", "error"), ("analyze.llm_fill", "error")]
     assert _spans(answer)[-1]["name"] == "fallback_chatbot"
-    fill, fallback = _spans(answer)[2], _spans(answer)[-1]
-    assert answer.usage["promptTokens"] == fill["attributes"]["gen_ai.usage.input_tokens"] + fallback["attributes"]["gen_ai.usage.input_tokens"]
+    # every model step before the chatbot (the fill, then the model's own plan, S5b) keeps its tokens in the total
+    spent = [s["attributes"]["gen_ai.usage.input_tokens"] for s in _spans(answer) if "gen_ai.usage.input_tokens" in s["attributes"]]
+    assert len(spent) >= 2 and answer.usage["promptTokens"] == sum(spent)
 
 
 def test_final_verdict_is_one_ok_judge_span(table, mock_settings):

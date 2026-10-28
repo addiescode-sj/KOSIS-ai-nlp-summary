@@ -34,7 +34,7 @@ RULES: dict[str, dict[str, set[str]]] = {
     },
     KIND_DEFAULT_ALLOWED: {
         "fail": _FACT_ERRORS | {"disallowed_default", "unsupported_claim", "run_failure"},
-        "partial": {"unstated_default", "no_source"},
+        "partial": {"unstated_default", "no_source", "missing_aux"},
     },
 }
 ERROR_TYPES = sorted(set().union(*(r["fail"] | r["partial"] for r in RULES.values())))

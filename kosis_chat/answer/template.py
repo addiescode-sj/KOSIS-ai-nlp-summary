@@ -5,7 +5,18 @@ Each template cites the facts the calculation marked as main, so a template answ
 
 from __future__ import annotations
 
-from kosis_chat.answer.render import direction, fact_label, format_fact, item_label, josa, period_text
+import re
+
+from kosis_chat.answer.render import (
+    derived_kind,
+    direction,
+    fact_label,
+    format_fact,
+    item_label,
+    josa,
+    period_text,
+    span_text,
+)
 from kosis_chat.compute import Computed
 
 from kosis_ai.schemas import Fact, FactPart, QuestionType, TextPart  # isort: skip
@@ -57,8 +68,8 @@ def _trend(facts: list[Fact], computed: Computed) -> list:
     parts = [_t(f"{_subject(fact_label(first))}{period_text(first.period)} "), _f(first), _t("에서 "), _t(f"{period_text(last.period)} "),
              _f(last), _after(last, "으로"), _t(" ")]
     way = direction(diff)
-    if way == "같음":
-        return parts + [_t("변함이 없습니다.")]
+    if way == "같음":  # the difference is a main fact: cite it even when it is zero
+        return parts + [_t("변함이 없습니다(차이 "), _f(diff), _t(").")]
     parts += [_f(diff), _t(" 늘었습니다" if way == "증가" else " 줄었습니다")]
     if growth:
         parts += [_t(f"({'증가율' if way == '증가' else '감소율'} "), _f(growth[0]), _t(")")]
@@ -74,7 +85,7 @@ def _compare(facts: list[Fact], computed: Computed) -> list:
              _t("입니다. ")]
     way = direction(diff)
     if way == "같음":
-        return parts + [_t("두 값은 같습니다.")]
+        return parts + [_t("두 값은 같습니다(차이 "), _f(diff), _t(").")]
     parts += [_t(f"{josa(_side(subject, reference), '이')} {_side(reference, subject)}보다 "), _f(diff),
               _t(" 많습니다" if way == "증가" else " 적습니다")]
     if ratio:
@@ -116,9 +127,145 @@ def _extreme(facts: list[Fact], computed: Computed) -> list:
     return parts
 
 
-_TEMPLATES = {"value": _value, "trend": _trend, "compare": _compare, "share": _share, "extreme": _extreme}
+# ---------------------------------------------------------------- patterns over periods
+
+
+def _span(term) -> str:
+    return span_text(*term.periods)
+
+
+def _agg_word(term) -> str:
+    return {"avg": "평균", "sum": "합계"}.get(term.agg or "", "값")
+
+
+def _one_term(facts: list[Fact], computed: Computed) -> list:
+    """avg / sum: '2019년~2023년 서울특별시 출생건수 평균은 45,741.4명입니다.'"""
+    term = computed.terms[0]
+    by_id = {f.id: f for f in computed.result.facts}
+    cell, value = by_id[term.cell_ids[0]], by_id[term.value_id]
+    return [_t(f"{_span(term)} {_subject(fact_label(cell) + ' ' + _agg_word(term))}"), _f(value), _t("입니다.")]
+
+
+def _two_terms(facts: list[Fact], computed: Computed) -> list:
+    """pavg / psum / vsa: the later term against the earlier one, with the difference and the growth rate."""
+    earlier, later = computed.terms
+    by_id = {f.id: f for f in computed.result.facts}
+    a, b, diff, *growth = facts
+    label = fact_label(by_id[earlier.cell_ids[0]])
+    if computed.pattern == "vsa":
+        lead = f"{_span(later)} {_subject(label)}"
+        parts = [_t(lead), _f(b), _after(b, "으로"), _t(f" {_span(earlier)} 평균 "), _f(a), _t("보다 ")]
+    else:
+        parts = [_t(f"{_subject(label)}{_span(earlier)} {_agg_word(earlier)} "), _f(a), _t(f"에서 {_span(later)} {_agg_word(later)} "),
+                 _f(b), _after(b, "으로"), _t(" ")]
+    way = direction(diff)
+    if way == "같음":  # the difference is a main fact: cite it even when it is zero
+        return parts + [_t("같습니다(차이 " if computed.pattern == "vsa" else "변함이 없습니다(차이 "), _f(diff), _t(")."), ]
+    parts += [_f(diff)]
+    parts += [_t(" 많습니다" if way == "증가" else " 적습니다")] if computed.pattern == "vsa" else [_t(" 늘었습니다" if way == "증가" else " 줄었습니다")]
+    if growth:
+        parts += [_t(f"({'증가율' if way == '증가' else '감소율'} "), _f(growth[0]), _t(")")]
+    return parts + [_t(".")]
+
+
+def _shr(facts: list[Fact], computed: Computed) -> list:
+    """shr: '전국 일반가구 가운데 1인 비중은 2015년 27.2%에서 2024년 36.1%로 8.9%p 늘었습니다.'"""
+    earlier, later = computed.terms
+    by_id = {f.id: f for f in computed.result.facts}
+    a, b, diff = facts
+    cells = [by_id[i] for i in earlier.cell_ids]
+    whole = next((f for f in computed.result.facts if f.source_ref and f.id not in earlier.cell_ids and f.period == cells[0].period), None)
+    names = "·".join(_side(c, whole) if whole else fact_label(c) for c in cells)
+    lead = f"{fact_label(whole) + ' 가운데 ' if whole and fact_label(whole) else ''}{names} 비중은 {_span(earlier)} "
+    parts = [_t(lead), _f(a), _t(f"에서 {_span(later)} "), _f(b), _after(b, "으로"), _t(" ")]
+    way = direction(diff)
+    if way == "같음":
+        return parts + [_t("변함이 없습니다(차이 "), _f(diff), _t(").")]
+    return parts + [_f(diff), _t(" 늘었습니다." if way == "증가" else " 줄었습니다.")]
+
+
+# ---------------------------------------------------------------- two targets at two periods
+
+
+def _changed(fact: Fact, up: str, down: str, same: str) -> str:
+    return {"증가": up, "감소": down}.get(direction(fact), same)
+
+
+def _gap(facts: list[Fact], computed: Computed) -> list:
+    """gap: '서울특별시와 경기도의 인구밀도 격차는 2015년 15,137.6명/㎢(...)에서 2025년 14,022.1명/㎢(...)로 1,115.5명/㎢
+    줄었습니다.' (each gap with the two values it is made of)"""
+    x1, y1, x2, y2, g1, g2, d = facts
+    common = _common(x1, y2)
+    lead = f"{josa(_side(x1, y1), '과')} {_side(y1, x1)}의 {common + ' ' if common else ''}격차는 {period_text(x1.period or '')} "
+    parts = [_t(lead), _f(g1), _t(f"({_side(x1, y1)} "), _f(x1), _t(f", {_side(y1, x1)} "), _f(y1),
+             _t(f")에서 {period_text(x2.period or '')} "), _f(g2), _t(f"({_side(x2, y2)} "), _f(x2), _t(f", {_side(y2, x2)} "),
+             _f(y2), _t(")"), _after(g2, "으로")]
+    if direction(d) == "같음":
+        return parts + [_t(" 변함이 없습니다(차이 "), _f(d), _t(").")]
+    return parts + [_t(" "), _f(d), _t(_changed(d, " 벌어졌습니다.", " 줄었습니다.", ""))]
+
+
+def _grw(facts: list[Fact], computed: Computed) -> list:
+    """grw: each target's change, then which one changed more and by how much."""
+    a1, b1, a2, b2, v1, v2, d = facts
+    rate = v1.unit == "%"
+    parts: list = []
+    for n, (a, b, v, other) in enumerate(((a1, b1, v1, a2), (a2, b2, v2, a1))):
+        lead = f"{_subject(_side(a, other))}" if n else f"{span_text(a.period or '', b.period or '')} {_subject(_side(a, other))}"
+        parts += [_t(lead), _f(a), _t("에서 "), _f(b), _after(b, "으로"), _t(" "), _f(v)]
+        word = _changed(v, "증가", "감소", "변화 없음")
+        parts += [_t(f" {word}" + ("했고, " if n == 0 else "했습니다. ") if word != "변화 없음" else (" 변화가 없고, " if n == 0 else " 변화가 없습니다. "))]
+    subject_id = d.derivation.split("-")[0].strip()
+    winner, loser = (a1, a2) if subject_id == v1.id else (a2, a1)
+    winner_v = v1 if subject_id == v1.id else v2
+    if direction(d) == "같음":
+        return parts + [_t("두 곳의 " + ("증감률" if rate else "증감") + "은 같습니다(차이 "), _f(d), _t(").")]
+    if direction(winner_v) == "감소" and direction(d) == "감소":  # the more negative change first: a larger decline
+        what = "감소율이" if rate else "감소 폭이"
+        return parts + [_t(f"{_side(winner, loser)}의 {what} "), _f(d), _t(" 더 큽니다.")]
+    what = "증감률이" if rate else "증감이"
+    return parts + [_t(f"{_side(winner, loser)}의 {what} "), _f(d), _t(" 더 높습니다.")]
+
+
+_DERIVED_IDS = re.compile(r"f\d+")
+
+
+def _listed(facts: list[Fact], computed: Computed) -> list:
+    """plan (a plan the model wrote), worded by its blocks (S6): each cell as '시점 대상 값', each computed number as
+    '<what it was computed from>의 <what it is> 값' ('2005년 경기도·부산광역시의 차이'), from the facts' own labels.
+    A number is shown without its sign, so a negative computed one gets its minus here."""
+    by_id = {f.id: f for f in computed.result.facts}
+
+    def name_of(fact: Fact) -> str:
+        if not fact.derivation:
+            return f"{period_text(fact.period) + ' ' if fact.period else ''}{fact_label(fact)}".strip()
+        operands = [by_id[i] for i in dict.fromkeys(_DERIVED_IDS.findall(fact.derivation)) if i in by_id]
+        cells = [o for o in operands if not o.derivation]
+        if len(cells) == len(operands) == 2:
+            a, b = cells
+            if a.period == b.period:
+                where = f"{period_text(a.period) + ' ' if a.period else ''}{_side(a, b)}·{_side(b, a)}"
+            else:
+                where = f"{fact_label(a)} {period_text(a.period or '')}·{period_text(b.period or '')}"
+            return f"{where.strip()}의 {derived_kind(fact)}"
+        return derived_kind(fact)
+
+    parts: list = []
+    for n, fact in enumerate(facts):
+        name = name_of(fact)
+        if fact.derivation and fact.value is not None and fact.value < 0:
+            name += " -"
+        parts += [_t(f"{', ' if n else ''}{name}" + ("" if name.endswith("-") else " ")), _f(fact)]
+    return parts + [_t("입니다.")]
+
+
+_TEMPLATES = {"value": _value, "trend": _trend, "compare": _compare, "share": _share, "extreme": _extreme,
+              "avg": _one_term, "sum": _one_term, "pavg": _two_terms, "psum": _two_terms, "vsa": _two_terms, "shr": _shr,
+              "gap": _gap, "grw": _grw, "plan": _listed}
 
 
 def template_parts(kind: QuestionType, computed: Computed) -> list:
+    """The sentence for the pattern the rules built, else for the question type (a plan with no pattern)."""
     by_id = {f.id: f for f in computed.result.facts}
-    return [p for p in _TEMPLATES[kind]([by_id[i] for i in computed.main], computed) if not isinstance(p, TextPart) or p.text]
+    template = _TEMPLATES[computed.pattern or kind]
+    return [p for p in template([by_id[i] for i in computed.main], computed) if not isinstance(p, TextPart) or p.text]
