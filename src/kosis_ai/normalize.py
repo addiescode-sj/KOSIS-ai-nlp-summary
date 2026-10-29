@@ -15,9 +15,9 @@ from pathlib import Path
 import pandas as pd
 import pyarrow.dataset as ds
 
-from kosis_ai import paths
 from kosis_ai.schemas import MAX_DIMS, MeasureKind, RefusalReason
 
+DATA_DIR = Path(__file__).resolve().parents[2] / "data"
 KEY_COLUMNS = ["period", "item_id", *(f"dim{i}_code" for i in range(1, MAX_DIMS + 1))]
 LABEL_COLUMNS = [f"dim{i}_label" for i in range(1, MAX_DIMS + 1)]
 
@@ -184,11 +184,10 @@ def _table_path(table_id: str, data_dir: Path) -> Path:
     return path
 
 
-def normalize(df: pd.DataFrame, table_id: str = "", data_dir: Path | None = None) -> pd.DataFrame:
+def normalize(df: pd.DataFrame, table_id: str = "", data_dir: Path = DATA_DIR) -> pd.DataFrame:
     """Add unit_resolved, unit_source, measure_kind and value_label to a long-format cell frame."""
     # Same rules as resolve_unit / measure_kind, applied to each column's distinct values and filled in rule order
     # (a 450k-row slice of a 100M-row table normalizes in well under a second; tests check both give the same).
-    data_dir = data_dir or paths.data_dir()
     labels = [c for c in LABEL_COLUMNS if c in df]
     texts = ["item_name", *labels]
 
@@ -231,7 +230,7 @@ def normalize(df: pd.DataFrame, table_id: str = "", data_dir: Path | None = None
     return out
 
 
-def fetch_table(table_id: str, filters: dict | None = None, data_dir: Path | None = None) -> pd.DataFrame:
+def fetch_table(table_id: str, filters: dict | None = None, data_dir: Path = DATA_DIR) -> pd.DataFrame:
     """Normalized cells of one table ('101_DT_1B8000H') that match `filters`.
 
     filters: {"item": label, "periods": [...], "start": "1970", "end": ..., "<dim name>": label or code}.
@@ -239,7 +238,6 @@ def fetch_table(table_id: str, filters: dict | None = None, data_dir: Path | Non
     (no_item / class_mismatch / no_period). A table whose cells cannot be told apart (same key twice, ZIP tables
     with a hidden category) raises LookupFailed("class_mismatch") instead of returning mixed values.
     """
-    data_dir = data_dir or paths.data_dir()
     filters = dict(filters or {})
     item = filters.pop("item", None)
     periods = filters.pop("periods", None)

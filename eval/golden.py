@@ -15,8 +15,9 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-from kosis_ai.paths import workspace_root
 from kosis_ai.schemas import Cell, Fact, QuestionKind, QuestionType, RefusalReason, Source, StatResult
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class GoldenError(ValueError):
@@ -64,7 +65,7 @@ class GoldenItem(BaseModel):
     @property
     def path(self) -> Path:
         p = Path(self.table)
-        return p if p.is_absolute() else workspace_root() / p
+        return p if p.is_absolute() else ROOT / p
 
 
 @lru_cache(maxsize=16)
