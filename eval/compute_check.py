@@ -20,7 +20,7 @@ from eval.golden import GoldenItem, load_items, read_cells, read_source
 from eval.grade import grade
 from kosis_chat.compute import Built, CalcRefused, build, compute
 from kosis_chat.compute.roles import is_province, pick_of, reference_index
-from kosis_chat.config import resolve_path
+from kosis_chat.config import PROJECT_ROOT
 from kosis_chat.data.loader import load_table
 from kosis_chat.data.preprocessing import clean
 from kosis_chat.data.schema import Cell, TableInput
@@ -28,7 +28,7 @@ from kosis_chat.judge.question import is_total
 
 from kosis_ai.schemas import FactPart, StatAnswer, StatQuery  # isort: skip
 
-OUT_DIR = Path("eval") / "results" / "_checks" / "compute"  # under the work root
+OUT_DIR = PROJECT_ROOT / "eval" / "results" / "_checks" / "compute"
 COMPUTED_KINDS = ("answerable", "default_allowed")
 _DENOMINATOR = re.compile(r"/\s*(f\d+)\s*\*\s*100")
 # T1-25 complex items carry their shape in the id (S-CX-AVG-01); the pattern for each (build.py).
@@ -200,7 +200,7 @@ def render(rows: list[dict], meta: dict) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m eval.compute_check", description=__doc__.splitlines()[0])
     parser.add_argument("--golden", default="eval/golden/stat_golden.jsonl")
-    parser.add_argument("--out", default=str(resolve_path(OUT_DIR)))
+    parser.add_argument("--out", default=str(OUT_DIR))
     args = parser.parse_args(argv)
     version, items, golden_sha = load_items(Path(args.golden))
     rows = [check(i) for i in items if i.kind in COMPUTED_KINDS]
