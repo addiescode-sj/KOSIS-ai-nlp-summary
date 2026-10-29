@@ -1,4 +1,7 @@
-"""Load settings from configs/model.yaml and secrets from .env, with paths relative to the project root."""
+"""Load settings from configs/model.yaml and secrets from .env, with work paths relative to the work root.
+
+The work root is KOSIS_WORKSPACE when set, else the project root (src/kosis_ai/paths.py, plans/T1-27.md).
+"""
 
 from __future__ import annotations
 
@@ -9,7 +12,15 @@ from typing import Any
 
 import yaml
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+try:
+    from kosis_ai.paths import workspace_root
+except ImportError:  # same fallback as kosis_chat/contract.py: src/ is not on the path for `python -m ...`
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+    from kosis_ai.paths import workspace_root
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]  # code: configs/, the source snapshot
 DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "model.yaml"
 DEFAULT_BASE_URL = "https://clovastudio.stream.ntruss.com"
 
@@ -45,9 +56,9 @@ class Settings:
 
 
 def resolve_path(path: str | Path) -> Path:
-    """Resolve a path relative to the project root unless it is absolute."""
+    """Resolve a path relative to the work root unless it is absolute."""
     p = Path(path)
-    return p if p.is_absolute() else PROJECT_ROOT / p
+    return p if p.is_absolute() else workspace_root() / p
 
 
 def load_settings(path: str | Path | None = None, **overrides: Any) -> Settings:
@@ -82,7 +93,7 @@ def load_env(path: str | Path | None = None) -> None:
         from dotenv import load_dotenv
     except ImportError:  # optional for offline tests
         return
-    load_dotenv(resolve_path(path) if path else PROJECT_ROOT / ".env", override=False)
+    load_dotenv(resolve_path(path) if path else workspace_root() / ".env", override=False)
 
 
 def get_secret(name: str) -> str | None:

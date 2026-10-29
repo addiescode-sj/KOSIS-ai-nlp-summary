@@ -19,7 +19,7 @@ from eval.golden import GoldenItem, load_items, read_cells, read_source
 from eval.grade import grade
 from kosis_chat.compute import CalcRefused, compute
 from kosis_chat.compute.analyze import Unresolved, build_plan, rule_plan, to_query
-from kosis_chat.config import PROJECT_ROOT
+from kosis_chat.config import resolve_path
 from kosis_chat.data.loader import load_table
 from kosis_chat.data.preprocessing import clean
 from kosis_chat.judge.answerability import judge
@@ -27,7 +27,7 @@ from kosis_chat.judge.question import build_index
 
 from kosis_ai.schemas import FactPart, StatAnswer  # isort: skip
 
-OUT_DIR = PROJECT_ROOT / "eval" / "results" / "_checks" / "analyze"
+OUT_DIR = Path("eval") / "results" / "_checks" / "analyze"  # under the work root
 COMPUTED_KINDS = ("answerable", "default_allowed")
 _TABLES: dict[Path, tuple] = {}
 
@@ -94,7 +94,7 @@ def render(rows: list[dict], meta: dict) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m eval.analyze_check", description=__doc__.splitlines()[0])
     parser.add_argument("--golden", default="eval/golden/stat_golden.jsonl")
-    parser.add_argument("--out", default=str(OUT_DIR))
+    parser.add_argument("--out", default=str(resolve_path(OUT_DIR)))
     args = parser.parse_args(argv)
     version, items, golden_sha = load_items(Path(args.golden))
     rows = [check(i) for i in items if i.kind in COMPUTED_KINDS]
