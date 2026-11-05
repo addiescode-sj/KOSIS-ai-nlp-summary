@@ -11,10 +11,10 @@ import pytest
 from eval.golden import GoldenError, GoldenItem, load_items, read_cells
 from eval.grade import evaluate, grade
 from eval.harness import grade_all, oracle_answer, save_report, summarize
+from kosis_ai.paths import workspace_root
 from kosis_ai.schemas import Fact, FactPart, Refusal, Source, StatAnswer, StatQuery, StatResult, TextPart
 from tests.conftest import write_table
 
-ROOT = Path(__file__).resolve().parents[1]
 F1 = Fact(id="f1", value=500, unit="명", period="2023", source_ref="GRADE_TBL|T1|1|2023")
 F2 = Fact(id="f2", value=550, unit="명", period="2023", source_ref="GRADE_TBL|T1|2|2023")
 F3 = Fact(id="f3", value=1.1, derivation="f2 / f1", round=1)
@@ -227,7 +227,7 @@ def test_oracle_passes_and_golden_checks_run(table, tmp_path):
 # --- real golden set + Parquet (gitignored; skipped when absent or not yet on Parquet) ---
 
 def _real():
-    golden = ROOT / "eval" / "golden" / "stat_golden.jsonl"
+    golden = workspace_root() / "eval" / "golden" / "stat_golden.jsonl"  # the work root (KOSIS_WORKSPACE)
     if not golden.exists() or '"table_sha256"' not in golden.read_text(encoding="utf-8").split("\n", 1)[0] \
             or ".parquet" not in golden.read_text(encoding="utf-8").split("\n", 1)[0]:
         pytest.skip("golden set on Parquet not present (gitignored; run scripts/golden_to_parquet.py)")

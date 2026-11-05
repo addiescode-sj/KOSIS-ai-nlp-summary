@@ -47,7 +47,7 @@ packages = [
 package-dir = { "kosis_ai" = "src/kosis_ai" }
 
 [tool.setuptools.package-data]
-"kosis_chat.data" = ["*.json"]
+"kosis_chat.shared" = ["*.json"]  # events.json (moved from kosis_chat/data in T1-28 S2)
 
 [tool.pytest.ini_options]
 # Was pytest.ini (removed in T1-28 S1a; pytest.ini would win over this table if both existed).

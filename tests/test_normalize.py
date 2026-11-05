@@ -1,15 +1,15 @@
 """Tests for src/kosis_ai/normalize.py: fetch_table on the provided data, unit and measure_kind rules."""
 
 import json
-from pathlib import Path
 
 import pandas as pd
 import pytest
 
 from kosis_ai.normalize import LABEL_COLUMNS, LookupFailed, fetch_table, measure_kind, normalize, resolve_unit
+from kosis_ai.paths import workspace_root
 from kosis_ai.schemas import Cell
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = workspace_root()  # data and golden: the work root (KOSIS_WORKSPACE), not the code folder
 GOLDEN = ROOT / "eval" / "golden" / "stat_golden.jsonl"
 VALUES = ROOT / "data" / "values"
 GOLDEN_TABLES = ["101_DT_1B8000F", "101_DT_1B8000H", "101_DT_1JC1502", "101_DT_1B08024", "101_DT_101094A001"]

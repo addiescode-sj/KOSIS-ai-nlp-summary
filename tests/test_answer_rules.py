@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from kosis_chat.answer.render import item_label, period_text
 from kosis_chat.judge.answerability import EVALUATIVE
 from kosis_chat.judge.messages import refusal_message, with_josa
 
-ROOT = Path(__file__).resolve().parents[1]
+from kosis_ai.paths import workspace_root  # isort: skip
+
+ROOT = workspace_root()  # data: the work root (KOSIS_WORKSPACE), not the code folder
 
 
 def test_period_text_writes_months_as_year_and_month():

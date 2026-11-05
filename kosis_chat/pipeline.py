@@ -29,14 +29,14 @@ from kosis_chat.compute.context import scenario_alternatives, with_alternatives
 from kosis_chat.compute.resolve import NeedsClarify
 from kosis_chat.config import Settings, load_settings
 from kosis_chat.contract import to_source
-from kosis_chat.data import preprocessing
-from kosis_chat.data.schema import TableInput
 from kosis_chat.judge import messages
 from kosis_chat.judge.answerability import Verdict, judge
-from kosis_chat.judge.question import CAUSAL_WORDS, build_index
+from kosis_chat.judge.question import CAUSAL_WORDS
 from kosis_chat.llm import analyze_fill, analyze_plan, compose, event_lookup
 from kosis_chat.llm.model import STATUS_OK, LLMClient, build_client
 from kosis_chat.llm.structured import StructuredResult, ask_structured
+from kosis_chat.prepare.schemas import TableInput
+from kosis_chat.schemas.resources import StatResources, load_resources
 
 from kosis_ai.schemas import ClarifyChoice, PlanV3, Refusal, StatAnswer, StatQuery  # isort: skip
 
@@ -107,8 +107,10 @@ class StatPipeline:
     ) -> None:
         self.settings = settings or load_settings()
         self._client = client or build_client(self.settings)
-        self.table = preprocessing.clean(table)
-        self.index = build_index(self.table)
+        # The cleaned table, its index and lookups (T1-28 S2): the index is the one compute's checks use too.
+        self.resources: StatResources = load_resources(table, org_id)
+        self.table = self.resources.table
+        self.index = self.resources.index
         self.org_id = org_id
         self.retry_interval = retry_interval
         self.prompt_version = VERSION

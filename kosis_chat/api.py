@@ -15,9 +15,9 @@ import csv
 from functools import lru_cache
 from pathlib import Path
 
+from kosis_chat.adapters.parquet import load_table
 from kosis_chat.config import Settings
 from kosis_chat.contract import org_id_from_table_path, to_stat_answer
-from kosis_chat.data.loader import load_table
 from kosis_chat.llm.model import LLMClient
 from kosis_chat.pipeline import StatPipeline
 
@@ -42,6 +42,8 @@ def table_path(table_id: str) -> Path:
 
 
 def _build(path: Path, settings: Settings | None, client: LLMClient | None, retry_interval: float = 0.0) -> StatPipeline:
+    # adapters open the file (read_parquet + tables.csv), prepare converts; StatPipeline cleans and indexes once
+    # (kosis_chat/schemas/resources.py). T1-28 S2.
     table = load_table(path)
     return StatPipeline(table, client=client, settings=settings, org_id=org_id_from_table_path(path, table.meta.tbl_id),
                         retry_interval=retry_interval)

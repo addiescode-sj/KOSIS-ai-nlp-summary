@@ -6,13 +6,12 @@ A light parser for the rules in answerability.py until T1-06 builds a StatQuery 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
 from functools import lru_cache
 
 from kosis_chat.config import PROJECT_ROOT
-from kosis_chat.data.events import load_events
-from kosis_chat.data.schema import Cell, TableInput
 from kosis_chat.data.scope import LABEL_ALIASES
+from kosis_chat.prepare.schemas import Cell, TableInput  # noqa: F401  (Cell, TableInput: re-export, moved in T1-28 S2)
+from kosis_chat.shared.events import load_events
 
 try:
     from kosis_ai import normalize
@@ -24,8 +23,23 @@ except ImportError:  # `python -m eval.run_eval` has no src/ on the path until T
 
 # re-export: moved in T1-28 S1b (after the block above: judge/schemas.py imports kosis_ai)
 from kosis_chat.judge.schemas import Match, Parsed, Periods, in_range  # noqa: E402
+# re-export: the table index moved to prepare/index.py in T1-28 S2 (prepare comes before judge)
+from kosis_chat.prepare.index import (  # noqa: E402, F401
+    _REGION_AXIS,
+    _UNIT_PAREN,
+    ITEM_AXIS,
+    SCENARIO_AXIS,
+    TOTAL_LABELS,
+    Axis,
+    TableIndex,
+    _link_parents,
+    _measure,
+    build_index,
+    cell_measure,
+    index_of,
+    is_total,
+)
 
-ITEM_AXIS = "항목"  # the item column, next to the category names
 COUNT_KINDS = ("count_stock", "count_flow")
 
 _COHORT = re.compile(r"(?:19|20)\d{2}\s*년생")
@@ -44,7 +58,7 @@ _HALF = re.compile(r"((?:19|20)\d{2})\s*년\s*(상|하)반기")
 _QUARTER = re.compile(r"((?:19|20)\d{2})\s*년\s*([1-4])\s*분기")
 _PREVIOUS_YEAR = re.compile(r"(?:작년|전년|지난\s*해)\s*(?:대비|보다|에\s*비해|과|와|하고)")
 _YEARS_BEFORE = re.compile(r"(?<!\d)(\d{1,2})\s*년\s*전(?=과|보다|에|의|하고|\s|$)")  # not "2025년 전국"
-# An event of the calendar (data/events.json) followed by a time word (T0-04 S5): "코로나 직전 해", "IMF 이후",
+# An event of the calendar (shared/events.json) followed by a time word (T0-04 S5): "코로나 직전 해", "IMF 이후",
 # "코로나19 유행 직전", "외환위기 2년 전", "세월호 참사 당시". A name with no time word after it is not a period, so a
 # region or a label that shares a word with an event stays a label.
 _EVENT_WHEN = (r"\s*(?:유행|발생|확산|사태|시작|출범)?\s*"
@@ -64,12 +78,7 @@ VALUE_ASKS = re.compile(r"추이|몇|얼마|보여")
 VAGUE_WORDS = re.compile(r"통계|현황|자료|정보|수치")
 OUT_OF_DOMAIN = re.compile(r"기업|기술개발|매출|수출|수입액|GDP|물가|주가|부동산|금리|환율")
 
-_UNIT_PAREN = re.compile(r"\s*\(([^()]*)\)\s*$")
 _REGION_SUFFIX = re.compile(r"(특별자치시|특별자치도|특별시|광역시|도)$")
-_REGION_AXIS = re.compile(r"행정구역|시도|시군구|지역")
-# Categories that are alternative scenarios (장래추계 고위/중위/저위), not parts of a whole.
-SCENARIO_AXIS = re.compile(r"가정|시나리오|추계")
-TOTAL_LABELS = ("합계", "계", "총계", "전체")
 # A count label 'X건수' is also asked by the counted person: '출생건수' as '출생아 수' / '출생아', '사망건수' as '사망자 수'
 # (KOSIS itself names the same count 출생아수 / 사망자수 in other tables; no table holds both forms, checked over the
 # 2,364 tables of data/table_metadata on 10/28).
@@ -81,11 +90,6 @@ _PARTICLE = re.compile(r"(?<=[가-힣]{2})(?:은|는|이|가|을|를|의|에|도
 
 def squash(text: str) -> str:
     return re.sub(r"\s+", "", text or "")
-
-
-def is_total(label: str) -> bool:
-    core = _UNIT_PAREN.sub("", label).strip()
-    return core in TOTAL_LABELS or core == "전국" or core.endswith(("_계", " 계"))
 
 
 # ---------------------------------------------------------------- periods
@@ -101,6 +105,7 @@ def _decade_range(m: re.Match) -> tuple[str, str]:
     return str(start), str(start + 9)
 
 
+# ponytail: S2 keeps this cache: one pattern compiled from the event calendar (shared/events.py), not per table.
 @lru_cache(maxsize=1)
 def _event_pattern() -> re.Pattern:
     names = sorted(load_events(), key=len, reverse=True)
@@ -191,96 +196,7 @@ def asked_periods(question: str) -> Periods:
 
 
 # ---------------------------------------------------------------- table index
-
-
-@dataclass
-class Axis:
-    """The item column or one category: code -> label, code -> parent code (KOSIS codes nest by prefix)."""
-
-    name: str
-    labels: dict[str, str] = field(default_factory=dict)
-    parents: dict[str, str | None] = field(default_factory=dict)
-
-    @property
-    def regional(self) -> bool:
-        return bool(_REGION_AXIS.search(self.name))
-
-    @property
-    def has_total(self) -> bool:
-        return any(is_total(label) for label in self.labels.values())
-
-    def depth(self, code: str) -> int:
-        n, parent = 0, self.parents.get(code)
-        while parent is not None:
-            n, parent = n + 1, self.parents.get(parent)
-        return n
-
-    def ancestors(self, code: str) -> list[str]:
-        out, parent = [], self.parents.get(code)
-        while parent is not None:
-            out.append(parent)
-            parent = self.parents.get(parent)
-        return out
-
-
-def _link_parents(axis: Axis) -> None:
-    codes = set(axis.labels)
-    for code in axis.labels:
-        axis.parents[code] = next((code[:k] for k in range(len(code) - 1, 0, -1) if code[:k] in codes), None)
-
-
-@lru_cache(maxsize=4096)
-def _measure(tbl_id: str, unit: str | None, item: str, dim_labels: tuple[str, ...]) -> tuple[str | None, str | None]:
-    """(unit, measure_kind) by the T1-05 rules (src/kosis_ai/normalize.py)."""
-    resolved, _ = normalize.resolve_unit(unit, item, list(dim_labels))
-    return resolved, normalize.measure_kind(tbl_id, resolved, item, list(dim_labels))
-
-
-def cell_measure(table: TableInput, cell: Cell) -> tuple[str | None, str | None]:
-    given = cell.unit if cell.unit_source == "given" else None
-    # Scenario labels name every assumption ('출산율-중위 / 기대수명-중위'), which the keyword rules would read
-    # as a rate in 년 for every cell; the measure is in the other labels.
-    labels = tuple(label for name, label in cell.dims.items() if not SCENARIO_AXIS.search(name))
-    return _measure(table.meta.tbl_id, given, cell.item, labels)
-
-
-@dataclass
-class TableIndex:
-    table: TableInput
-    axes: dict[str, Axis]
-    periods: list[str]
-    # (axis, code) -> every (unit, measure_kind) of its cells; a measure label has exactly one.
-    measures: dict[tuple[str, str], set[tuple[str | None, str | None]]]
-
-    def axis_of(self, cell: Cell, name: str) -> str:
-        return cell.item_code if name == ITEM_AXIS else cell.dim_codes.get(name, "")
-
-    def year_ok(self, year: str) -> bool:
-        return any(p.startswith(year) for p in self.periods)
-
-    def period_ok(self, period: str) -> bool:
-        return period in self.periods if len(period) > 4 else self.year_ok(period)
-
-    def measure_of(self, axis: str, code: str) -> tuple[str | None, str | None] | None:
-        found = self.measures.get((axis, code), set())
-        return next(iter(found)) if len(found) == 1 else None
-
-
-def build_index(table: TableInput) -> TableIndex:
-    axes: dict[str, Axis] = {ITEM_AXIS: Axis(ITEM_AXIS)}
-    measures: dict[tuple[str, str], set] = {}
-    periods: set[str] = set()
-    for c in table.cells:
-        periods.add(c.period_raw)
-        axes[ITEM_AXIS].labels.setdefault(c.item_code, c.item)
-        found = cell_measure(table, c)
-        measures.setdefault((ITEM_AXIS, c.item_code), set()).add(found)
-        for name, code in c.dim_codes.items():
-            axes.setdefault(name, Axis(name)).labels.setdefault(code, c.dims.get(name, ""))
-            measures.setdefault((name, code), set()).add(found)
-    for axis in axes.values():
-        _link_parents(axis)
-    return TableIndex(table=table, axes=axes, periods=sorted(periods), measures=measures)
+# Axis, TableIndex, build_index, index_of, cell_measure, is_total: kosis_chat/prepare/index.py (re-exported above).
 
 
 # ---------------------------------------------------------------- label matching

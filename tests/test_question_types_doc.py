@@ -7,12 +7,15 @@ from pathlib import Path
 import pytest
 
 from kosis_ai.normalize import fetch_table
+from kosis_ai.paths import workspace_root
 from kosis_ai.schemas import REFUSAL_REASONS
 
 ROOT = Path(__file__).resolve().parents[1]
 DOC = (ROOT / "docs" / "question_types.md").read_text(encoding="utf-8")
-GOLDEN = [ROOT / "eval" / "golden" / name for name in ("stat_golden.jsonl", "stat_golden_edge.jsonl")]
-VALUES = ROOT / "data" / "values"
+# Data and golden sit in the work root (KOSIS_WORKSPACE, e.g. the Phase 2 repo root for vendor/phase1), docs with the code.
+WORKSPACE = workspace_root()
+GOLDEN = [WORKSPACE / "eval" / "golden" / name for name in ("stat_golden.jsonl", "stat_golden_edge.jsonl")]
+VALUES = WORKSPACE / "data" / "values"
 
 offline = pytest.mark.offline
 needs_data = pytest.mark.skipif(not VALUES.exists(), reason="provided data is not in the repo (gitignored); place it at data/")

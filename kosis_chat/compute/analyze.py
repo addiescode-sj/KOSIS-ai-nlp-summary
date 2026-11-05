@@ -327,17 +327,9 @@ class _Lookup:
         return [c.period_raw for c in self.series.get(self.key(fixed), [])]
 
 
-_LOOKUPS: dict[int, tuple[TableInput, _Lookup]] = {}
-
-
 def _lookup(table: TableInput) -> _Lookup:
-    cached = _LOOKUPS.get(id(table))
-    if cached is None or cached[0] is not table:
-        if len(_LOOKUPS) > 8:
-            _LOOKUPS.clear()
-        cached = (table, _Lookup(table))
-        _LOOKUPS[id(table)] = cached
-    return cached[1]
+    # One per TableInput (T1-28 S2: TableInput.caches, was a module dict keyed by id(table)).
+    return table.caches.get("compute.analyze.lookup", lambda: _Lookup(table))
 
 
 def _fixed(plan: Plan, index: TableIndex, free: set[str], problems: list[str]) -> dict[str, str]:

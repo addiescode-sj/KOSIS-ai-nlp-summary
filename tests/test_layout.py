@@ -29,10 +29,9 @@ OLD_PATHS = ("kosis_chat.data", "kosis_chat.answer", "kosis_chat.contract", "kos
              "kosis_chat.llm.compose", "kosis_chat.llm.analyze_fill", "kosis_chat.llm.analyze_plan",
              "kosis_chat.llm.event_lookup", "kosis_chat.compute.analyze", "kosis_chat.compute.build",
              "kosis_chat.judge.answerability", "kosis_chat.judge.messages")
-# pandas / pyarrow: today's users, plus where T1-28 S2 moves them (adapters, prepare, schemas/io).
-# S2 removes kosis_chat/data/loader.py from this list.
+# pandas / pyarrow: kosis_ai.normalize, and where T1-28 S2 moved the loader's use (adapters, prepare, schemas/io).
 FRAME_LIBS = ("pandas", "pyarrow")
-FRAME_ALLOWED = ("kosis_chat/data/loader.py", "src/kosis_ai/normalize.py", "kosis_chat/adapters/",
+FRAME_ALLOWED = ("src/kosis_ai/normalize.py", "kosis_chat/adapters/",
                  "kosis_chat/prepare/convert.py", "kosis_chat/prepare/columns.py", "kosis_chat/schemas/io.py")
 
 

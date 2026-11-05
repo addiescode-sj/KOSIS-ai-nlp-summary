@@ -2,8 +2,8 @@
 
 Moved from judge/question.py (Periods, Match, Parsed) and judge/answerability.py (Verdict, Resolved); the old modules
 re-export them. Same fields, order, defaults and frozenness as the dataclasses; see shared/boundary.py for how
-validation is kept from changing a value. TableIndex and Axis stay dataclasses in judge/question.py (D5 a: large
-table data is not a node boundary).
+validation is kept from changing a value. TableIndex and Axis stay dataclasses (D5 a: large table data is not a
+node boundary); since T1-28 S2 they live in prepare/index.py, re-exported by judge/question.py.
 """
 
 from __future__ import annotations

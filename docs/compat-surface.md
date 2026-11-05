@@ -33,7 +33,7 @@
 |---|---|---|
 | `kosis_chat.compute.engine` | `_read`, `_Read` | `llm/analyze_plan.py:21`, `compute/semantics.py:10`, `tests/test_semantics.py:9` |
 | `kosis_chat.compute.semantics` | `_whole_label` | `compute/resolve.py:19` |
-| `kosis_chat.data.events` | `event_key` | `compute/resolve.py:20` |
+| `kosis_chat.data.events` | `event_key` | `tests/test_answerability.py:9` (`compute/resolve.py`는 S2부터 `kosis_chat.shared.events`) |
 | `kosis_chat.api` | `_build`, `_cached` (monkeypatch) | `tests/test_workspace.py:84-109` |
 
 ## 옮긴 노드 경계 타입 (T1-28 S1b)
@@ -55,6 +55,23 @@ Pydantic 모델로 바꿔 단계 `schemas.py`로 옮기고 옛 경로는 이름�
 - `dataclasses.replace(x, ...)` → `x.model_copy(update={...})`. 위치 인자 생성(`Match(axis, code, ...)`)은 `shared/boundary.py`가 필드 순서대로 받는다.
 - `Verdict.refuse(...)`(classmethod) → `kosis_chat.judge.answerability.refuse(...)`: 거절 문장을 쓰는 `judge/messages.py`가 옛 경로라 schemas가 import하지 않는다. Phase 1·2 호출처는 answerability 안뿐(grep 11/05).
 
+## 옮긴 data/ 모듈 (T1-28 S2)
+
+`kosis_chat/data/`를 모듈 안(`prepare/`: 행→셀·단위·clean·색인)과 모듈 밖(`adapters/parquet.py`: 파일 열기)으로 나눴다. 옛 모듈은 이름을 적어 재export한다(옛 밑줄 이름은 같은 객체의 별칭). `data/scope.py`·`data/serializer.py`(B0)는 그대로.
+
+| 새 위치 | 이름 | 옛 경로(재export) |
+|---|---|---|
+| `kosis_chat.prepare.schemas` | `TableInput`(+ `caches: LookupCaches`, init·비교 제외), `TableMeta`, `Cell`, `Problem`, `SchemaError`, `validate`, `validate_meta_dict`(둘 다 키워드 `allow_empty` 추가, 기본값이면 동작 같음), `REQUIRED_META_FIELDS PERIOD_TYPES INPUT_FORMATS VALUE_FLAGS` | `kosis_chat.data.schema` |
+| `kosis_chat.prepare.clean` | `clean`, `clean_cell`, `parse_value`, `KIND_FLAGS MISSING_MARKS SUPPRESSED_MARKS FLAGGED_MARKS _PROVISIONAL` | `kosis_chat.data.preprocessing` |
+| `kosis_chat.prepare.convert` | `infer_unit`, `_unit_in_parens`, `_PAREN`, `UNKNOWN_UNIT KNOWN_UNITS UNIT_OVERRIDES`, `PARQUET_COLUMNS`(옛 `_PARQUET_COLUMNS`), `PRD_SE`(`_PRD_SE`), `DIM_LEVELS`(`_DIM_LEVELS`), `build_meta`(`_build_meta`) | `kosis_chat.data.loader` |
+| `kosis_chat.adapters.parquet` | `load_table(path)`, `sha256_of(path)`, `read_parquet`, `find_catalog`(`_find_catalog`), `parquet_meta`(`_parquet_meta`), `load_parquet`(`_load_parquet`), `catalog_row`, `fetched_at_of` | `kosis_chat.data.loader` |
+| `kosis_chat.shared.events` (+ `events.json`) | `event_key`, `load_events`, `EVENTS_PATH` | `kosis_chat.data.events` |
+| `kosis_chat.prepare.index` | `TableIndex`, `Axis`, `build_index`, `index_of`, `cell_measure`, `is_total`, `_measure`, `_link_parents`, `ITEM_AXIS SCENARIO_AXIS TOTAL_LABELS _UNIT_PAREN _REGION_AXIS` | `kosis_chat.judge.question` (`index_of`는 `kosis_chat.compute.semantics`도) |
+
+- 새 이름(옛 경로 없음): `kosis_chat.schemas.io`(`ParquetTable`, `StatInput`), `kosis_chat.schemas.resources`(`StatResources`, `load_resources`, `LookupCaches`), `kosis_chat.prepare.node`(`prepare`, `table_input`, `content_hash`). `fetched_at`은 `ParquetTable.fetched_at`(선택, 기본 `None`)에 둔다: Phase 2가 `TableInfo`를 tables.jsonl에 쓰므로 `TableInfo` 필드는 늘리지 않는다.
+- `api._build(path, settings, client, retry_interval)`·`api._cached`(lru_cache, 경로 키) 서명 그대로. `_build`는 `adapters.parquet.load_table` → `StatPipeline`(생성자 서명 그대로, 안에서 `load_resources`).
+- 모듈 전역 `id(table)` 캐시 5곳(compute/analyze `_LOOKUPS`, compute/engine `_INDEX_CACHE`·`_SERIES_CACHE`, compute/resolve `_CELLS`, compute/semantics `_INDEX`)은 `TableInput.caches`로 옮겼다. 남긴 캐시(값 키, 표와 무관): `prepare.index._measure`, `judge.question._event_pattern`, `shared.events.load_events`, `api._cached`, `kosis_ai.normalize`의 lru_cache.
+
 ## 반환 객체에서 읽는 속성
 
-- `StatPipeline`: `ask(question, golden_scope=None)`, `client` (setter: `eval/run_eval.py:229`), `org_id table prompt_version system_prompt answer_model decision_metadata settings retry_interval`.
+- `StatPipeline`: `ask(question, golden_scope=None)`, `client` (setter: `eval/run_eval.py:229`), `org_id table prompt_version system_prompt answer_model decision_metadata settings retry_interval`. T1-28 S2부터 `resources`(StatResources)와 `index`(= `resources.index`)도 있음.

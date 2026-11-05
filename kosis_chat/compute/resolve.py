@@ -16,9 +16,9 @@ from itertools import product
 
 from kosis_chat.compute.engine import CalcRefused
 from kosis_chat.compute.semantics import _whole_label, index_of
-from kosis_chat.data.events import event_key as _key
-from kosis_chat.data.events import load_events
 from kosis_chat.data.schema import Cell, TableInput
+from kosis_chat.shared.events import event_key as _key
+from kosis_chat.shared.events import load_events
 from kosis_chat.judge import messages
 from kosis_chat.judge.question import ITEM_AXIS, Axis
 
@@ -179,17 +179,11 @@ def resolve_periods(spec: PeriodSpec, periods: list[str], period_type: str, look
 # ---------------------------------------------------------------- select
 
 
-_CELLS: dict[int, tuple[TableInput, dict[tuple, Cell]]] = {}
-
-
 def _cells_by_key(table: TableInput) -> dict[tuple, Cell]:
-    cached = _CELLS.get(id(table))
-    if cached is None or cached[0] is not table:
-        if len(_CELLS) > 8:
-            _CELLS.clear()
-        cached = (table, {(c.item_code, tuple(sorted(c.dim_codes.items())), c.period_raw): c for c in table.cells})
-        _CELLS[id(table)] = cached
-    return cached[1]
+    # One per TableInput (T1-28 S2: TableInput.caches, was a module dict keyed by id(table)).
+    return table.caches.get(
+        "compute.resolve.cells",
+        lambda: {(c.item_code, tuple(sorted(c.dim_codes.items())), c.period_raw): c for c in table.cells})
 
 
 def resolve_select(table: TableInput, step: SelectStep, lookup: EventLookup | None = None,

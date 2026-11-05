@@ -25,7 +25,8 @@ SURFACE: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("kosis_chat.pipeline", ("VERSION", "StatPipeline")),
     ("kosis_chat.llm.model", ("LLMClient", "LLMResult", "MockClient", "HCXClient", "build_client",
                               "STATUS_OK", "STATUS_API_ERROR")),
-    ("kosis_chat.data.loader", ("sha256_of", "load_table")),
+    ("kosis_chat.data.loader", ("sha256_of", "load_table", "infer_unit", "UNKNOWN_UNIT", "KNOWN_UNITS",
+                                "UNIT_OVERRIDES")),
     ("kosis_ai.schemas", ("TableInfo", "MAX_DIMS", "Source", "Cell", "Fact", "StatAnswer", "StatResult", "StatQuery",
                           "TextPart", "FactPart", "Refusal", "QuestionKind", "QuestionType", "RefusalReason")),
     ("kosis_ai.normalize", ("_meta_unit",)),
@@ -36,7 +37,15 @@ SURFACE: tuple[tuple[str, tuple[str, ...]], ...] = (
     # Phase 1 itself (code and tests) reading private names across modules
     ("kosis_chat.compute.engine", ("_read", "_Read", "CalcRefused", "Computed", "TermResult")),
     ("kosis_chat.compute.semantics", ("_whole_label", "index_of")),
-    ("kosis_chat.data.events", ("event_key",)),
+    ("kosis_chat.data.events", ("event_key", "load_events", "EVENTS_PATH")),
+    # T1-28 S2: data/ split into prepare/ (convert, clean, schemas, index), adapters/parquet.py and shared/events.py;
+    # the old modules re-export them by name
+    ("kosis_chat.data.schema", ("TableInput", "TableMeta", "Cell", "Problem", "SchemaError", "validate",
+                                "validate_meta_dict", "REQUIRED_META_FIELDS", "VALUE_FLAGS")),
+    ("kosis_chat.data.preprocessing", ("clean", "clean_cell", "parse_value", "KIND_FLAGS", "MISSING_MARKS")),
+    ("kosis_chat.compute.resolve", ("load_events",)),
+    ("kosis_chat.judge.question", ("build_index", "index_of", "cell_measure", "is_total", "ITEM_AXIS", "COUNT_KINDS",
+                                   "SCENARIO_AXIS", "CAUSAL_WORDS", "asked_periods", "match_labels", "squash")),
     # T1-28 S1b: node-boundary models moved to <stage>/schemas.py; the old modules re-export them by name
     ("kosis_chat.judge.answerability", ("Verdict", "Resolved", "refuse", "judge", "resolve")),
     ("kosis_chat.judge.question", ("Periods", "Match", "Parsed", "in_range", "TableIndex", "Axis")),
@@ -61,6 +70,11 @@ SIGNATURES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("kosis_chat.llm.model", "build_client", ("settings",)),
     ("kosis_chat.data.loader", "sha256_of", ("path",)),
     ("kosis_chat.data.loader", "load_table", ("path",)),
+    ("kosis_chat.data.loader", "infer_unit", ("unit", "item", "dim_labels")),  # tests/test_data.py
+    ("kosis_chat.data.preprocessing", "clean", ("table",)),
+    ("kosis_chat.data.schema", "validate", ("table",)),
+    ("kosis_chat.judge.question", "build_index", ("table",)),
+    ("kosis_chat.pipeline", "StatPipeline", ("table", "client", "settings", "org_id", "retry_interval")),
     ("kosis_ai.normalize", "_meta_unit", ("table_id", "data_dir")),
     ("eval.golden", "load_items", ("path",)),
 )

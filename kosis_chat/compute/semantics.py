@@ -10,10 +10,11 @@ from __future__ import annotations
 from kosis_chat.compute.engine import CalcRefused, _Read
 from kosis_chat.data.schema import TableInput
 from kosis_chat.judge import messages
-from kosis_chat.judge.question import COUNT_KINDS, ITEM_AXIS, TableIndex, build_index, is_total
+from kosis_chat.judge.question import COUNT_KINDS, ITEM_AXIS, TableIndex, is_total
+# One index per TableInput (T1-28 S2: TableInput.caches, was a module dict keyed by id(table)); re-exported here.
+from kosis_chat.prepare.index import index_of
 
 RATE_KINDS = ("ratio", "average", "index")
-_INDEX: dict[int, tuple[TableInput, TableIndex]] = {}
 
 
 def _items(reads: list[_Read]) -> str:
@@ -47,16 +48,6 @@ def check_share_parts(parts: list[_Read]) -> None:
     """R7: several parts are summed for a share, so they must be counts."""
     if len(parts) > 1 and any(r.kind not in COUNT_KINDS for r in parts if r.kind):
         raise CalcRefused("not_aggregatable", messages.refusal_message("not_aggregatable", what=_items(parts)))
-
-
-def index_of(table: TableInput) -> TableIndex:
-    cached = _INDEX.get(id(table))
-    if cached is None or cached[0] is not table:
-        if len(_INDEX) > 8:
-            _INDEX.clear()
-        cached = (table, build_index(table))
-        _INDEX[id(table)] = cached
-    return cached[1]
 
 
 def _whole_label(label: str) -> bool:

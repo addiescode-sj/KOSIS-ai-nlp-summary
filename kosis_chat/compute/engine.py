@@ -29,7 +29,6 @@ if TYPE_CHECKING:  # resolve.py imports this module
 
 PERCENT_DIGITS = 1  # growth rate, share and multiple
 _DECIMALS = re.compile(r"\.(\d+)")
-_INDEX_CACHE: dict[int, tuple[TableInput, dict[str, Cell], bool]] = {}
 
 
 class CalcRefused(Exception):
@@ -43,13 +42,10 @@ class CalcRefused(Exception):
 
 def _indexed(table: TableInput) -> tuple[TableInput, dict[str, Cell], bool]:
     """(table, cells by source_ref, whether facts name the item)."""
-    cached = _INDEX_CACHE.get(id(table))
-    if cached is None or cached[0] is not table:
-        if len(_INDEX_CACHE) > 8:
-            _INDEX_CACHE.clear()
-        cached = (table, {c.source_ref: c for c in table.cells}, _item_named(table))
-        _INDEX_CACHE[id(table)] = cached
-    return cached
+    # One per TableInput (T1-28 S2: TableInput.caches, was a module dict keyed by id(table)).
+    by_ref, named = table.caches.get(
+        "compute.engine.indexed", lambda: ({c.source_ref: c for c in table.cells}, _item_named(table)))
+    return table, by_ref, named
 
 
 def _item_named(table: TableInput) -> bool:
@@ -137,20 +133,17 @@ class _Ids:
         return f"f{self.n}"
 
 
-_SERIES_CACHE: dict[int, tuple[TableInput, dict[tuple, list[Cell]]]] = {}
+def _series_groups(table: TableInput) -> dict[tuple, list[Cell]]:
+    groups: dict[tuple, list[Cell]] = {}
+    for c in table.cells:
+        groups.setdefault((c.item_code, tuple(sorted(c.dim_codes.items()))), []).append(c)
+    return groups
 
 
 def _series(table: TableInput, cell: Cell) -> list[dict]:
-    cached = _SERIES_CACHE.get(id(table))
-    if cached is None or cached[0] is not table:
-        if len(_SERIES_CACHE) > 8:
-            _SERIES_CACHE.clear()
-        groups: dict[tuple, list[Cell]] = {}
-        for c in table.cells:
-            groups.setdefault((c.item_code, tuple(sorted(c.dim_codes.items()))), []).append(c)
-        cached = (table, groups)
-        _SERIES_CACHE[id(table)] = cached
-    same = cached[1].get((cell.item_code, tuple(sorted(cell.dim_codes.items()))), [])
+    # One grouping per TableInput (T1-28 S2: TableInput.caches, was a module dict keyed by id(table)).
+    groups = table.caches.get("compute.engine.series", lambda: _series_groups(table))
+    same = groups.get((cell.item_code, tuple(sorted(cell.dim_codes.items()))), [])
     reads = sorted((_read(table, c.source_ref) for c in same), key=lambda r: r.cell.period_raw)
     return [{"period": r.cell.period_raw, "value": r.value} for r in reads if r.value is not None]
 

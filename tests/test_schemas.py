@@ -2,11 +2,11 @@
 
 import csv
 import json
-from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
+from kosis_ai.paths import workspace_root
 from kosis_ai.schemas import (
     CHART_KINDS,
     QUESTION_KINDS,
@@ -26,7 +26,7 @@ from kosis_ai.schemas import (
     TextPart,
 )
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = workspace_root()  # data and golden: the work root (KOSIS_WORKSPACE), not the code folder
 GOLDEN = ROOT / "eval" / "golden" / "stat_golden.jsonl"
 DATA = ROOT / "data"
 SOURCE = Source(org_id="101", tbl_id="DT_1B8000H", survey_nm="인구동향조사", tbl_nm="시도/인구동태건수 및 동태율")
