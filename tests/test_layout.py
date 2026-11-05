@@ -119,6 +119,14 @@ def test_import_rules(path: Path):
     assert not problems, f"{rel}: imports break the layout rules: {sorted(set(problems))}"
 
 
+def test_langgraph_only_in_graph_and_one_stage_exception():
+    """T1-28 S4: the graph (kosis_chat/graph/build.py) imports langgraph, nothing outside graph/ does; the one import
+    against the stage order stays analyze -> compute (D12 a, analyze/write.py place())."""
+    users = [_rel(p) for p in ALL_FILES if any(_hits(n, ("langgraph",)) for n in _imports(p))]
+    assert "kosis_chat/graph/build.py" in users and all(u.startswith("kosis_chat/graph/") for u in users), users
+    assert STAGE_EXCEPTIONS == {("analyze", "compute")}
+
+
 def test_every_package_is_in_pyproject():
     listed = set(tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["tool"]["setuptools"]["packages"])
     found = {_module_of(p) for p in ALL_FILES if p.name == "__init__.py"}

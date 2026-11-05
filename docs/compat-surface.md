@@ -176,6 +176,22 @@ Pydantic 모델로 바꿔 단계 `schemas.py`로 옮기고 옛 경로는 이름�
 
 **monkeypatch 주의(S3a·S3b 공통).** 옛 경로 shim은 이름을 복사해 둔 것이라, 옛 경로 모듈의 **속성을 다시 묶는** monkeypatch(`monkeypatch.setattr(kosis_chat.llm.compose, "SYSTEM_PROMPT", ...)`, `kosis_chat.compute.analyze.build_plan = ...` 등)는 새 모듈과 그 이름을 쓰는 코드에 닿지 않는다. 바꾸려면 새 위치(`kosis_chat.compose.compose` 등)를 패치하거나, 단계 함수의 키워드 인자(`build=`, `llm=`)로 넘긴다. 예외: `kosis_chat.pipeline.build_plan`은 `ask`가 부를 때마다 읽어 `step_plan_rules`·`step_plan_fill_llm`에 넘기므로 패치가 그대로 통한다(`tests/test_analyze_plan.py`). `write.place()`가 부르는 `written`도 이제 `kosis_chat.analyze.blocks`에서 찾으므로 `kosis_chat.compute.build.written` 패치는 닿지 않는다(현재 쓰는 곳 없음). 같은 객체를 **안에서 바꾸는** 패치(`setattr(SomeClass, ...)`, `time.sleep`)는 양쪽에 다 보인다.
 
+## LangGraph 그래프 (T1-28 S4)
+
+`StatPipeline.ask`는 이제 `kosis_chat.graph.build`의 그래프를 돈다(수동 라우터는 `tests/test_graph_parity.py`의 비교 기준 `sequential_ask`로만 남음). 반환 `Answer`·span·`decision_metadata`(키 순서 포함)·모델 호출 순서·`time.sleep` 호출은 S3b와 같다. `langgraph>=1.0,<2`가 Phase 1 의존성이 되었고(`requirements.txt`·`pyproject.toml`), `import kosis_chat.pipeline`이 langgraph를 불러온다. langgraph import는 `kosis_chat/graph/` 안에서만(`tests/test_layout.py`).
+
+| 위치 | 이름 | 비고 |
+|---|---|---|
+| `kosis_chat.graph.build` | `NODE_TABLE`(노드 이름 → step 함수 13개), `build_graph(resources, node_overrides=None)`, `run(graph, question, *, context, meta, started, golden_scope=None) -> StatState`, `RECURSION_LIMIT`, `LONGEST_PATH`, `StatContext` | `node_overrides`는 같은 서명의 step으로 바꿔 끼움(E4), 모르는 이름은 `KeyError`. 그래프는 `StatPipeline.graph`(첫 `ask` 때 한 번 만듦) |
+| `kosis_chat.graph.adapters` | `StatContext(llm, chatbot, build)`, `timed(step, *args, **kw)`, `*_node(step, res)` 어댑터 | 어댑터는 dict를 돌려준다(BaseModel 반환 안 씀). 질문마다 바뀌는 것(모델 접근·fallback 챗봇·`pipeline.build_plan`)은 LangGraph context로 |
+| `kosis_chat.schemas.state` | `StatState`, 리듀서 `append`(records)·`merge`(meta) | Pydantic. 노드 이름과 겹치지 않게 `chart_out`·`caveats_out` |
+| `kosis_chat.graph.legacy` | `answer_of(state, *, table_meta, prompt_version, fallback_prompt)` | 옛 `ask`의 출구별 `to_answer`/`fallback_answer` + 답한 질문의 `Answer.chart` |
+| `kosis_chat.pipeline` | `StatPipeline.graph`(신규 property) | 없앤 것: `StatPipeline._compose _verdict_answer _clarify_answer _done`, 모듈의 `step_*`·`to_answer` 등 재import(Phase 1·eval·Phase 2 grep 0건) |
+
+- chart 노드는 caveats 뒤에서 compose 경로와 병렬로 돈다(같은 superstep이면 LangGraph가 스레드로 돌림). chart는 `chart_out`만 쓰고 records·meta는 안 쓴다 → span 순서는 완료 순서와 무관하게 옛 순서. render는 `["compose_done", "chart"]` 합류 뒤에만.
+- 노드 안에서 난 예외는 같은 객체로 `ask` 밖까지 나온다(LangGraph가 `add_note`로 "During task with name ..." 한 줄을 붙여 traceback에만 보임). `LLMKeyMissing`도 첫 LLM 노드에서 그대로.
+- `pipeline.build_plan` monkeypatch는 그대로 통한다(`ask`가 매번 읽어 context로 넘김).
+
 ## 반환 객체에서 읽는 속성
 
 - `StatPipeline`: `ask(question, golden_scope=None)`, `client` (setter: `eval/run_eval.py:229`), `org_id table prompt_version system_prompt answer_model decision_metadata settings retry_interval`. T1-28 S2부터 `resources`(StatResources)와 `index`(= `resources.index`)도 있음. S2c부터 `llm`(주입한 LLMConfig 또는 None)이 있고, `client`는 처음 읽을 때 만든다(키 없는 hcx면 그때 `LLMKeyMissing`).

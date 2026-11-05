@@ -18,7 +18,7 @@ from kosis_chat.graph.spans import spans_of
 from kosis_chat.judge.schemas import Verdict
 from kosis_chat.llm.model import STATUS_OK
 from kosis_chat.prepare.schemas import TableMeta
-from kosis_chat.schemas.state import LLMCall, Record
+from kosis_chat.schemas.state import LLMCall, Record, StatState
 
 from kosis_ai.schemas import StatAnswer  # isort: skip
 
@@ -103,3 +103,15 @@ def fallback_answer(answer: Answer, meta: dict, records: list[Record], started: 
                            "fallback_prompt": fallback_prompt, "numbers_origin": "model", "numbers_verified": False,
                            "spans": spans_of(records, started)},
     )
+
+
+def answer_of(state: StatState, *, table_meta: TableMeta, prompt_version: str, fallback_prompt: str) -> Answer:
+    """The Answer of a question the graph ran (T1-28 S4): the fallback chatbot's, or the stat answer's with its chart.
+
+    The same Answer StatPipeline.ask built at each of its exits before S4 (to_answer / fallback_answer; an answered
+    question carries its chart's Vega-Lite spec in Answer.chart)."""
+    if state.fallback is not None:
+        return fallback_answer(state.fallback, state.meta, state.records, state.started, fallback_prompt=fallback_prompt)
+    answer = to_answer(state.stat, state.verdict, state.meta, state.records, state.started, table_meta=table_meta,
+                       prompt_version=prompt_version)
+    return replace(answer, chart=state.chart_out.spec) if state.chart_out is not None else answer

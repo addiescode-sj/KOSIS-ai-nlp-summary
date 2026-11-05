@@ -47,5 +47,9 @@ def span_of(record: Record, t0: float) -> dict:
 
 
 def spans_of(records: list[Record], t0: float) -> list[dict]:
-    """The spans of a question's records, in record order (the order the steps ended)."""
+    """The spans of a question's records, in record order (the order the steps ended).
+
+    In the graph (T1-28 S4) only the main path writes records, one node after another, so this is the fixed order of
+    the old router whatever the chart branch (which records nothing) does; no sorting is needed. Sorting by node
+    name would break it anyway: compose and verify repeat, event_lookup comes between llm_plan and llm_plan_retry."""
     return [span_of(r, t0) for r in records]

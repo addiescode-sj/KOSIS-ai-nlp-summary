@@ -3,7 +3,8 @@
 The pipeline used to sum its model calls into a mutable _Calls object while it went. Now each LLM step returns the
 calls it made as LLMCall records, the router records the other steps as StepSpan records, both in one list in the
 order they ended, and the totals an Answer reports (graph/legacy.py) and the spans it carries (graph/spans.py
-spans_of) are read from that list. StatState (the LangGraph state) comes with S4.
+spans_of) are read from that list. StatState (T1-28 S4) is the LangGraph state one question carries through the graph
+(graph/build.py): the records and decision_metadata are its two reducer fields (append, merge).
 
 Times are time.perf_counter() values: spans_of turns them into offsets from the question's start. They are kept
 unvalidated (SkipValidation), like every number a record carries, so an int stays an int (shared/boundary.py).
@@ -11,9 +12,9 @@ unvalidated (SkipValidation), like every number a record carries, so an int stay
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any
 
-from pydantic import ConfigDict, Field, SkipValidation
+from pydantic import BaseModel, ConfigDict, Field, SkipValidation
 
 from kosis_chat.shared.boundary import BoundaryModel
 
@@ -67,4 +68,59 @@ def called_before(records: list[Record]) -> bool:
     return any(r.raw for r in records if isinstance(r, LLMCall) and r.summed)
 
 
-__all__ = ["LLMCall", "Record", "StepSpan", "called_before"]
+def append(old: list, new: list) -> list:
+    """StatState.records reducer: a node's records go after the ones before it (a new list; neither is changed)."""
+    return [*old, *new]
+
+
+def merge(old: dict, new: dict) -> dict:
+    """StatState.meta reducer: what a node wrote, as dict.update would (a key already there keeps its place, a new key
+    goes last), into a new dict."""
+    return {**old, **new}
+
+
+class StatState(BaseModel):
+    """What one question carries through the graph (T1-28 S4, graph/build.py).
+
+    LangGraph builds this model from the channels before every node (`StatState(**channels)`) and a node returns a
+    dict of the fields it changes. records and meta are reducer fields (Annotated[..., append] / [..., merge]): a
+    node returns only its own records / entries. Every other field is the last value written; only one node writes
+    each in a step (chart runs beside compose_llm and writes only `chart_out`). No field has a node's name (chart_out,
+    caveats_out: kept apart so a state key never reads as a node name). Objects are stored as passed
+    (SkipValidation, Any), never validated or copied: the step In/Out models check them at the step boundary. Their
+    types live in the stage packages, which this package does not import (named in the comments).
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    question: str
+    golden_scope: SkipValidation[dict[str, Any] | None] = None  # run_eval's golden scope, for the fallback chatbot
+    started: SkipValidation[float] = 0.0  # time.perf_counter() at the question's start (span offsets, judge's start)
+    records: Annotated[SkipValidation[list[Any]], append] = Field(default_factory=list)  # Record, in the order made
+    meta: Annotated[SkipValidation[dict[str, Any]], merge] = Field(default_factory=dict)  # decision_metadata, no spans
+    step_route: str | None = None  # the route the last node on the main path chose (the conditional edges read it)
+    verdict: Any = None  # judge.schemas.Verdict
+    rule: Any = None  # analyze.rules.Plan: the rules' plan
+    plan: Any = None  # analyze.rules.Plan: the plan computed (the rules', the fill's, or the model's query_plan)
+    built: Any = None  # analyze.schemas.Built, None until a plan is placed
+    unresolved: SkipValidation[list[str] | None] = None
+    computed: Any = None  # compute.schemas.Computed (set early by plan_write_llm, which computes its own plan)
+    clarify: Any = None  # compute.resolve.NeedsClarify (plan_write_llm's ask-back)
+    query: Any = None  # kosis_ai.schemas.StatQuery
+    source: Any = None  # kosis_ai.schemas.Source
+    refusal: Any = None  # kosis_ai.schemas.Refusal (compute's)
+    alternatives: SkipValidation[list[Any]] = Field(default_factory=list)
+    caveats_out: SkipValidation[list[Any]] = Field(default_factory=list)  # compose.caveats Caveat (node "caveats")
+    shown: SkipValidation[list[str]] = Field(default_factory=list)
+    context_ids: SkipValidation[list[str]] = Field(default_factory=list)
+    compose_attempt: int = 0  # compose_llm <-> verify loop (at most COMPOSE_MAX_ATTEMPTS attempts)
+    compose_problems: SkipValidation[list[str]] = Field(default_factory=list)
+    compose_prompt: str | None = None
+    parts: SkipValidation[list[Any] | None] = None
+    verified: bool = False
+    chart_out: Any = None  # kosis_ai.schemas.Chart (written by the chart branch, node "chart")
+    stat: Any = None  # kosis_ai.schemas.StatAnswer (render / answer_final)
+    fallback: Any = None  # chatbot.Answer of the fallback chatbot
+
+
+__all__ = ["LLMCall", "Record", "StatState", "StepSpan", "append", "called_before", "merge"]
