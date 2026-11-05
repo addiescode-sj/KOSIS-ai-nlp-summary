@@ -22,6 +22,8 @@ from typing import Annotated, Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from kosis_ai.units import SUFFIX_UNIT, unit_or_suffix
+
 QuestionType = Literal["value", "trend", "compare", "share", "extreme"]
 QuestionKind = Literal["answerable", "not_answerable", "clarify", "default_allowed"]
 RefusalReason = Literal[
@@ -60,9 +62,9 @@ CAVEAT_KINDS = get_args(CaveatKind)
 VALUE_KINDS = get_args(ValueKind)
 MAX_DIMS = 8  # dim1..dim8 columns in the Parquet files
 MAX_ROUND = 10  # decimals a derived fact may keep (the golden set uses 0..5)
-# Trailing "(unit)" in an item name or dim label, e.g. "출생건수 (명)", "출생아수(명)".
-# ponytail: short no-space/no-digit token only, so "(출생시 기대여명)" or "(2012~)" are not units; a unit table if this misses too many.
-_UNIT_SUFFIX = re.compile(r"\(([^()\s\d~]{1,5})\)\s*$")
+# Trailing "(unit)" in an item name or dim label (the strict variant, Cell.unit_or_suffix): moved to
+# kosis_ai/units.py in T1-28 S2b with the rule that reads it; the old name is the same object.
+_UNIT_SUFFIX = SUFFIX_UNIT
 _IDENT = re.compile(r"[A-Za-z_]\w*")
 _ORG_ID = re.compile(r"\d{3}")
 # A derivation is arithmetic over fact ids: + - * / and parentheses (what eval/grade.py recomputes), and ** with a
@@ -192,13 +194,9 @@ class Cell(Contract):
         return "|".join([self.tbl_id, self.item_id, *(d.code for d in self.dims), self.period])
 
     def unit_or_suffix(self) -> str | None:
-        """Unit column, else a trailing '(unit)' in the item name, else in a dim label. None when unknown."""
-        if self.unit:
-            return self.unit
-        for text in [self.item_name, *(d.label for d in self.dims)]:
-            if m := _UNIT_SUFFIX.search(text):
-                return m.group(1)
-        return None
+        """Unit column, else a trailing '(unit)' in the item name, else in a dim label. None when unknown.
+        The rule is kosis_ai.units.unit_or_suffix (T1-28 S2b)."""
+        return unit_or_suffix(self.unit, [self.item_name, *(d.label for d in self.dims)])
 
     def to_fact(self, fact_id: str) -> Fact:
         return Fact(
@@ -660,7 +658,9 @@ class Chart(Contract):
         return self
 
 
-_NUMBER = re.compile(r"\d[\d,]*(?:\.\d+)?")
+# A number as the grader reads it (eval/grade.py); public as NUMBER for kosis_chat/shared/patterns.py (T1-28 S2b).
+NUMBER = re.compile(r"\d[\d,]*(?:\.\d+)?")
+_NUMBER = NUMBER
 _PERIOD_AFTER = re.compile(r"\s*(?:년|월|분기|반기)")
 
 

@@ -8,11 +8,14 @@ Modes (eval --scope, cli --scope):
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field, replace
 
 from kosis_chat.data import serializer
 from kosis_chat.data.schema import Cell, TableInput
+# T1-28 S2b: the patterns, LABEL_ALIASES and squash this module shared with judge/question.py moved to
+# kosis_chat/shared/; the old names here are the same objects.
+from kosis_chat.shared.labels import LABEL_ALIASES, squash as _squash
+from kosis_chat.shared.patterns import COHORT, RECENT_N, REGION_SUFFIX, UNIT_PAREN, YEAR, YEAR_RANGE, YEAR_SINCE
 
 MODES = ("oracle", "auto", "full")
 # auto mode drops the oldest periods until the table text fits; DASH-002 answered at 31k characters and failed at 65k.
@@ -20,25 +23,12 @@ AUTO_MAX_CHARS = 30_000
 # "최근 추이" with no number of years.
 RECENT_PERIODS = 5
 
-_YEAR = re.compile(r"(?<!\d)((?:19|20)\d{2})(?!\d)")
-_YEAR_RANGE = re.compile(r"((?:19|20)\d{2})\s*년?\s*(?:~|-|부터)\s*((?:19|20)\d{2})")
-_YEAR_SINCE = re.compile(r"((?:19|20)\d{2})\s*년?\s*이후")
-_RECENT_N = re.compile(r"최근\s*(\d+)\s*년")
-_UNIT_PAREN = re.compile(r"\s*\([^()]*\)\s*$")
-_REGION_SUFFIX = re.compile(r"(특별자치시|특별자치도|특별시|광역시|도)$")
-# Words people use for a label; matched without spaces.
-LABEL_ALIASES = {
-    "여자": ("여성",),
-    "남자": ("남성",),
-    "충청북도": ("충북",),
-    "충청남도": ("충남",),
-    "전라북도": ("전북",),
-    "전북특별자치도": ("전북", "전라북도"),
-    "전라남도": ("전남",),
-    "경상북도": ("경북",),
-    "경상남도": ("경남",),
-    "세종특별자치시": ("세종시",),
-}
+_YEAR = YEAR
+_YEAR_RANGE = YEAR_RANGE
+_YEAR_SINCE = YEAR_SINCE
+_RECENT_N = RECENT_N
+_UNIT_PAREN = UNIT_PAREN
+_REGION_SUFFIX = REGION_SUFFIX
 # Items kept next to a matched item when the question asks for a share (the denominator).
 _SHARE_WORDS = ("비중", "비율", "차지")
 
@@ -131,8 +121,7 @@ def top_level(codes: list[str]) -> list[str]:
 # ---------------------------------------------------------------- auto
 
 
-def _squash(text: str) -> str:
-    return re.sub(r"\s+", "", text or "")
+# _squash: kosis_chat.shared.labels.squash (imported above).
 
 
 def _label_forms(label: str, min_len: int = 2) -> set[str]:
@@ -154,7 +143,7 @@ def question_periods(question: str, periods: list[str]) -> tuple[str, str] | Non
     if not periods:
         return None
     first, last = periods[0][:4], periods[-1][:4]
-    text = re.sub(r"(?:19|20)\d{2}\s*년생", "", question)
+    text = COHORT.sub("", question)
     recent = _RECENT_N.search(text)
     if recent:
         years = sorted({p[:4] for p in periods})

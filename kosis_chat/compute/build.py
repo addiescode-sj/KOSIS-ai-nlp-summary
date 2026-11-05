@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from kosis_chat.answer.render import span_text
+from kosis_chat.shared.periods import span_text  # T1-28 S2b: was answer.render (compute must not import the answer)
 
 from kosis_ai.schemas import AggregateStep, CombineStep, PlanV3, QuestionType, RankStep, SelectStep  # isort: skip
 from kosis_chat.analyze.schemas import Agg, Built, Pattern, TermSteps  # isort: skip  # re-export: moved in T1-28 S1b

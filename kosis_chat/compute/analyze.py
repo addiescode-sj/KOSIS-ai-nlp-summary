@@ -31,6 +31,8 @@ from kosis_chat.judge.question import (
 
 from kosis_ai.schemas import QuestionType, StatQuery  # isort: skip
 from kosis_chat.analyze.schemas import Plan  # isort: skip  # re-export: moved in T1-28 S1b
+from kosis_chat.shared import defaults as default_strings  # isort: skip
+from kosis_chat.shared.patterns import RECENT_N, REGION_SUFFIX  # isort: skip
 
 PERIOD_AXIS = "시점"  # Plan.over when an extreme question ranks periods ("가장 낮았던 해")
 RECENT_POINTS = 5
@@ -46,9 +48,11 @@ COMPARE_WORDS = re.compile(r"비교|차이|몇\s*배|보다|더\s*(?:높|낮|많
 ASKS_PERIOD = re.compile(r"해는|해가|연도|년도|언제|시점은")
 # A year on a monthly table that also holds the year's value is that value, unless the question asks for the months.
 BY_MONTH = re.compile(r"월별|매월|매달|달마다|월간")
-_LATEST = re.compile(r"latest[^(]*\((\d{4,6})")
-_RECENT = re.compile(r"recent (\d+) points \((\d{4,6})~(\d{4,6})\)")
-_PREVIOUS = re.compile(r"latest \((\d{4,6})\) vs previous \((\d{4,6})\)")
+# The judge's default period (default_applied["period"]) read as period codes: kosis_chat/shared/defaults.py since
+# T1-28 S2b (the old names are the same objects).
+_LATEST = default_strings.LATEST_CODES
+_RECENT = default_strings.RECENT_CODES
+_PREVIOUS = default_strings.PREVIOUS_CODES
 # "3인 이하", "5인 이상", "65세 이상": a range over numbered labels of one category.
 _NUM_RANGE = re.compile(r"(\d+)\s*(인|세)\s*(이하|이상|미만|초과)")
 _NUM_LABEL = re.compile(r"^(\d+)\s*(인|세)\s*(이상)?(?:\s*\(.*\))?$")
@@ -153,7 +157,7 @@ def _order_in_question(question: str, index: TableIndex, name: str, named: list[
 
     def at(code: str) -> int:
         label = index.axes[name].labels[code]
-        forms = [squash(label), squash(re.sub(r"\s*\(.*\)\s*$", "", label)), squash(re.sub(r"(특별자치시|특별자치도|특별시|광역시|도)$", "", label))]
+        forms = [squash(label), squash(re.sub(r"\s*\(.*\)\s*$", "", label)), squash(REGION_SUFFIX.sub("", label))]
         found = [q.find(f) for f in forms if f and q.find(f) >= 0]
         return min(found) if found else len(q)
 
@@ -187,14 +191,15 @@ def _periods(p: Periods, index: TableIndex, default: dict[str, str], months: boo
     if p.singles:
         found = [x for s in p.singles for x in _single_periods(index, s, months)]
         return list(dict.fromkeys(found)), [s for s in p.singles if not any(x[:4] == s[:4] for x in index.periods)]
-    period = default.get("period", "")
-    if m := _PREVIOUS.search(period):
-        return [m.group(2), m.group(1)], []
-    if m := _RECENT.search(period):
-        return [x for x in index.periods if m.group(2) <= x <= m.group(3)], []
-    if m := _LATEST.search(period):
-        return [m.group(1)], []
-    return [], []
+    parsed = default_strings.parse_period_codes(default.get(default_strings.PERIOD_KEY, ""))
+    if parsed is None:
+        return [], []
+    kind, groups = parsed
+    if kind == "previous":
+        return [groups[1], groups[0]], []
+    if kind == "recent":
+        return [x for x in index.periods if groups[1] <= x <= groups[2]], []
+    return [groups[0]], []
 
 
 def _period_groups(p: Periods, index: TableIndex, kind: QuestionType, months: bool = False) -> list[list[str]]:
@@ -604,7 +609,7 @@ def _period_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | Non
     groups = plan.groups
     if not groups and plan.pattern == "avg":  # "최근 n년 평균"
         numeric = lookup.numeric_periods(fixed)
-        n = int(m.group(1)) if (m := re.search(r"최근\s*(\d+)\s*년", plan.question)) else RECENT_POINTS
+        n = int(m.group(1)) if (m := RECENT_N.search(plan.question)) else RECENT_POINTS
         groups = [numeric[-n:]]
     cells = []
     for n, group in enumerate(groups):

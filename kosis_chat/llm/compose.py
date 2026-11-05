@@ -19,6 +19,7 @@ from kosis_chat.answer.render import (
     period_text,
 )
 from kosis_chat.compute import Computed
+from kosis_chat.shared.patterns import FACT_ID
 
 from kosis_ai.schemas import Fact, FactPart, TextPart  # isort: skip
 from kosis_chat.compose.schemas import ComposeOutput  # isort: skip  # re-export: moved in T1-28 S1b
@@ -38,7 +39,8 @@ SYSTEM_PROMPT = """당신은 KOSIS 통계표의 계산 결과를 한국어 답�
 출력: 설명 없이 JSON 객체 하나 {"answer": "<{f번호}를 넣은 답변 문장>"}"""
 EXAMPLE = '{"answer": "2023년 서울특별시의 1인 가구는 {f1}입니다."}'
 RETRY = "[이전 답변의 문제]\n{problems}\n위 문제를 고쳐 같은 형식의 JSON 객체 하나만 다시 출력하세요."
-_PLACEHOLDER = re.compile(r"\{\s*(f\d+)\s*\}")
+# '{f3}' in the model's sentence: the shared FACT_ID inside braces (T1-28 S2b; the pattern text is unchanged).
+_PLACEHOLDER = re.compile(rf"\{{\s*({FACT_ID.pattern})\s*\}}")
 
 
 def fact_line(fact: Fact, main: bool, context: bool = False) -> str:

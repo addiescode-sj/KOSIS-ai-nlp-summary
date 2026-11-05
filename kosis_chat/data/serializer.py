@@ -2,22 +2,9 @@
 
 from __future__ import annotations
 
-import re
-
 from kosis_chat.data.schema import TableInput
-
-# "65975.0000" -> "65975", "12.5000" -> "12.5": ZIP-built tables store numbers with four decimals.
-_TRAILING_ZEROS = re.compile(r"^(-?\d[\d,]*)\.(\d*?)0+$")
-
-
-def display_value(value_raw: str) -> str:
-    """The raw value as shown to the model: trailing decimal zeros dropped, symbols (-, X, *) and p/e marks kept."""
-    text = value_raw.strip()
-    match = _TRAILING_ZEROS.match(text)
-    if not match:
-        return text
-    whole, decimals = match.groups()
-    return f"{whole}.{decimals}" if decimals else whole
+# display_value moved to kosis_chat/shared/numbers.py in T1-28 S2b (compute/engine.py reads it too); re-exported here.
+from kosis_chat.shared.numbers import _TRAILING_ZEROS, display_value  # noqa: F401
 
 
 def _escape(text: str) -> str:

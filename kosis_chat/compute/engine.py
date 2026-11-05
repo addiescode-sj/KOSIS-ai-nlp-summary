@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 from kosis_chat.compute.build import Built, Pattern
 from kosis_chat.data.preprocessing import clean_cell
 from kosis_chat.data.schema import Cell, TableInput
-from kosis_chat.data.serializer import display_value
+from kosis_chat.shared.numbers import display_value  # T1-28 S2b: was data.serializer (B0); re-exported there
 from kosis_chat.judge import messages
 from kosis_chat.judge.question import COUNT_KINDS, cell_measure
 

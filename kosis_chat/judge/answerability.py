@@ -37,8 +37,11 @@ from kosis_chat.judge.question import (
 
 from kosis_ai.schemas import Outcome, Refusal  # isort: skip  (question.py puts src/ on the path)
 from kosis_chat.judge.schemas import Resolved, Verdict  # isort: skip  # re-export: moved in T1-28 S1b
+from kosis_chat.shared import defaults as default_strings  # isort: skip  # T1-28 S2b: the default_applied strings
+from kosis_chat.shared.patterns import UNIT_PAREN  # isort: skip
+from kosis_chat.shared.periods import period_text  # isort: skip
 
-_UNIT_SUFFIX = re.compile(r"\s*\([^()]*\)\s*$")
+_UNIT_SUFFIX = UNIT_PAREN  # old name (T1-28 S2b: one trailing '(...)' pattern)
 RECENT_POINTS = 5  # "최근 추이" with no number of years, as in scope.py
 # "가장 많았던 해는?": the period is the answer, not something to assume.
 _ASKS_PERIOD = re.compile(r"(?:해|연도|년도|시점)(?:는|가|은)?\s*(?:언제|어디|\?|$)|언제")
@@ -192,8 +195,7 @@ def _partial_range(p: Parsed, index: TableIndex, **_) -> Verdict | None:
     return refuse("partial_range", "no_period", available=_available(index), asked=asked)
 
 
-def _period_text(period: str) -> str:
-    return f"{period[:4]}년 {int(period[4:])}월" if len(period) == 6 and period.isdigit() else f"{period}년"
+_period_text = period_text  # the same body as answer/render.period_text, now kosis_chat/shared/periods.py (T1-28 S2b)
 
 
 def _range_text(start: str, end: str) -> str:
@@ -338,13 +340,13 @@ def defaults(p: Parsed, index: TableIndex, resolved: Resolved, cells: list[Cell]
         latest = numeric[-1]
         before = [x for x in numeric if x < latest and len(x) == len(latest)]
         if before:
-            out["period"] = f"latest ({latest}) vs previous ({before[-1]})"
+            out[default_strings.PERIOD_KEY] = default_strings.make_previous(latest, before[-1])
             return out
     if (p.periods.recent and TREND_WORDS.search(p.question)) or CHANGE_WORDS.search(p.question):
         points = numeric[-RECENT_POINTS:]
-        out["period"] = f"recent {len(points)} points ({points[0]}~{points[-1]})"
+        out[default_strings.PERIOD_KEY] = default_strings.make_recent(points)
     else:
-        out["period"] = f"latest ({numeric[-1]})"
+        out[default_strings.PERIOD_KEY] = default_strings.make_latest(numeric[-1])
     return out
 
 

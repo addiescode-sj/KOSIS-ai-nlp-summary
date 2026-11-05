@@ -12,10 +12,11 @@ import re
 
 from kosis_chat.answer.render import direction, is_change
 from kosis_chat.compute import Computed
+from kosis_chat.shared.patterns import FACT_ID, NUMBER  # T1-28 S2b: NUMBER was defined here (the same text)
 
 from kosis_ai.schemas import FactPart, TextPart  # isort: skip
 
-NUMBER = re.compile(r"\d[\d,]*(?:\.\d+)?")  # the grader's pattern (eval/grade.py)
+# NUMBER: the grader's pattern (eval/grade.py), kosis_chat.shared.patterns.NUMBER = kosis_ai.schemas.NUMBER.
 _UP = re.compile(r"늘|증가|많아|커졌|높아|상승")
 _DOWN = re.compile(r"줄|감소|적어|작아|낮아|하락")
 
@@ -45,7 +46,7 @@ def _over_time(fact, by_id: dict) -> bool:
     """A difference or growth rate between two periods of one series (a compare can be worded either way round)."""
     if not is_change(fact):
         return False
-    a, b = (by_id.get(i) for i in re.findall(r"f\d+", fact.derivation)[:2])
+    a, b = (by_id.get(i) for i in FACT_ID.findall(fact.derivation)[:2])
     return a is not None and b is not None and a.dims == b.dims and a.period != b.period
 
 

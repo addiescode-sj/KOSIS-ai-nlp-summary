@@ -72,6 +72,29 @@ Pydantic 모델로 바꿔 단계 `schemas.py`로 옮기고 옛 경로는 이름�
 - `api._build(path, settings, client, retry_interval)`·`api._cached`(lru_cache, 경로 키) 서명 그대로. `_build`는 `adapters.parquet.load_table` → `StatPipeline`(생성자 서명 그대로, 안에서 `load_resources`).
 - 모듈 전역 `id(table)` 캐시 5곳(compute/analyze `_LOOKUPS`, compute/engine `_INDEX_CACHE`·`_SERIES_CACHE`, compute/resolve `_CELLS`, compute/semantics `_INDEX`)은 `TableInput.caches`로 옮겼다. 남긴 캐시(값 키, 표와 무관): `prepare.index._measure`, `judge.question._event_pattern`, `shared.events.load_events`, `api._cached`, `kosis_ai.normalize`의 lru_cache.
 
+## 공용 추출 (T1-28 S2b)
+
+둘 이상의 단계가 쓰던 함수·정규식·문구를 `kosis_ai/units.py`와 `kosis_chat/shared/`로 옮겼다. 순수 이동이고 옛 경로는 이름을 적어 재export한다(같은 객체; 옛 밑줄 이름은 별칭). 정규식은 패턴 글자·플래그가 같거나 쓰는 곳에서 같은 문자열에 같게 맞는 것만 한 객체로 합쳤다(D16 (d)). `tests/test_shared_{units,periods,labels,numbers,protocols}.py`, `tests/test_compute_texts.py`.
+
+| 새 위치 | 이름 | 옛 경로(재export) |
+|---|---|---|
+| `kosis_ai.units` | 로더 규칙 `infer_unit(unit, item, dim_labels)`, `unit_in_parens`, `UNKNOWN_UNIT`, `INFER_KNOWN_UNITS`(16), `INFER_UNIT_OVERRIDES`, `PAREN` | `kosis_chat.prepare.convert`·`kosis_chat.data.loader`(`infer_unit _unit_in_parens _PAREN UNKNOWN_UNIT KNOWN_UNITS UNIT_OVERRIDES`) |
+| | normalize 규칙 `resolve_unit(unit, item_name, dim_labels, meta_unit=None)`, `measure_kind`, `known_unit`, `paren_unit`, `override_unit`, `keyword_kind`, `RESOLVE_KNOWN_UNITS`(26), `RESOLVE_UNIT_OVERRIDES`, `NOT_COUNT`, `KIND_KEYWORDS`, `RATIO_UNITS STOCK_UNITS FLOW_UNITS MEASURE_OVERRIDES`, `UNIT_PAREN` | `kosis_ai.normalize`(`resolve_unit measure_kind KNOWN_UNITS UNIT_OVERRIDES MEASURE_OVERRIDES _known _paren_unit _override_unit _keyword_kind _PAREN _NOT_COUNT _KIND_KEYWORDS _RATIO_UNITS _STOCK_UNITS _FLOW_UNITS _UNIT_SUFFIX`) |
+| | 계약 규칙 `unit_or_suffix(unit, texts)`, `SUFFIX_UNIT` | `kosis_ai.schemas.Cell.unit_or_suffix()`(메서드 유지, 본문이 함수 호출), `kosis_ai.schemas._UNIT_SUFFIX` |
+| `kosis_ai.normalize` | `meta_unit` = `_meta_unit`(같은 lru_cache 함수, 공개 별칭) | — |
+| `kosis_ai.schemas` | `NUMBER`(= `_NUMBER`) | — |
+| `kosis_chat.shared.patterns` | `UNIT_PAREN PAREN REGION_SUFFIX YEAR YEAR_RANGE YEAR_SINCE RECENT_N COHORT NUMBER FACT_ID ORG_ID` | `judge.question`(`_UNIT_PAREN _REGION_SUFFIX _YEAR _RANGE _SINCE _RECENT_N _COHORT`), `data.scope`(`_YEAR _YEAR_RANGE _YEAR_SINCE _RECENT_N _UNIT_PAREN _REGION_SUFFIX`), `judge.answerability._UNIT_SUFFIX`, `answer.render._UNIT_SUFFIX`, `compute.roles._PROVINCE`, `answer.verify.NUMBER`, `answer.template._DERIVED_IDS` |
+| `kosis_chat.shared.periods` | `period_text`, `span_text` | `answer.render`, `judge.answerability._period_text` |
+| `kosis_chat.shared.labels` | `squash`, `LABEL_ALIASES`, `item_label`, `fact_label` | `judge.question.squash`·`LABEL_ALIASES`, `data.scope._squash`·`LABEL_ALIASES`, `answer.render` |
+| `kosis_chat.shared.numbers` | `SYMBOL_MEANING format_number format_fact is_change direction derived_kind display_value` | `answer.render`, `data.serializer.display_value` |
+| `kosis_chat.shared.texts` | `josa`, `with_josa` | `judge.messages`, `answer.render.josa` |
+| `kosis_chat.shared.defaults` | `make_latest make_previous make_recent parse_period parse_period_codes PERIOD_KEY DEFAULT_KEYS LATEST RECENT PREVIOUS LATEST_CODES RECENT_CODES PREVIOUS_CODES` | `judge.messages._LATEST _RECENT _PREVIOUS _DEFAULT_KEYS`, `compute.analyze._LATEST _RECENT _PREVIOUS` |
+| `kosis_chat.shared.cautions` | `make_caution event_source default_applied DEFAULT_LATEST missing_years recent_short simple_average parse_event_source parse_caution parse_default_applied parse_missing_years EVENT_MODEL PREFIX` | `answer.caveats._EVENT_MODEL _PREFIX` |
+| `kosis_chat.compute.texts` | 계산 거절·되묻기 문장 10개(`event_unknown path_ambiguous pick_category span_not_supported span_on_yearly other_table star_outside_map pp_diff_units share_outside_total share_out_of_bounds`) | — (resolve.py·semantics.py의 f-string 자리) |
+
+- 층 위반 제거: `compute.build`·`compute.plan_engine` → `shared.periods.span_text`(옛 `answer.render`), `judge.question` → `shared.labels.LABEL_ALIASES`(옛 `data.scope`), `compute.engine` → `shared.numbers.display_value`(옛 `data.serializer`), `contract` → `chatbot.Answer`는 주석용 `TYPE_CHECKING` import만(실행 시 import 없음; `contract.Answer` 속성은 없어짐, 호출처 0건 grep 11/05).
+- `prepare.index`는 `kosis_ai.normalize` 대신 `kosis_ai.units`를 import한다(`_measure`의 규칙 함수는 같은 객체).
+
 ## 반환 객체에서 읽는 속성
 
 - `StatPipeline`: `ask(question, golden_scope=None)`, `client` (setter: `eval/run_eval.py:229`), `org_id table prompt_version system_prompt answer_model decision_metadata settings retry_interval`. T1-28 S2부터 `resources`(StatResources)와 `index`(= `resources.index`)도 있음.

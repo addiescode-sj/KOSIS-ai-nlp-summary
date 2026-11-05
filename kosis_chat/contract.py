@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlsplit
 
 from kosis_chat.config import PROJECT_ROOT
@@ -20,8 +21,15 @@ except ImportError:  # `python -m eval.run_eval` has no src/ on the path until T
     sys.path.insert(0, str(PROJECT_ROOT / "src"))
     from kosis_ai.schemas import Refusal, Source, StatAnswer, StatQuery, TextPart
 
-from kosis_chat.chatbot import Answer
 from kosis_chat.data.schema import TableMeta
+from kosis_chat.shared.patterns import ORG_ID
+
+if TYPE_CHECKING:  # T1-28 S2b: only the annotation of to_stat_answer; contract no longer imports chatbot at run time
+    from kosis_chat.chatbot import Answer
+
+# The Parquet file name '101_DT_1B8000F.parquet': the shared ORG_ID, then the table id (T1-28 S2b; same pattern text).
+_ORG_FILE = re.compile(rf"({ORG_ID.pattern})_(.+)\.parquet")
+
 
 def _kosis_host(host: str | None) -> bool:
     host = (host or "").lower()
@@ -30,7 +38,7 @@ def _kosis_host(host: str | None) -> bool:
 
 def org_id_from_table_path(path: str | Path, tbl_id: str | None = None) -> str | None:
     """Read an explicit agency identifier from the documented Parquet filename convention."""
-    match = re.fullmatch(r"([0-9]{3})_(.+)\.parquet", Path(path).name)
+    match = _ORG_FILE.fullmatch(Path(path).name)
     if match is None:
         return None
     if tbl_id is not None and match.group(2) != tbl_id:
@@ -40,7 +48,7 @@ def org_id_from_table_path(path: str | Path, tbl_id: str | None = None) -> str |
 
 def to_source(meta: TableMeta, org_id: str | None = None) -> Source:
     """Resolve agency identity from a KOSIS URL or an explicit trusted table identifier."""
-    if org_id is not None and (not isinstance(org_id, str) or re.fullmatch(r"[0-9]{3}", org_id) is None):
+    if org_id is not None and (not isinstance(org_id, str) or ORG_ID.fullmatch(org_id) is None):
         raise ValueError("org_id must be a three-digit identifier")
     url = meta.source_url or ""
     url_org = None
@@ -59,7 +67,7 @@ def to_source(meta: TableMeta, org_id: str | None = None) -> Source:
         trusted_url = _kosis_host(parsed.hostname)
         if "orgId" in query:
             values = query["orgId"]
-            if len(values) != 1 or re.fullmatch(r"[0-9]{3}", values[0]) is None:
+            if len(values) != 1 or ORG_ID.fullmatch(values[0]) is None:
                 raise ValueError("source URL needs one numeric orgId")
             url_org = values[0]
         if "tblId" in query and (len(query["tblId"]) != 1 or query["tblId"][0] != meta.tbl_id):

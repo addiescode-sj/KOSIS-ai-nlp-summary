@@ -5,8 +5,6 @@ Each template cites the facts the calculation marked as main, so a template answ
 
 from __future__ import annotations
 
-import re
-
 from kosis_chat.answer.render import (
     derived_kind,
     direction,
@@ -18,6 +16,7 @@ from kosis_chat.answer.render import (
     span_text,
 )
 from kosis_chat.compute import Computed
+from kosis_chat.shared.patterns import FACT_ID
 
 from kosis_ai.schemas import Fact, FactPart, QuestionType, TextPart  # isort: skip
 
@@ -227,7 +226,7 @@ def _grw(facts: list[Fact], computed: Computed) -> list:
     return parts + [_t(f"{_side(winner, loser)}의 {what} "), _f(d), _t(" 더 높습니다.")]
 
 
-_DERIVED_IDS = re.compile(r"f\d+")
+_DERIVED_IDS = FACT_ID  # T1-28 S2b: the shared fact id pattern (the same text)
 
 
 def _listed(facts: list[Fact], computed: Computed) -> list:

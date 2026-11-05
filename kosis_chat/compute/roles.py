@@ -5,11 +5,14 @@ from __future__ import annotations
 import re
 
 from kosis_chat.judge.question import label_forms, squash
+from kosis_chat.shared.patterns import REGION_SUFFIX
 
 # "전국보다", "전국 대비", "전국 평균의 몇 배", "전국에 비해": the label before these is the reference.
 _REFERENCE_AFTER = re.compile(r"^(?:평균)?(?:보다|대비|에비해|의몇배|의)")
 _MIN_WORDS = re.compile(r"낮|적은|적었|최저|최소|작은|작았|꼴찌")
-_PROVINCE = re.compile(r"(?:특별시|광역시|특별자치시|특별자치도|도)$")
+# T1-28 S2b: was r"(?:특별시|광역시|특별자치시|특별자치도|도)$", the same literal suffixes anchored at the end in another
+# order and without the group; is_province only asks whether one matches, which neither changes.
+_PROVINCE = REGION_SUFFIX
 
 
 def reference_index(question: str, labels: list[str]) -> int | None:

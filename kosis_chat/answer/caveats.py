@@ -7,17 +7,17 @@ alternatives shown beside the answer (compute/context.py). A caveat's text names
 
 from __future__ import annotations
 
-import re
-
 from kosis_chat.answer.render import SYMBOL_MEANING, fact_label, period_text
 from kosis_chat.compute import Computed
 from kosis_chat.compute.context import Alternatives
 from kosis_chat.data.schema import TableInput
+from kosis_chat.shared import cautions
 
 from kosis_ai.schemas import Caveat  # isort: skip
 
-_EVENT_MODEL = re.compile(r"event_source: model \((?P<name>.+) = (?P<start>\d{4})(?:-(?P<month>\d{2}))?\)")
-_PREFIX = re.compile(r"^(\w+): (.*)$")
+# The caution strings are parsed in kosis_chat/shared/cautions.py (T1-28 S2b); the old names are the same objects.
+_EVENT_MODEL = cautions.EVENT_MODEL
+_PREFIX = cautions.PREFIX
 
 
 def _when(year: str, month: str | None) -> str:
@@ -25,20 +25,20 @@ def _when(year: str, month: str | None) -> str:
 
 
 def _from_caution(text: str) -> Caveat | None:
-    if m := _EVENT_MODEL.fullmatch(text):
+    if m := cautions.parse_event_source(text):
         when = _when(m.group("start"), m.group("month"))
         return Caveat(kind="event_source", text=f"'{m.group('name')}'의 시작 시점({when})은 사건 달력에 없어 모델이 알려 준 값입니다.")
-    m = _PREFIX.match(text)
-    if not m:
+    parsed = cautions.parse_caution(text)
+    if not parsed:
         return None
-    kind, detail = m.groups()
+    kind, detail = parsed
     if kind == "missing_years":
-        years = ", ".join(period_text(y.strip()) for y in detail.split(","))
+        years = ", ".join(period_text(y) for y in cautions.parse_missing_years(detail))
         return Caveat(kind="missing_years", text=f"{years}은(는) 표에 없습니다.")
     if kind == "recent":
         return Caveat(kind="missing_years", text="요청한 최근 시점 가운데 일부만 숫자가 있습니다.")
     if kind == "default_applied":
-        axis, _, label = detail.partition(" = ")
+        axis, label = cautions.parse_default_applied(detail)
         return Caveat(kind="default_applied", text=f"질문에 없는 {axis}은(는) '{label}' 기준입니다.")
     if kind == "simple_average":
         return Caveat(kind="simple_average", text=detail)

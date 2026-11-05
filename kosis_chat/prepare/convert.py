@@ -2,26 +2,37 @@
 
 The body of kosis_chat/data/loader.py moved here in T1-28 S2: this module never opens a file. The file side
 (reading the Parquet, tables.csv, the file date and hash) is kosis_chat/adapters/parquet.py; data/loader.py
-re-exports every name. infer_unit stays with the conversion until T1-28 S2b moves the unit rules to kosis_ai/units.py.
+re-exports every name. The unit rule (infer_unit and its constants) moved to kosis_ai/units.py in T1-28 S2b; the
+names below are the same objects, so data/loader.py and the callers here are unchanged.
 """
 
 from __future__ import annotations
 
-import re
 from collections.abc import Iterable, Mapping
+from pathlib import Path
 from typing import Any
 
 from kosis_chat.prepare.schemas import Cell, Problem, SchemaError, TableInput, TableMeta, validate_meta_dict
+
+try:
+    from kosis_ai import units
+except ImportError:  # same fallback as prepare/index.py: src/ is not on the path for `python -m ...` (S6 removes it)
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+    from kosis_ai import units
 
 # Parquet has up to eight category levels: dim1_* .. dim8_*.
 DIM_LEVELS = range(1, 9)
 
 # Unit fallback when KOSIS gives no unit (e.g. DT_1B8000F/H put it in names: "출생건수 (명)", "조사망률(천명당)").
-UNKNOWN_UNIT = "단위 미상"
-KNOWN_UNITS = {"명", "건", "가구", "호", "개", "세", "년", "%", "천명", "원", "천원", "백만원", "명/㎢", "㎢", "배", "쌍"}
-_PAREN = re.compile(r"\(([^()]*)\)")
+UNKNOWN_UNIT = units.UNKNOWN_UNIT
+KNOWN_UNITS = units.INFER_KNOWN_UNITS  # 16 units, the loader's set (D-u (b)); kosis_ai.normalize.KNOWN_UNITS has 26
+_PAREN = units.PAREN
 # Names whose parentheses are not a unit, or that have none; checked when no unit is found in parentheses.
-UNIT_OVERRIDES = (("합계출산율", "명"), ("기대수명", "년"))
+UNIT_OVERRIDES = units.INFER_UNIT_OVERRIDES
+_unit_in_parens = units.unit_in_parens
+infer_unit = units.infer_unit
 
 # KOSIS period codes in the Parquet prd_se column -> TableMeta.period_type.
 PRD_SE = {"Y": "Y", "A": "Y", "M": "M", "Q": "Q", "H": "H"}
@@ -29,32 +40,6 @@ PRD_SE = {"Y": "Y", "A": "Y", "M": "M", "Q": "Q", "H": "H"}
 PARQUET_COLUMNS = ["tbl_id", "prd_se", "period", "item_id", "item_name", "unit", "value_raw", "value", "value_kind"] + [
     f"dim{i}_{part}" for i in range(1, 9) for part in ("name", "code", "label")
 ]
-
-
-def _unit_in_parens(name: str) -> str | None:
-    for text in reversed(_PAREN.findall(name or "")):
-        text = text.strip()
-        if text in KNOWN_UNITS or text.endswith("당"):  # "천명당", "출생아 천명당"
-            return text
-    return None
-
-
-def infer_unit(unit: str | None, item: str, dim_labels: list[str]) -> tuple[str, str]:
-    """Return (unit, unit_source): the given unit, else a unit in the item / category names, else UNKNOWN_UNIT."""
-    if unit and str(unit).strip():
-        return str(unit).strip(), "given"
-    found = _unit_in_parens(item)
-    if found:
-        return found, "item_name"
-    for label in dim_labels:
-        found = _unit_in_parens(label)
-        if found:
-            return found, "dim_label"
-    for name in (item, *dim_labels):
-        for keyword, override in UNIT_OVERRIDES:
-            if keyword in (name or ""):
-                return override, "override"
-    return UNKNOWN_UNIT, "unknown"
 
 
 def rows_of(frame: Any) -> list[dict]:

@@ -9,7 +9,6 @@ import re
 from functools import lru_cache
 
 from kosis_chat.config import PROJECT_ROOT
-from kosis_chat.data.scope import LABEL_ALIASES
 from kosis_chat.prepare.schemas import Cell, TableInput  # noqa: F401  (Cell, TableInput: re-export, moved in T1-28 S2)
 from kosis_chat.shared.events import load_events
 
@@ -39,17 +38,21 @@ from kosis_chat.prepare.index import (  # noqa: E402, F401
     index_of,
     is_total,
 )
+# T1-28 S2b: label helpers and the patterns two stages share moved to kosis_chat/shared/ (old names are aliases).
+# LABEL_ALIASES was read from data/scope.py (the judge importing the B0 scope module).
+from kosis_chat.shared.labels import LABEL_ALIASES, squash  # noqa: E402
+from kosis_chat.shared.patterns import COHORT, PAREN, RECENT_N, REGION_SUFFIX, YEAR, YEAR_RANGE, YEAR_SINCE  # noqa: E402
 
 COUNT_KINDS = ("count_stock", "count_flow")
 
-_COHORT = re.compile(r"(?:19|20)\d{2}\s*년생")
-_YEAR = re.compile(r"(?<!\d)((?:19|20)\d{2})(?!\d)")
+_COHORT = COHORT
+_YEAR = YEAR
 _MONTH = re.compile(r"(?<!\d)((?:19|20)\d{2})\s*년\s*(\d{1,2})\s*월")
 # A month without its year takes the year named before it: "2025년 1월 대비 12월", "2025년 전국 혼인 중 12월".
 _BARE_MONTH = re.compile(r"(?<![\d~\-])(?<![~\-]\s)(\d{1,2})\s*월(?!\s*\d)")  # not the end of a month range "1~6월"
-_RANGE = re.compile(r"((?:19|20)\d{2})\s*년?\s*(?:~|-|부터)\s*((?:19|20)\d{2})")
-_SINCE = re.compile(r"((?:19|20)\d{2})\s*년?\s*이후")
-_RECENT_N = re.compile(r"최근\s*(\d+)\s*년")
+_RANGE = YEAR_RANGE
+_SINCE = YEAR_SINCE
+_RECENT_N = RECENT_N
 _RECENT = re.compile(r"최근|요즘|근래")
 # Period expressions (v2, T1-25): a decade, a part of it with a length, a half or a quarter of a year (month
 # ranges on a monthly table), last year against this year, and N years before a named year.
@@ -78,7 +81,7 @@ VALUE_ASKS = re.compile(r"추이|몇|얼마|보여")
 VAGUE_WORDS = re.compile(r"통계|현황|자료|정보|수치")
 OUT_OF_DOMAIN = re.compile(r"기업|기술개발|매출|수출|수입액|GDP|물가|주가|부동산|금리|환율")
 
-_REGION_SUFFIX = re.compile(r"(특별자치시|특별자치도|특별시|광역시|도)$")
+_REGION_SUFFIX = REGION_SUFFIX
 # A count label 'X건수' is also asked by the counted person: '출생건수' as '출생아 수' / '출생아', '사망건수' as '사망자 수'
 # (KOSIS itself names the same count 출생아수 / 사망자수 in other tables; no table holds both forms, checked over the
 # 2,364 tables of data/table_metadata on 10/28).
@@ -88,8 +91,7 @@ _TOKEN = re.compile(r"[0-9A-Za-z가-힣~\-]+")
 _PARTICLE = re.compile(r"(?<=[가-힣]{2})(?:은|는|이|가|을|를|의|에|도|만|와|과)$")
 
 
-def squash(text: str) -> str:
-    return re.sub(r"\s+", "", text or "")
+# squash: kosis_chat/shared/labels.py (imported above).
 
 
 # ---------------------------------------------------------------- periods
@@ -221,7 +223,7 @@ def label_forms(label: str, regional_total: bool = False) -> tuple[set[str], set
         exact.update(stem + form for form in _COUNTED_FORMS)
     if regional_total and core in TOTAL_LABELS:
         exact.add("전국")
-    bare = re.sub(r"\([^()]*\)", " ", core)
+    bare = PAREN.sub(" ", core)
     head = squash(bare.split(" - ")[0])
     # '기대수명(출생시 기대여명)' is also asked as '기대수명'; not '인구(명): 0-14세', where '인구' is only a prefix.
     partial = {head} - exact if head and "(" in core and ":" not in core else set()

@@ -16,16 +16,18 @@ from pathlib import Path
 from kosis_chat.prepare.schemas import Cell, TableInput
 
 try:
-    from kosis_ai import normalize
+    from kosis_ai import units
 except ImportError:  # same fallback as judge/question.py: src/ is not on the path for `python -m ...` (S6 removes it)
     import sys
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
-    from kosis_ai import normalize
+    from kosis_ai import units
+
+from kosis_chat.shared.patterns import UNIT_PAREN  # noqa: E402  (after the block above: it imports kosis_ai)
 
 ITEM_AXIS = "항목"  # the item column, next to the category names
 
-_UNIT_PAREN = re.compile(r"\s*\(([^()]*)\)\s*$")
+_UNIT_PAREN = UNIT_PAREN  # old name (T1-28 S2b: one trailing '(...)' pattern, kosis_ai.units.UNIT_PAREN)
 _REGION_AXIS = re.compile(r"행정구역|시도|시군구|지역")
 # Categories that are alternative scenarios (장래추계 고위/중위/저위), not parts of a whole.
 SCENARIO_AXIS = re.compile(r"가정|시나리오|추계")
@@ -79,9 +81,9 @@ def _link_parents(axis: Axis) -> None:
 # shared by tables that repeat the same item / labels; moving it into LookupCaches would only lose that sharing.
 @lru_cache(maxsize=4096)
 def _measure(tbl_id: str, unit: str | None, item: str, dim_labels: tuple[str, ...]) -> tuple[str | None, str | None]:
-    """(unit, measure_kind) by the T1-05 rules (src/kosis_ai/normalize.py)."""
-    resolved, _ = normalize.resolve_unit(unit, item, list(dim_labels))
-    return resolved, normalize.measure_kind(tbl_id, resolved, item, list(dim_labels))
+    """(unit, measure_kind) by the T1-05 rules (src/kosis_ai/units.py, re-exported by kosis_ai.normalize)."""
+    resolved, _ = units.resolve_unit(unit, item, list(dim_labels))
+    return resolved, units.measure_kind(tbl_id, resolved, item, list(dim_labels))
 
 
 def cell_measure(table: TableInput, cell: Cell) -> tuple[str | None, str | None]:
