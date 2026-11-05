@@ -1,4 +1,7 @@
-"""Terminal entry point: load one table, then answer questions until the user quits."""
+"""Terminal entry point: load one table, then answer questions until the user quits.
+
+--backend hcx needs HCX_API_KEY in the shell environment (.env is not read since T1-28 S2c).
+"""
 
 from __future__ import annotations
 
@@ -6,12 +9,13 @@ import argparse
 import sys
 
 from kosis_chat.chatbot import Chatbot
-from kosis_chat.config import load_env, load_settings, resolve_path
+from kosis_chat.config import load_settings, resolve_path
 from kosis_chat.contract import org_id_from_table_path, to_stat_answer
 from kosis_chat.data.loader import load_table
 from kosis_chat.data.schema import SchemaError
 from kosis_chat.llm import prompts
 from kosis_chat.llm.model import BACKENDS
+from kosis_chat.llm.providers import LLMKeyMissing
 
 QUIT_WORDS = {"q", "quit", "exit", "종료"}
 
@@ -19,7 +23,7 @@ QUIT_WORDS = {"q", "quit", "exit", "종료"}
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m kosis_chat.cli", description="Ask questions about one KOSIS table.")
     parser.add_argument("--table", required=True, help="table file: data/values/<org>_<tbl>.parquet (meta from data/tables.csv)")
-    parser.add_argument("--config", default=None, help="config file (default: configs/model.yaml)")
+    parser.add_argument("--config", default=None, help="YAML settings file in the old layout (deprecated; default: built-in settings)")
     parser.add_argument("--backend", choices=BACKENDS, default=None, help="override the configured backend")
     parser.add_argument("--answer-format", choices=["text", "json"], default="text")
     parser.add_argument("--prompt-version", choices=sorted(prompts.SYSTEM_PROMPTS), default=None)
@@ -29,7 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--max-tokens", type=int, default=None, help="override max output tokens (raise it when thinking is on)")
     parser.add_argument("--form", default=None, help="text file with answer-format instructions appended to each question")
-    parser.add_argument("--serialization", choices=["long", "wide"], default=None, help="table text style (default: model.yaml)")
+    parser.add_argument("--serialization", choices=["long", "wide"], default=None, help="table text style (default: long)")
     parser.add_argument(
         "--scope", choices=["auto", "full"], default="auto", help="table part per question: auto (from the question) or full"
     )
@@ -47,7 +51,6 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         print(f"설정 오류: {exc}", file=sys.stderr)
         return 2
-    load_env()
     settings = load_settings(
         args.config,
         backend=args.backend,
@@ -73,7 +76,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         bot = Chatbot(table, settings=settings, form=form, scope_mode=args.scope, answer_format=args.answer_format)
-    except ValueError as exc:  # backend misconfigured, e.g. HCX_API_KEY missing
+    except ValueError as exc:  # backend misconfigured, e.g. an unknown scope
         print(f"설정 오류: {exc}", file=sys.stderr)
         return 2
     print(f"[{table.meta.tbl_nm}] backend={settings.backend} model={settings.model_name} prompt={bot.prompt_version}")
@@ -94,7 +97,11 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             if not question:
                 continue
-        answer = bot.ask(question)
+        try:
+            answer = bot.ask(question)
+        except LLMKeyMissing as exc:  # the client is built when a question first needs the model
+            print(f"설정 오류: {exc}", file=sys.stderr)
+            return 2
         print(f"[범위 {answer.scope.get('cells', 0):,}칸, {answer.scope.get('table_chars', 0):,}자]")
         if answer.ok:
             try:

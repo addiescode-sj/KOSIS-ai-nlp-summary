@@ -22,8 +22,8 @@ from kosis_chat.llm.model import (
     STATUS_OK,
     STATUS_TIMEOUT,
     LLMClient, TraceWriteError,
-    build_client,
 )
+from kosis_chat.llm.providers import build_client
 
 
 @dataclass(frozen=True)
@@ -104,7 +104,7 @@ class Chatbot:
             raise ValueError("retry_interval cannot be negative")
         self.answer_format = answer_format
         self.retry_interval = retry_interval
-        self.client = client or build_client(self.settings)
+        self._client = client  # built on first use (T1-28 S2c): a rule verdict needs no key
         self.system_prompt = prompts.get_system_prompt(self.prompt_version)
         self.answer_model = answer_model(self.prompt_version)
         self.decision_metadata = ({
@@ -118,6 +118,16 @@ class Chatbot:
         # rules: kosis_chat/judge looks at the question and the whole table first (T1-08).
         self.judge_mode = judge_mode
         self.judge_index = build_index(self.table) if judge_mode == "rules" else None
+
+    @property
+    def client(self) -> LLMClient:
+        if self._client is None:
+            self._client = build_client(self.settings)
+        return self._client
+
+    @client.setter
+    def client(self, value: LLMClient) -> None:  # run_eval swaps in its recording client
+        self._client = value
 
     def prepare(self, question: str, golden_scope: dict | None = None) -> tuple[str, dict[str, Any]]:
         """Table text for one question and a record of the part chosen."""
@@ -169,8 +179,9 @@ class Chatbot:
                 retry_wait_seconds=result.retry_wait_seconds,
                 decision_metadata={**self.decision_metadata, **({"absent_fields_normalized": normalized} if normalized else {})},
             )
+        client = self.client  # a missing key is a configuration error, not this answer's API error
         try:
-            result = self.client.generate(self.system_prompt, user_prompt)
+            result = client.generate(self.system_prompt, user_prompt)
         except TimeoutError as exc:
             latency = time.perf_counter() - started
             return self._answer("", STATUS_TIMEOUT, str(exc) or "timeout", tokens, latency, 1, scope=record)

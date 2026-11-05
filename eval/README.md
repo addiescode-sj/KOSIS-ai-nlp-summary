@@ -8,8 +8,8 @@
 
 | 항목 | 위치 | 비고 |
 | --- | --- | --- |
-| HCX 키 | `.env`의 `HCX_API_KEY=nv-...` | 커밋 금지 |
-| 모델 설정 | `configs/model.yaml`의 `model` 블록 | 기본 `HCX-DASH-002`, temperature 0, max_tokens 1024 |
+| HCX 키 | 셸 환경변수 `HCX_API_KEY` (`set HCX_API_KEY=nv-...`) | 커밋 금지. `.env`는 읽지 않는다(T1-28 S2c). 없으면 `--backend hcx`가 시작 시 멈춘다. mock은 키 불필요 |
+| 모델 설정 | `LLMConfig` 기본값 (`kosis_chat/schemas/resources.py`) + `--model --thinking --max-tokens` | 기본 `HCX-DASH-002`, temperature 0, max_tokens 1024. `--config`는 무시(경고) |
 | 골든셋 | `eval/golden/stat_golden.jsonl` (40문항) | gitignore, 팀 공유본에서 받는다 |
 | 표 파일 | `data/values/<기관>_<표>.parquet` + `data/tables.csv` | gitignore. 골든셋의 `table` 경로와 sha256이 맞아야 실행된다 |
 | 답변 형식 지시 | 예: `eval/golden/form.txt` | 자주 바뀌므로 인자로 넘긴다 |
@@ -43,13 +43,13 @@
     분류 이름이 없으면 최상위 수준(전국+시도)만 넣는다. 그래도 3만 자가 넘으면 오래된 시점부터 뺀다. 실제 서비스·RAG와 비교하는 기준.
   - `full`: 표 전체. 작은 표에서만 쓴다.
   - 문항마다 실제로 보낸 범위(`scope`: 모드, 범위, 칸 수, 글자 수)가 `results.jsonl`에 남는다.
-- `[통계표]` 직렬화는 `--serialization`(또는 `model.yaml`의 `serialization`)으로 고른다.
+- `[통계표]` 직렬화는 `--serialization`(기본 `long`)으로 고른다.
   - `long`(기본): 값 하나가 한 행 (`| 항목 | 분류… | 시점 | 값 | 단위 |`)
   - `wide`: (항목, 분류) 한 행에 시점을 열로 펼침. 단위가 하나면 표 위에 한 번만 쓰고, 시점이 20개를 넘으면 20개씩 나눠 쓴다. 글자 수가 약 17~30%로 준다.
 - 단위가 없는 표(KOSIS가 `UNIT_NM`을 안 준 DT_1B8000F/H 등)는 항목명·분류명 괄호에서 단위를 찾고, 없으면 `단위 미상`으로 넣는다(`kosis_chat/data/loader.py` `infer_unit`).
 - `--form` 파일은 UTF-8로 읽고 앞뒤 공백은 지운다. 파일 내용은 그대로 붙으므로 제목이나 접두어가 필요하면 파일 안에 쓴다.
 - 시스템 프롬프트와 form 지시가 서로 다르면(예: 출처를 쓰라 / 생략하라) 모델이 둘 다 받는다.
-  form으로 정한 형식을 계속 쓸 거라면 `prompts.py`에 새 버전을 추가하고 `model.yaml`의 `prompt_version`을 바꾼다.
+  form으로 정한 형식을 계속 쓸 거라면 `prompts.py`에 새 버전을 추가하고 `--prompt-version`으로 고른다.
 
 ## 3. 실행
 
@@ -64,7 +64,7 @@ python -m eval.run_eval --stage <이름> --golden eval/golden/stat_golden.jsonl 
 | `--interval N` | 문항 사이 N초 대기(기본 1초). HTTP 429(호출 한도)가 남으면 5초, 그래도 남으면 15초 |
 | `--form PATH` | 답변 형식 지시 파일. 빼면 form 없이 실행 |
 | `--scope oracle\|auto\|full` | 문항마다 넣을 표 범위(기본 `oracle`). 2장 참고 |
-| `--serialization long\|wide` | 표 직렬화 방식. 빼면 `model.yaml` 값 |
+| `--serialization long\|wide` | 표 직렬화 방식. 빼면 `long` |
 | `--model` | 모델 바꾸기. 예: `HCX-007` |
 | `--thinking`, `--max-tokens` | HCX-007 thinking 설정. 켜면 max-tokens를 5120 정도로 늘린다 |
 | `--backend mock` | 키 없이 흐름만 확인 (사전 테스트, 점수 기록 안 됨) |

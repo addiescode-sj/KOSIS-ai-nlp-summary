@@ -111,7 +111,7 @@ def test_same_content_same_hash_and_column_order_does_not_matter(pop_path, frame
     again = ParquetTable(frame=pq.read_table(pop_path), info=_info())
     reordered = ParquetTable(frame=frame.select(list(reversed(frame.column_names))), info=_info())
     assert content_hash(first) == content_hash(again) == content_hash(reordered)
-    assert content_hash(first) is content_hash(first)  # computed once per object
+    assert first._frame_hash is not None  # the frame part is kept for a pyarrow Table (immutable)
 
 
 def test_one_row_differs(tmp_path, frame):
@@ -131,7 +131,51 @@ def test_a_column_name_differs(frame):
 
 def test_info_or_coverage_differs(frame):
     base = content_hash(ParquetTable(frame=frame, info=_info()))
-    assert content_hash(ParquetTable(frame=frame, info=_info(tbl_id="FAKE_TBL_009"))) != base
+    assert content_hash(ParquetTable(frame=frame, info=_info(survey_name="다른 조사"))) != base
     assert content_hash(ParquetTable(frame=frame, info=_info(table_name="다른 표"))) != base
     assert content_hash(ParquetTable(frame=frame)) != base
     assert content_hash(ParquetTable(frame=frame, info=_info(), coverage="partial")) != base
+
+
+# --- review 11/05 (T1-28 S0~S2 구현 검토): the rows and the meta name the same table; the key covers the meta used ---
+
+
+def test_info_of_another_table_is_refused(frame):
+    with pytest.raises(ValidationError, match="info.tbl_id"):
+        ParquetTable(frame=frame, info=_info(key="101_FAKE_TBL_009", tbl_id="FAKE_TBL_009"))
+
+
+@pytest.mark.parametrize("blank", [None, "", "  "])
+def test_rows_without_tbl_id_are_refused(frame, blank):
+    ids = frame.column("tbl_id").to_pylist()
+    ids[1] = blank
+    holed = frame.set_column(frame.column_names.index("tbl_id"), "tbl_id", pa.array(ids, type=pa.string()))
+    with pytest.raises(ValidationError, match="no tbl_id"):
+        ParquetTable(frame=holed, info=_info())
+
+
+def test_rows_without_tbl_id_are_refused_in_a_dataframe(frame):
+    df = frame.to_pandas()
+    df.loc[1, "tbl_id"] = float("nan")
+    with pytest.raises(ValidationError, match="no tbl_id"):
+        ParquetTable(frame=df)
+
+
+def test_the_catalog_row_applied_is_part_of_the_key(pop_path, frame):
+    table = ParquetTable(frame=frame)
+    row = catalog_row(pop_path)
+    one = {"101_FAKE_TBL_001": row}
+    other = {"101_FAKE_TBL_001": {**row, "table_name": "다른 이름"}}
+    assert content_hash(table, one) != content_hash(table, other)
+    assert table_input(table, one).meta.file_sha256 == content_hash(table, one)
+    assert table_input(table, other).meta.file_sha256 == content_hash(table, other)
+    assert content_hash(ParquetTable(frame=frame, info=_info())) == table_input(ParquetTable(frame=frame, info=_info())).meta.file_sha256
+
+
+def test_a_dataframe_changed_after_wrapping_gets_a_new_key(frame):
+    df = frame.to_pandas()
+    table = ParquetTable(frame=df, info=_info())
+    before = content_hash(table)
+    df.loc[0, "value_raw"] = "999"
+    assert content_hash(table) != before
+    assert table._frame_hash is None  # never kept for a DataFrame

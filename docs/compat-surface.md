@@ -15,10 +15,10 @@
 | | `table_path(table_id)` | `evals/trace.py:61`, `scripts/stat_baseline.py` |
 | | `_build(path, settings, client, retry_interval)` → `.ask(question)`, `.org_id`, `Answer.decision_metadata["spans"]` | `evals/trace.py:61` (S5에서 `summarize_stat_run`으로 대체) |
 | | `_cached` (lru_cache, `cache_clear`) | `tests/test_stat_baseline.py:53` |
-| `kosis_chat.config` | `Settings`(`backend serialization model_name temperature max_tokens timeout_seconds api_key_env …`, `model_params()`), `load_settings(path, **overrides)`, `load_env`, `get_secret`, `resolve_path` | `src/kosis_rag/{chain,clova,hcx}.py`, `evals/ops.py:64`, `scripts/stat_baseline.py`, `tests/test_stat_baseline.py`, `lab/*` |
+| `kosis_chat.config` | `Settings`(`backend serialization model_name temperature max_tokens timeout_seconds api_key_env …`, `model_params()`), `load_settings(path, **overrides)`, `load_env`, `get_secret`, `resolve_path` (S2c부터 shim: 아래 "LLM 설정 주입") | `src/kosis_rag/{chain,clova,hcx}.py`, `evals/ops.py:64`, `scripts/stat_baseline.py`, `tests/test_stat_baseline.py`, `lab/*` |
 | `kosis_chat.contract` | `to_stat_answer(question, answer, *, org_id)` | `evals/trace.py:58` |
 | `kosis_chat.pipeline` | `VERSION` | `scripts/stat_baseline.py:53` |
-| `kosis_chat.llm.model` | `LLMClient`(`generate(system, user)`), `LLMResult`, `MockClient`, `HCXClient`, `build_client(settings)`, `STATUS_OK`, `STATUS_API_ERROR` | `src/kosis_rag/{chain,graph,hcx,tools,hq/graph}.py`, `evals/{ops,runners/retrieval}.py`, tests 여러 곳 |
+| `kosis_chat.llm.model` | `LLMClient`(`generate(system, user)`), `LLMResult`, `MockClient`, `HCXClient`(S2c: `HCXClient(config \| settings)`), `build_client(settings)`, `STATUS_OK`, `STATUS_API_ERROR` | `src/kosis_rag/{chain,graph,hcx,tools,hq/graph}.py`, `evals/{ops,runners/retrieval}.py`, tests 여러 곳 |
 | `kosis_chat.data.loader` | `sha256_of(path)` | `tests/test_stat_baseline.py:16` |
 | `kosis_ai.schemas` | `TableInfo MAX_DIMS Source Cell Fact StatAnswer StatResult StatQuery TextPart FactPart Refusal QuestionKind QuestionType RefusalReason` | `src/kosis_rag/*`, `evals/*`, tests 여러 곳 |
 | `kosis_ai.normalize` | `_meta_unit(table_id, data_dir)` | `src/kosis_rag/metadata.py:22` (S2b에서 공개 별칭 `meta_unit` 추가) |
@@ -95,6 +95,24 @@ Pydantic 모델로 바꿔 단계 `schemas.py`로 옮기고 옛 경로는 이름�
 - 층 위반 제거: `compute.build`·`compute.plan_engine` → `shared.periods.span_text`(옛 `answer.render`), `judge.question` → `shared.labels.LABEL_ALIASES`(옛 `data.scope`), `compute.engine` → `shared.numbers.display_value`(옛 `data.serializer`), `contract` → `chatbot.Answer`는 주석용 `TYPE_CHECKING` import만(실행 시 import 없음; `contract.Answer` 속성은 없어짐, 호출처 0건 grep 11/05).
 - `prepare.index`는 `kosis_ai.normalize` 대신 `kosis_ai.units`를 import한다(`_measure`의 규칙 함수는 같은 객체).
 
+## LLM 설정 주입 (T1-28 S2c)
+
+키·모델은 호출자가 `LLMConfig`로 넘긴다(D25). 모듈은 `.env`·환경변수·`configs/model.yaml`(삭제)을 읽지 않는다. 예외는 아래 Settings shim 경로와 `kosis_ai/paths.py`(`KOSIS_WORKSPACE`). `tests/test_llm_config.py`.
+
+| 위치 | 이름 | 비고 |
+|---|---|---|
+| `kosis_chat.schemas.resources` | `LLMConfig(api_key: SecretStr \| None = None, model, provider="hcx", temperature=0.0, max_tokens=1024, max_input_tokens=None, timeout_seconds=60.0, base_url=DEFAULT_BASE_URL, thinking_effort="none")`, `LLMConfig.from_settings(settings, api_key=None)`, `require_key()` | 기본값 = 옛 model.yaml `model` 블록. frozen·extra 금지. 키는 repr·로그·`model_dump`에 안 나옴 |
+| | `LLMKeyMissing` | `RuntimeError`(summarize_stat 계약) 겸 `ValueError`(옛 `HCXClient` 키 없음 오류) 하위 |
+| | `DEFAULT_MODEL DEFAULT_BASE_URL MOCK_PROVIDER MOCK_RESPONSE` | 옛 model.yaml 값 |
+| `kosis_chat.llm.providers` (신규) | `PROVIDERS`(`{"hcx": HCXClient, "mock": MockClient}`), `register_provider(name, cls)`, `build_client(config)` | provider가 mock이 아니고 키가 없으면 `build_client`에서 `LLMKeyMissing`. `cls.from_config(config)`로 만든다(`LLMClient` 기본 `cls(config)`, Mock은 `MOCK_RESPONSE`). `Settings`를 넘기면 `llm.model.build_client(settings)` |
+| `kosis_chat.llm.model` | `HCXClient(config=None, sleep, observer, *, settings=None)` | 첫 인자 `LLMConfig` 또는 `Settings`(호환: 키는 그 `api_key_env` 셸 환경변수). 옛 키워드 `settings=`도 받음. `client.settings`(Settings)·`client.config`(LLMConfig) 둘 다 있음. `build_client(settings)`는 그대로(`LLMConfig`도 받음) |
+| `kosis_chat.config` | `load_settings(path=None, **overrides)` | 파일 없이 같은 값(`backend="hcx"`, `model_name="HCX-DASH-002"`, `thinking_level="none"`, `mock_response`=`MOCK_RESPONSE` …). `path`를 주면 그 YAML을 예전처럼 읽음(`DeprecationWarning`) |
+| | `load_env`, `get_secret` | Phase 2 전용, `DeprecationWarning`. Phase 1 코드는 호출하지 않음 |
+| | `settings_from_llm(llm, **overrides)`, `env_llm_config(settings)` | 신규. Settings ↔ LLMConfig. 환경변수를 읽는 곳은 `env_llm_config`(Settings 호환 경로) 하나 |
+| `kosis_chat.api` | `summarize_stat(..., llm=None)`, `_build(path, settings, client, retry_interval, llm=None)`, `_cached_llm` | `llm`은 키워드 끝에 추가(옛 호출 그대로). `llm`이 없으면 예전과 같은 인자로 `_build`·`_cached`를 부름 |
+| `kosis_chat.pipeline` | `StatPipeline(..., llm=None)`, `.llm` | 클라이언트는 LLM 단계가 처음 쓸 때 만든다(`client` property). 규칙만으로 끝나는 거절·되묻기는 키 없이 동작. `Chatbot`·`RawRunner`의 `client`도 같은 방식(property + setter) |
+| `eval.run_eval` | `llm_config(settings)` | `--backend hcx`면 시작 시 셸 환경변수 `HCX_API_KEY`를 읽고 없으면 exit 2. mock은 키 불필요. `--config`는 경고 후 무시. `eval.judge`도 같은 함수 |
+
 ## 반환 객체에서 읽는 속성
 
-- `StatPipeline`: `ask(question, golden_scope=None)`, `client` (setter: `eval/run_eval.py:229`), `org_id table prompt_version system_prompt answer_model decision_metadata settings retry_interval`. T1-28 S2부터 `resources`(StatResources)와 `index`(= `resources.index`)도 있음.
+- `StatPipeline`: `ask(question, golden_scope=None)`, `client` (setter: `eval/run_eval.py:229`), `org_id table prompt_version system_prompt answer_model decision_metadata settings retry_interval`. T1-28 S2부터 `resources`(StatResources)와 `index`(= `resources.index`)도 있음. S2c부터 `llm`(주입한 LLMConfig 또는 None)이 있고, `client`는 처음 읽을 때 만든다(키 없는 hcx면 그때 `LLMKeyMissing`).

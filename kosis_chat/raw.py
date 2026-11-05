@@ -22,8 +22,8 @@ from kosis_chat.llm.model import (
     STATUS_TIMEOUT,
     LLMClient,
     TraceWriteError,
-    build_client,
 )
+from kosis_chat.llm.providers import build_client
 
 DECISION_METADATA = {"pipeline": "raw", "route": "raw", "compose": "model", "outcome_origin": "model",
                      "numbers_origin": "model", "chart_origin": "none", "defaults_origin": "model"}
@@ -42,13 +42,23 @@ class RawRunner:
         if scope_mode not in scope.MODES:
             raise ValueError(f"unknown scope mode {scope_mode!r}; expected one of {scope.MODES}")
         self.settings = settings or load_settings()
-        self.client = client or build_client(self.settings)
+        self._client = client  # built on first use (T1-28 S2c): a rule verdict needs no key
         self.table = table  # as loaded: preprocessing only fills parsed values, which the table text does not use
         self.scope_mode = scope_mode
         self.prompt_version = raw_prompt.VERSION
         self.system_prompt = raw_prompt.SYSTEM_PROMPT
         self.answer_model = None  # free text, no response schema
         self.decision_metadata = dict(DECISION_METADATA)
+
+    @property
+    def client(self) -> LLMClient:
+        if self._client is None:
+            self._client = build_client(self.settings)
+        return self._client
+
+    @client.setter
+    def client(self, value: LLMClient) -> None:  # run_eval swaps in its recording client
+        self._client = value
 
     def prepare(self, question: str, golden_scope: dict | None = None) -> tuple[str, dict[str, Any]]:
         """Table text for one question (same cut and style as Chatbot.prepare) and a record with its hash."""
@@ -65,8 +75,9 @@ class RawRunner:
         if limit is not None and tokens > limit:
             return self._answer("", STATUS_INPUT_TOO_LONG, f"estimated {tokens} tokens > limit {limit}", tokens, record)
         started = time.perf_counter()
+        client = self.client  # a missing key is a configuration error, not this answer's API error
         try:
-            result = self.client.generate(self.system_prompt, user)
+            result = client.generate(self.system_prompt, user)
         except TraceWriteError:
             raise
         except TimeoutError as exc:

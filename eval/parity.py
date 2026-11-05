@@ -12,9 +12,14 @@ exits 0, or prints each differing path per question and exits 1. Exit 2 means th
 file, bad JSON or encoding, bad run_index, duplicate rows) or the command line was wrong (argparse usage errors, such
 as a missing --base or a bad --ignore path, also exit 2).
 
-Run conditions: when both folders have manifest.json (run_eval writes it), the keys in CONDITION_KEYS (golden and
+Run conditions: both folders must have manifest.json (run_eval writes it); the keys in CONDITION_KEYS (golden and
 data hashes, question count, scope/judge mode, model settings, ...) must match before rows are compared; otherwise
 the two runs did not answer the same thing and parity exits 2. --allow-condition KEY skips one key on purpose.
+
+Completeness: both folders must have manifest.json with status "completed" and exactly `questions` question ids,
+each once per run index 0..runs-1 (and, when the manifest lists `question_ids`, exactly those ids); otherwise exit 2.
+Two runs that lost the same question would otherwise compare `identical`. --allow-missing-manifest compares bare
+results.jsonl files without these checks.
 
 --check-calls also compares, row by row, what VOLATILE_PATHS leaves out of the byte check on purpose: `attempts`
 (HTTP attempts) together with call_status, the number of format errors and the (name, status) list of the spans.
@@ -229,6 +234,30 @@ def condition_diffs(base: dict, run: dict, allow: tuple[str, ...] = ()) -> list[
     return found
 
 
+def completeness(manifest: dict, rows: dict[tuple[str, int], dict]) -> list[str]:
+    """Why a run folder is not a finished run of the golden set it names: status not "completed", or rows that do not
+    match the manifest (each of `questions` question ids once per run index 0..runs-1; `question_ids`, when the
+    manifest lists them, must be exactly the ids recorded). Empty when complete."""
+    problems = []
+    if manifest.get("status") != "completed":
+        problems.append(f"manifest status is {manifest.get('status', MISSING)!r}, not 'completed'")
+    questions, runs = manifest.get("questions"), manifest.get("runs")
+    if not isinstance(questions, int) or not isinstance(runs, int):
+        return problems + [f"manifest has no question count / runs ({questions!r}, {runs!r})"]
+    ids = {qid for qid, _ in rows}
+    expected_ids = manifest.get("question_ids")
+    if expected_ids is not None and set(map(str, expected_ids)) != ids:
+        missing, extra = sorted(set(map(str, expected_ids)) - ids), sorted(ids - set(map(str, expected_ids)))
+        problems.append(f"question ids differ from the manifest: missing {missing[:5]}, extra {extra[:5]}")
+    if len(ids) != questions:
+        problems.append(f"{len(ids)} question ids in results, manifest says {questions}")
+    expected = {(qid, index) for qid in ids for index in range(runs)}
+    if set(rows) != expected:
+        problems.append(f"{len(rows)} rows, expected {len(expected)} ({len(ids)} questions x {runs} runs, "
+                        f"run_index 0..{runs - 1})")
+    return problems
+
+
 def call_record(row: dict) -> dict:
     """What --check-calls compares for one row: attempts, call status, format error count, span (name, status)."""
     spans = (row.get("decision_metadata") or {}).get("spans") or []
@@ -305,6 +334,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--width", type=int, default=80, help="characters shown per value (default 80)")
     parser.add_argument("--check-calls", action="store_true",
                         help="also compare attempts, call_status, format error count and span (name, status) per row")
+    parser.add_argument("--allow-missing-manifest", action="store_true",
+                        help="compare even when a side has no manifest.json (no condition or completeness check)")
     parser.add_argument("--allow-condition", action="append", default=[], metavar="KEY", choices=CONDITION_KEYS,
                         help="manifest condition key allowed to differ (repeatable)")
     args = parser.parse_args(argv)
@@ -321,8 +352,20 @@ def main(argv: list[str] | None = None) -> int:
         log.error("%s", exc)
         return 2
     if base_manifest is None or run_manifest is None:
-        log.warning("no %s on one side: run conditions not checked", MANIFEST_FILE)
+        if not args.allow_missing_manifest:
+            log.error("no %s on one side: the run conditions and completeness cannot be checked "
+                      "(pass --allow-missing-manifest to compare the rows anyway)", MANIFEST_FILE)
+            return 2
+        log.warning("no %s on one side: run conditions and completeness not checked", MANIFEST_FILE)
     else:
+        problems = [f"{side}: {problem}" for side, manifest, rows in (("base", base_manifest, base),
+                                                                       ("run", run_manifest, run))
+                    for problem in completeness(manifest, rows)]
+        if problems:
+            for problem in problems:
+                log.error("%s", problem)
+            log.error("a run that did not finish or lost rows cannot pass the gate")
+            return 2
         conditions = condition_diffs(base_manifest, run_manifest, tuple(args.allow_condition))
         if conditions:
             for key, old, new in conditions:

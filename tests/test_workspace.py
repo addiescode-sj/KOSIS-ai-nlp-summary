@@ -52,7 +52,8 @@ def test_env_file_is_read_from_the_work_root(tmp_path, monkeypatch):
     monkeypatch.setenv(paths.ENV_VAR, str(tmp_path))
     monkeypatch.delenv("T127_FAKE_VALUE", raising=False)
     (tmp_path / ".env").write_text("T127_FAKE_VALUE=from-workspace\n", encoding="utf-8")
-    load_env()
+    with pytest.deprecated_call():  # Phase 2 shim since T1-28 S2c
+        load_env()
     assert os.environ["T127_FAKE_VALUE"] == "from-workspace"
 
 

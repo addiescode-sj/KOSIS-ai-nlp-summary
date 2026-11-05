@@ -37,10 +37,13 @@ def _row(question_id: str, latency: float = 0.1, start_ms: float = 0.0) -> dict:
     }
 
 
-def _write(tmp_path, name: str, rows: list[dict]):
+def _write(tmp_path, name: str, rows: list[dict], manifest: bool = True):
+    """A run folder; with a completed manifest.json for exactly these rows unless manifest=False."""
     run = tmp_path / name
     run.mkdir()
     (run / "results.jsonl").write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
+    if manifest:
+        _manifest(run)
     return run
 
 
@@ -152,7 +155,7 @@ def test_runs_are_keyed_by_run_index(tmp_path):
 def test_bad_run_index_is_an_input_error(tmp_path, bad):
     broken = _row("Q1")
     broken["run_index"] = bad
-    run = _write(tmp_path, "a", [broken])
+    run = _write(tmp_path, "a", [broken], manifest=False)
     with pytest.raises(parity.ParityError, match="bad run_index"):
         parity.load_rows(run)
     assert parity.main(["--base", str(run), "--run", str(run)]) == 2
@@ -225,8 +228,12 @@ def test_printed_diff_path_works_as_ignore(tmp_path, capsys):
 
 
 def _manifest(run, **changes):
+    """manifest.json for the rows already in run/results.jsonl (question count, runs, status completed) + changes."""
+    rows = [json.loads(line) for line in (run / "results.jsonl").read_text(encoding="utf-8").splitlines() if line]
+    ids = {str(r["question_id"]) for r in rows}
+    runs = max((int(r.get("run_index", 0)) for r in rows), default=0) + 1
     data = {"golden_sha256": "g", "golden_snapshot_sha256": "gs", "data_sha256": {"data/values/x.parquet": "d"},
-            "questions": 2, "runs": 1, "pipeline": "stat", "answer_format": "json", "serialization": "long",
+            "questions": len(ids), "runs": runs, "status": "completed", "pipeline": "stat", "answer_format": "json", "serialization": "long",
             "scope_mode": "oracle", "judge_mode": "rules", "form": None, "interval_seconds": 0.0,
             "model": {"backend": "mock", "model_name": "HCX-DASH-002"}, "run_id": run.name, "started_at": run.name}
     data.update(changes)
@@ -242,7 +249,7 @@ def test_matching_manifests_pass_and_bookkeeping_keys_are_free(tmp_path, capsys)
     assert capsys.readouterr().out.strip() == "identical"
 
 
-@pytest.mark.parametrize("key,value", [("golden_sha256", "other"), ("questions", 3), ("scope_mode", "catalog"),
+@pytest.mark.parametrize("key,value", [("golden_sha256", "other"), ("scope_mode", "catalog"),
                                        ("model", {"backend": "hcx", "model_name": "HCX-DASH-002"})])
 def test_differing_run_condition_is_an_input_error(tmp_path, key, value):
     base, run = _write(tmp_path, "a", [_row("Q1")]), _write(tmp_path, "b", [_row("Q1")])
@@ -252,10 +259,50 @@ def test_differing_run_condition_is_an_input_error(tmp_path, key, value):
     assert parity.main(["--base", str(base), "--run", str(run), "--allow-condition", key]) == 0
 
 
-def test_manifest_on_one_side_only_is_a_warning(tmp_path):
+def test_manifest_on_one_side_only_is_an_input_error(tmp_path):
+    base, run = _write(tmp_path, "a", [_row("Q1")]), _write(tmp_path, "b", [_row("Q1")], manifest=False)
+    assert parity.main(["--base", str(base), "--run", str(run)]) == 2
+    assert parity.main(["--base", str(base), "--run", str(run), "--allow-missing-manifest"]) == 0
+
+
+# --- completeness (review 11/05): two runs that lost the same question must not pass ---------------------------
+
+
+def test_the_same_question_lost_on_both_sides_is_an_input_error(tmp_path):
     base, run = _write(tmp_path, "a", [_row("Q1")]), _write(tmp_path, "b", [_row("Q1")])
-    _manifest(base)
+    _manifest(base, questions=2)
+    _manifest(run, questions=2)  # both say 2 questions, both recorded 1
+    assert parity.main(["--base", str(base), "--run", str(run)]) == 2
+
+
+def test_a_run_that_did_not_complete_is_an_input_error(tmp_path):
+    base, run = _write(tmp_path, "a", [_row("Q1")]), _write(tmp_path, "b", [_row("Q1")])
+    _manifest(run, status="failed")
+    assert parity.main(["--base", str(base), "--run", str(run)]) == 2
+
+
+def test_listed_question_ids_must_be_the_recorded_ones(tmp_path):
+    base, run = _write(tmp_path, "a", [_row("Q1")]), _write(tmp_path, "b", [_row("Q1")])
+    _manifest(run, question_ids=["Q2"])
+    assert parity.main(["--base", str(base), "--run", str(run)]) == 2
+    _manifest(run, question_ids=["Q1"])
     assert parity.main(["--base", str(base), "--run", str(run)]) == 0
+
+
+def test_a_missing_run_index_is_an_input_error(tmp_path):
+    second = {**_row("Q1"), "run_index": 1}
+    base, run = _write(tmp_path, "a", [_row("Q1"), second]), _write(tmp_path, "b", [_row("Q1"), second])
+    _manifest(run, runs=3)
+    _manifest(base, runs=3)
+    assert parity.main(["--base", str(base), "--run", str(run)]) == 2
+
+
+def test_completeness_rules():
+    rows = {("Q1", 0): {}, ("Q2", 0): {}}
+    assert parity.completeness({"status": "completed", "questions": 2, "runs": 1}, rows) == []
+    assert parity.completeness({"status": "completed", "questions": 2, "runs": 1, "question_ids": ["Q1", "Q2"]}, rows) == []
+    assert parity.completeness({"status": "running", "questions": 2, "runs": 1}, rows)
+    assert parity.completeness({"status": "completed", "runs": 1}, rows)
 
 
 def test_check_calls_reports_attempts_and_span_status(tmp_path, capsys):

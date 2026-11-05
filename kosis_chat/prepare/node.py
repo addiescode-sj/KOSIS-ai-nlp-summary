@@ -17,25 +17,42 @@ from kosis_chat.prepare.convert import check_meta, convert, frame_content, meta_
 from kosis_chat.prepare.schemas import Problem, SchemaError, TableInput, validate
 from kosis_chat.schemas.io import ParquetTable
 
-HASH_VERSION = "prepare-content-v1"
+HASH_VERSION = "prepare-content-v2"
 PARTIAL_NOTE = "; coverage partial: 일부 행만 받은 표"
 
 
-def content_hash(table: ParquetTable) -> str:
-    """sha256 over everything that changes a prepared table: the column names and dtypes (sorted), every row,
-    the info (all fields), the coverage and fetched_at. Never a subset of columns: two tables would share a key. Computed once
-    per ParquetTable object."""
-    if table._content_hash is None:
-        typed, _, rows = frame_content(table.frame)
-        digest = hashlib.sha256()
-        head = {"v": HASH_VERSION, "columns": typed, "coverage": table.coverage, "fetched_at": table.fetched_at,
-                "info": table.info.model_dump(mode="json") if table.info is not None else None}
-        digest.update(json.dumps(head, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8"))
-        for row in rows:
-            digest.update(b"\n")
-            digest.update(json.dumps(row, ensure_ascii=False, default=repr).encode("utf-8"))
-        table._content_hash = digest.hexdigest()
-    return table._content_hash
+def _frame_hash(table: ParquetTable) -> str:
+    """sha256 over the column names and dtypes (sorted) and every row. Never a subset of columns: two tables would
+    share a key. Kept on the object only for a pyarrow Table (immutable); a DataFrame is hashed on every call."""
+    if table._frame_hash is not None:
+        return table._frame_hash
+    typed, _, rows = frame_content(table.frame)
+    digest = hashlib.sha256()
+    digest.update(json.dumps(typed, ensure_ascii=False, default=str).encode("utf-8"))
+    for row in rows:
+        digest.update(b"\n")
+        digest.update(json.dumps(row, ensure_ascii=False, default=repr).encode("utf-8"))
+    if hasattr(table.frame, "to_pylist"):  # pyarrow Table, not a pandas DataFrame
+        table._frame_hash = digest.hexdigest()
+    return digest.hexdigest()
+
+
+def _hash(table: ParquetTable, meta: tuple[Mapping[str, str], str] | None) -> str:
+    head = {"v": HASH_VERSION, "frame": _frame_hash(table), "coverage": table.coverage, "fetched_at": table.fetched_at,
+            "info": table.info.model_dump(mode="json") if table.info is not None else None,
+            # the meta actually applied: from info, else the catalog row prepare picked (and the fetched_at used)
+            "meta": None if meta is None else {"row": dict(meta[0]), "fetched_at": meta[1]}}
+    return hashlib.sha256(json.dumps(head, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+
+
+def content_hash(table: ParquetTable, catalog: Mapping[str, Mapping[str, str]] | None = None) -> str:
+    """sha256 over everything that changes a prepared table: the frame (columns, dtypes, every row), the info, the
+    coverage and the meta prepare applies (info, else the catalog row for the frame's tbl_id, and fetched_at).
+    Without info and catalog the meta part is empty: pass the catalog prepare will use to get its key."""
+    meta = None
+    if table.info is not None or catalog is not None:
+        meta = _meta_source(table, table.tbl_id(), catalog)
+    return _hash(table, meta)
 
 
 def _catalog_row(tbl_id: str, catalog: Mapping[str, Mapping[str, str]] | None) -> Mapping[str, str]:
@@ -64,13 +81,18 @@ def table_input(table: ParquetTable, catalog: Mapping[str, Mapping[str, str]] | 
     rows = rows_of(table.frame)
     if not rows:
         raise no_rows("frame")
-    row, fetched_at = _meta_source(table, str(rows[0]["tbl_id"]), catalog)
+    tbl_id = str(rows[0]["tbl_id"])
+    if {str(r["tbl_id"]) for r in rows} != {tbl_id}:  # ParquetTable checks this; a frame changed since must not pass
+        raise SchemaError([Problem("frame", "rows of more than one table, or rows without tbl_id")])
+    row, fetched_at = _meta_source(table, tbl_id, catalog)
+    if str(row.get("tbl_id")) != tbl_id:
+        raise SchemaError([Problem("meta", f"meta tbl_id {row.get('tbl_id')!r} is not the frame's tbl_id {tbl_id!r}")])
     meta = meta_from_row(row, period_codes(rows), fetched_at)
     if table.coverage == "partial":
         meta["note"] += PARTIAL_NOTE
     allow_empty = () if fetched_at else ("fetched_at",)
     check_meta(meta, where="frame", allow_empty=allow_empty)
-    out = convert(rows, meta, content_hash(table))
+    out = convert(rows, meta, _hash(table, (row, fetched_at)))
     problems = validate(out, allow_empty=allow_empty)
     if problems:
         raise SchemaError(problems)

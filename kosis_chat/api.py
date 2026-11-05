@@ -7,6 +7,11 @@ fallback picks its own table part).
 
 Errors are part of the contract: an unknown table raises LookupError, a failed model call raises RuntimeError.
 A question the table cannot answer is not an error: it comes back as a refused or clarify StatAnswer.
+
+The model (T1-28 S2c): pass llm=LLMConfig(api_key=..., model=..., provider=...). Without a key, a question the rules
+refuse or ask back is still answered; one that needs the model raises LLMKeyMissing (a RuntimeError). settings= (a
+kosis_chat.config.Settings, Phase 2) keeps working: its key is the shell environment variable it names. client= (a
+ready client: tests, a recording client) wins over both.
 """
 
 from __future__ import annotations
@@ -20,6 +25,7 @@ from kosis_chat.config import Settings
 from kosis_chat.contract import org_id_from_table_path, to_stat_answer
 from kosis_chat.llm.model import LLMClient
 from kosis_chat.pipeline import StatPipeline
+from kosis_chat.schemas.resources import LLMConfig
 
 from kosis_ai import paths  # isort: skip
 from kosis_ai.schemas import StatAnswer  # isort: skip
@@ -41,12 +47,13 @@ def table_path(table_id: str) -> Path:
     return path
 
 
-def _build(path: Path, settings: Settings | None, client: LLMClient | None, retry_interval: float = 0.0) -> StatPipeline:
+def _build(path: Path, settings: Settings | None, client: LLMClient | None, retry_interval: float = 0.0,
+           llm: LLMConfig | None = None) -> StatPipeline:
     # adapters open the file (read_parquet + tables.csv), prepare converts; StatPipeline cleans and indexes once
-    # (kosis_chat/schemas/resources.py). T1-28 S2.
+    # (kosis_chat/schemas/resources.py). T1-28 S2. The client is built on first use from llm or settings (S2c).
     table = load_table(path)
     return StatPipeline(table, client=client, settings=settings, org_id=org_id_from_table_path(path, table.meta.tbl_id),
-                        retry_interval=retry_interval)
+                        retry_interval=retry_interval, llm=llm)
 
 
 @lru_cache(maxsize=16)
@@ -56,15 +63,37 @@ def _cached(path: Path, settings: Settings | None, retry_interval: float) -> Sta
     return _build(path, settings, None, retry_interval)
 
 
+@lru_cache(maxsize=16)
+def _cached_llm(path: Path, llm: LLMConfig, retry_interval: float) -> StatPipeline:
+    """_cached for an injected LLMConfig (frozen, hashable; the key stays a SecretStr)."""
+    return _build(path, None, None, retry_interval, llm=llm)
+
+
+def _clear_all() -> None:
+    """_cached.cache_clear() also drops the LLMConfig pipelines (Phase 2 tests reset the workspace with it)."""
+    _cached.__wrapped_clear__()
+    _cached_llm.cache_clear()
+
+
+_cached.__wrapped_clear__ = _cached.cache_clear
+_cached.cache_clear = _clear_all
+
+
 def summarize_stat(question: str, table_id: str, *, settings: Settings | None = None,
-                   client: LLMClient | None = None, retry_interval: float = 0.0) -> StatAnswer:
+                   client: LLMClient | None = None, retry_interval: float = 0.0,
+                   llm: LLMConfig | None = None) -> StatAnswer:
     """Answer `question` from one provided table.
 
     retry_interval: seconds to wait before a second model call for the same question (HCX 429), as run_eval --interval.
     A given client (tests, a recording client) builds a fresh, uncached pipeline.
     """
     path = table_path(table_id)
-    bot = _cached(path, settings, retry_interval) if client is None else _build(path, settings, client, retry_interval)
+    if llm is None:  # the calls as before S2c (tests monkeypatch _build and _cached with these arguments)
+        bot = _cached(path, settings, retry_interval) if client is None else _build(path, settings, client, retry_interval)
+    elif client is None and settings is None:
+        bot = _cached_llm(path, llm, retry_interval)
+    else:
+        bot = _build(path, settings, client, retry_interval, llm=llm)
     answer = bot.ask(question)
     stat = to_stat_answer(question, answer, org_id=bot.org_id)
     if stat is None:

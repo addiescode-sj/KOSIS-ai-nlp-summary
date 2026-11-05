@@ -27,16 +27,17 @@ from kosis_chat.compute import CalcRefused, compute
 from kosis_chat.compute.analyze import Plan, Unresolved, build_plan, rule_plan, to_query
 from kosis_chat.compute.context import scenario_alternatives, with_alternatives
 from kosis_chat.compute.resolve import NeedsClarify
-from kosis_chat.config import Settings, load_settings
+from kosis_chat.config import Settings, load_settings, settings_from_llm
 from kosis_chat.contract import to_source
 from kosis_chat.judge import messages
 from kosis_chat.judge.answerability import Verdict, judge
 from kosis_chat.judge.question import CAUSAL_WORDS
 from kosis_chat.llm import analyze_fill, analyze_plan, compose, event_lookup
-from kosis_chat.llm.model import STATUS_OK, LLMClient, build_client
+from kosis_chat.llm.model import STATUS_OK, LLMClient
+from kosis_chat.llm.providers import build_client
 from kosis_chat.llm.structured import StructuredResult, ask_structured
 from kosis_chat.prepare.schemas import TableInput
-from kosis_chat.schemas.resources import StatResources, load_resources
+from kosis_chat.schemas.resources import LLMConfig, StatResources, load_resources
 
 from kosis_ai.schemas import ClarifyChoice, PlanV3, Refusal, StatAnswer, StatQuery  # isort: skip
 
@@ -104,9 +105,13 @@ class StatPipeline:
         org_id: str | None = None,
         retry_interval: float = 0.0,
         fallback_scope: str = "auto",
+        llm: LLMConfig | None = None,
     ) -> None:
-        self.settings = settings or load_settings()
-        self._client = client or build_client(self.settings)
+        # llm (T1-28 S2c): the injected model; a Settings alone is the Phase 2 shim (its key from the shell env).
+        self.settings = settings or (settings_from_llm(llm) if llm is not None else load_settings())
+        self.llm = llm
+        # Built on first use by an LLM step (LLMKeyMissing then, not here): rule-only answers need no key.
+        self._client: LLMClient | None = client
         # The cleaned table, its index and lookups (T1-28 S2): the index is the one compute's checks use too.
         self.resources: StatResources = load_resources(table, org_id)
         self.table = self.resources.table
@@ -123,6 +128,8 @@ class StatPipeline:
 
     @property
     def client(self) -> LLMClient:
+        if self._client is None:
+            self._client = build_client(self.llm if self.llm is not None else self.settings)
         return self._client
 
     @client.setter
@@ -136,7 +143,7 @@ class StatPipeline:
         """compact-v2 with the same rules, for the questions the analysis cannot place (built on first use)."""
         if self._fallback is None:
             self._fallback = Chatbot(
-                self.table, client=self._client, settings=replace(self.settings, prompt_version=FALLBACK_PROMPT),
+                self.table, client=self.client, settings=replace(self.settings, prompt_version=FALLBACK_PROMPT),
                 prompt_version=FALLBACK_PROMPT, scope_mode=self.fallback_scope, answer_format="json",
                 retry_interval=self.retry_interval, judge_mode="rules",
             )
@@ -146,7 +153,7 @@ class StatPipeline:
 
     @property
     def model_name(self) -> str:
-        return self.settings.model_name if self._client.name == "hcx" else self._client.name
+        return self.settings.model_name if self.client.name == "hcx" else self.client.name
 
     def _ask_model(self, calls: _Calls, stage: str, system: str, user: str, model, **attributes) -> StructuredResult:
         started = time.perf_counter()
@@ -155,7 +162,7 @@ class StatPipeline:
             time.sleep(self.retry_interval)
             slept = time.perf_counter() - started
             calls.waited += slept
-        result = ask_structured(self._client, system, user, model, retry_interval=self.retry_interval,
+        result = ask_structured(self.client, system, user, model, retry_interval=self.retry_interval,
                                 max_input_tokens=self.settings.max_input_tokens)
         calls.add(result, system, user)
         calls.span(stage, started, "ok" if result.status == STATUS_OK else "error", slept + result.retry_wait_seconds,

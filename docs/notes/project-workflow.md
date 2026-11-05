@@ -106,7 +106,7 @@ flowchart LR
   end
   subgraph APP["kosis_chat (Python 3.12)"]
     direction TB
-    CFG["설정<br/>PyYAML · python-dotenv<br/>configs/model.yaml · .env"]
+    CFG["설정<br/>LLMConfig (호출자 주입)<br/>HCX_API_KEY = 셸 환경변수"]
     DATA["데이터 계층<br/>csv · json · hashlib · dataclasses"]
     CORE["답변 엔진<br/>chatbot.py"]
     LLM["LLM 계층 (llm/model.py)<br/>HCXClient · OpenAICompatClient (urllib)<br/>MockClient"]

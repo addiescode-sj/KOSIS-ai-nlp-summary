@@ -87,18 +87,28 @@ SURFACE: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("kosis_chat.compute.analyze", ("_LATEST", "_RECENT", "_PREVIOUS")),
     ("kosis_chat.compute.roles", ("_PROVINCE", "is_province")),
     ("kosis_chat.contract", ("to_source", "render_text", "strip_model_source")),
+    # T1-28 S2c: the model is injected as an LLMConfig; providers table; Settings stays as the Phase 2 shim
+    ("kosis_chat.schemas.resources", ("LLMConfig", "LLMKeyMissing", "DEFAULT_MODEL", "DEFAULT_BASE_URL",
+                                      "MOCK_PROVIDER", "MOCK_RESPONSE")),
+    ("kosis_chat.llm.providers", ("PROVIDERS", "register_provider", "build_client", "LLMKeyMissing")),
+    ("kosis_chat.llm.model", ("BACKENDS", "TraceWriteError")),
+    ("kosis_chat.config", ("PROJECT_ROOT", "settings_from_llm", "env_llm_config")),
 )
 
 # Callables whose parameters callers pass by name or position: (module, name, parameter names in order).
 SIGNATURES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
-    ("kosis_chat.api", "summarize_stat", ("question", "table_id", "settings", "client", "retry_interval")),
+    ("kosis_chat.api", "summarize_stat", ("question", "table_id", "settings", "client", "retry_interval", "llm")),
     ("kosis_chat.api", "table_path", ("table_id",)),
-    ("kosis_chat.api", "_build", ("path", "settings", "client", "retry_interval")),  # Phase 2 evals/trace.py:61
+    ("kosis_chat.api", "_build", ("path", "settings", "client", "retry_interval", "llm")),  # Phase 2 evals/trace.py:61
     ("kosis_chat.contract", "to_stat_answer", ("question", "answer", "org_id")),
     ("kosis_chat.config", "load_settings", ("path", "overrides")),
     ("kosis_chat.config", "load_env", ("path",)),
     ("kosis_chat.config", "get_secret", ("name",)),
     ("kosis_chat.llm.model", "build_client", ("settings",)),
+    ("kosis_chat.llm.model", "HCXClient", ("config", "sleep", "observer", "settings")),  # S2c: config | Settings
+    ("kosis_chat.llm.providers", "build_client", ("config",)),
+    ("kosis_chat.llm.providers", "register_provider", ("name", "cls")),
+    ("kosis_chat.schemas.resources", "LLMConfig.from_settings", ("settings", "api_key")),
     ("kosis_chat.data.loader", "sha256_of", ("path",)),
     ("kosis_chat.data.loader", "load_table", ("path",)),
     ("kosis_chat.data.loader", "infer_unit", ("unit", "item", "dim_labels")),  # tests/test_data.py
@@ -116,12 +126,15 @@ SIGNATURES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("kosis_chat.answer.render", "final_text", ("body", "source", "applied", "notes")),
     ("eval.golden", "load_items", ("path",)),
 )
-KEYWORD_ONLY = {("kosis_chat.api", "summarize_stat"): {"settings", "client", "retry_interval"},
-                ("kosis_chat.contract", "to_stat_answer"): {"org_id"}}
+KEYWORD_ONLY = {("kosis_chat.api", "summarize_stat"): {"settings", "client", "retry_interval", "llm"},
+                ("kosis_chat.contract", "to_stat_answer"): {"org_id"},
+                ("kosis_chat.llm.model", "HCXClient"): {"settings"}}
 
 # Attributes callers read from returned objects.
 SETTINGS_FIELDS = ("backend", "serialization", "model_name", "temperature", "max_tokens", "timeout_seconds",
                    "base_url", "api_key_env", "thinking_level", "max_input_tokens")
+LLM_CONFIG_FIELDS = ("api_key", "model", "provider", "temperature", "max_tokens", "max_input_tokens", "timeout_seconds",
+                     "base_url", "thinking_effort")  # plans/T1-28.md 입출력 계약
 PIPELINE_MEMBERS = ("ask", "client", "org_id", "table", "prompt_version", "system_prompt", "answer_model",
                     "decision_metadata", "settings", "retry_interval")
 CONFTEST_NAMES = ("write_table", "household_rows", "pop_rows", "PARQUET_COLUMNS", "CATALOG_COLUMNS")
@@ -136,7 +149,9 @@ def test_names_import(module: str, names: tuple[str, ...]):
 
 @pytest.mark.parametrize("module,name,params", SIGNATURES, ids=[f"{m}.{n}" for m, n, _ in SIGNATURES])
 def test_signatures(module: str, name: str, params: tuple[str, ...]):
-    func = getattr(importlib.import_module(module), name)
+    func = importlib.import_module(module)
+    for part in name.split("."):
+        func = getattr(func, part)
     func = getattr(func, "__wrapped__", func)
     sig = inspect.signature(func).parameters
     assert tuple(sig)[: len(params)] == params, f"{module}.{name}{inspect.signature(func)}"
@@ -159,6 +174,21 @@ def test_settings_fields_and_model_params():
     missing = [f for f in SETTINGS_FIELDS if not hasattr(settings, f)]
     assert not missing, f"Settings lost {missing}"
     assert {"backend", "model_name"} <= set(settings.model_params())  # Phase 2 scripts/stat_baseline.py:82
+
+
+def test_llm_config_fields_and_config_shims():
+    import warnings
+
+    from kosis_chat import config
+    from kosis_chat.schemas.resources import LLMConfig, LLMKeyMissing
+
+    assert tuple(LLMConfig.model_fields) == LLM_CONFIG_FIELDS
+    assert issubclass(LLMKeyMissing, RuntimeError)  # summarize_stat: a failed model call raises RuntimeError
+    for shim, args in ((config.load_env, ("does-not-exist.env",)), (config.get_secret, ("T1_28_UNSET",))):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            shim(*args)  # Phase 2 still calls them; they warn and keep working
+        assert any(issubclass(w.category, DeprecationWarning) for w in caught), shim.__name__
 
 
 def test_pipeline_members():
