@@ -3,7 +3,8 @@
 Moved from compute/analyze.py (Plan), compute/build.py (Pattern, Agg, TermSteps, Built) and llm/analyze_plan.py
 (Placed); the old modules re-export them. Same fields, order, defaults and frozenness as the dataclasses; see
 shared/boundary.py for how validation is kept from changing a value. AnalyzeFill and EventStart were Pydantic
-already and stay in llm/analyze_fill.py and llm/event_lookup.py until S3 moves the LLM steps.
+already; S3b moved them with their modules to analyze/fill.py and analyze/event_lookup.py (the model's reply schemas).
+S3a/S3b: the In/Out models of the analyze steps (analyze/node.py).
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ from typing import Any, Literal
 
 from pydantic import ConfigDict, Field, SkipValidation
 
+from kosis_chat.schemas.state import LLMCall
 from kosis_chat.shared.boundary import BoundaryModel
 
 from kosis_ai.schemas import PlanV3, QuestionType  # isort: skip
@@ -108,3 +110,64 @@ class PlanRulesOut(BoundaryModel):
     built: SkipValidation[Built | None] = None
     unresolved: SkipValidation[list[str] | None] = None
     route: Literal["built", "unresolved"]
+
+
+# ---------------------------------------------------------------- analyze/node.py (T1-28 S3b): the model steps
+
+
+class PlanFillIn(BoundaryModel):
+    """step_plan_fill_llm's input: the rules' plan, what they could not decide (PlanRulesOut.unresolved), and whether a
+    model answer came back already for this question (then a call waits retry_interval first)."""
+
+    rule: SkipValidation[Plan]
+    unresolved: SkipValidation[list[str]] = Field(default_factory=list)
+    called: bool = False
+
+
+class PlanFillOut(BoundaryModel):
+    """step_plan_fill_llm's output. route "built": the model's fill placed the question, plan and built are set.
+    route "unplaced": built is None (plan: the last fill, or the rules' plan when no fill came back).
+    calls: the model calls made (analyze.llm_fill, analyze.llm_fill_retry); meta: the decision_metadata entries
+    written (route, fill, fill_status, fill_retry, fill_retry_status, unresolved_after_fill), in the order written."""
+
+    plan: SkipValidation[Plan]
+    built: SkipValidation[Built | None] = None
+    calls: SkipValidation[list[LLMCall]] = Field(default_factory=list)
+    meta: SkipValidation[dict[str, Any]] = Field(default_factory=dict)
+    route: Literal["built", "unplaced"]
+
+
+class PlanWriteIn(BoundaryModel):
+    """step_plan_write_llm's input: the question, the rules' plan (what they found is shown to the model) and whether a
+    model answer came back already for this question."""
+
+    question: str
+    rule: SkipValidation[Plan]
+    called: bool = False
+
+
+class PlanWriteOut(BoundaryModel):
+    """step_plan_write_llm's output. route "placed": placed holds the computed plan (query_plan, built, computed).
+    route "clarify": clarify is the ask-back (compute.resolve.NeedsClarify, two options or more). route "failed": no
+    plan (the compact-v2 fallback answers). calls: analyze.llm_plan, event_lookup, analyze.llm_plan_retry in the order
+    made; meta: event_lookup, route, plan, plan_status, plan_problems, plan_retry, ... in the order written."""
+
+    placed: SkipValidation[Placed | None] = None
+    clarify: Any = None  # compute.resolve.NeedsClarify
+    calls: SkipValidation[list[LLMCall]] = Field(default_factory=list)
+    meta: SkipValidation[dict[str, Any]] = Field(default_factory=dict)
+    route: Literal["placed", "clarify", "failed"]
+
+
+class EventLookupIn(BoundaryModel):
+    """step_event_lookup's input: the event a model's plan named that the calendar lacks."""
+
+    name: str
+    called: bool = False
+
+
+class EventLookupOut(BoundaryModel):
+    """step_event_lookup's output: its start (YYYY-MM or YYYY), None when the model does not know or the call failed."""
+
+    start: str | None = None
+    call: SkipValidation[LLMCall]

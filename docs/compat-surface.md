@@ -115,7 +115,7 @@ Pydantic 모델로 바꿔 단계 `schemas.py`로 옮기고 옛 경로는 이름�
 
 ## 단계 노드 — 순수 단계 (T1-28 S3a)
 
-`StatPipeline.ask`의 순수 단계를 단계 폴더 `node.py`의 `step_<name>(inp, res: StatResources) -> Out`으로 옮겼다(LangGraph 없음, `ask`가 같은 순서로 부르는 수동 라우터). In/Out은 각 단계 `schemas.py`의 `BoundaryModel`(strict, extra 금지, 컨테이너는 같은 객체 보관). 표·색인은 In이 아니라 `StatResources`로 받는다. LLM 단계(`plan_fill_llm plan_write_llm event_lookup compose_llm fallback`)는 S3b까지 `pipeline.py`에 그대로. `tests/test_nodes_pure.py`.
+`StatPipeline.ask`의 순수 단계를 단계 폴더 `node.py`의 `step_<name>(inp, res: StatResources) -> Out`으로 옮겼다(LangGraph 없음, `ask`가 같은 순서로 부르는 수동 라우터). In/Out은 각 단계 `schemas.py`의 `BoundaryModel`(strict, extra 금지, 컨테이너는 같은 객체 보관). 표·색인은 In이 아니라 `StatResources`로 받는다. LLM 단계(`plan_fill_llm plan_write_llm event_lookup compose_llm fallback`)는 S3b에서 옮김(아래). `tests/test_nodes_pure.py`.
 
 | 단계 함수 | In → Out | route |
 |---|---|---|
@@ -146,6 +146,35 @@ Pydantic 모델로 바꿔 단계 `schemas.py`로 옮기고 옛 경로는 이름�
 | `kosis_chat.chart.grid` (`Grid`, `grid`) · `kosis_chat.render.table` (`table_part`) | `kosis_chat.answer.table` |
 | `kosis_chat.render.text` (`render_parts default_sentence final_text` + 공용 재export) | `kosis_chat.answer.render` |
 | `kosis_chat.render.source` (`to_source org_id_from_table_path _ORG_FILE _kosis_host`) | `kosis_chat.contract` (나머지 `strip_model_source render_text to_stat_answer`는 contract에 그대로) |
+
+## 단계 노드 — LLM 단계 (T1-28 S3b)
+
+모델을 부르는 단계도 `step_<name>(inp, res, *, llm: ModelAccess) -> Out`이다. 클라이언트는 `StatResources`에 없고(표마다 frozen, run_eval이 클라이언트를 바꿔 끼움) `kosis_chat.llm.calls.ModelAccess(client, model_name, retry_interval, max_input_tokens)`가 소유자(`StatPipeline`)의 `client` property를 **첫 호출 때** 읽는다(키 없는 hcx면 그때 `LLMKeyMissing`, S2c 그대로). 각 모델 단계는 한 일을 `LLMCall` 기록(`kosis_chat.schemas.state`)과 자기가 쓴 `decision_metadata` 항목(`meta`, 쓴 순서)으로 돌려주고, `ask`가 받은 순서대로 붙인다. In의 `called`는 "이 질문에 이미 모델 답이 왔음"(그러면 호출 전 `retry_interval` 대기, 옛 `_Calls.raw` 검사). `tests/test_nodes_llm.py`.
+
+| 단계 함수 | In → Out | route · 호출 상한 |
+|---|---|---|
+| `kosis_chat.analyze.node.step_plan_fill_llm(inp, res, *, llm, build=build_plan)` | `PlanFillIn(rule, unresolved, called)` → `PlanFillOut(plan, built, calls, meta, route)` | `built` / `unplaced` · 2 (`analyze.llm_fill`, `analyze.llm_fill_retry`) |
+| `kosis_chat.analyze.node.step_plan_write_llm(inp, res, *, llm)` | `PlanWriteIn(question, rule, called)` → `PlanWriteOut(placed, clarify, calls, meta, route)` | `placed` / `clarify` / `failed` · 계획 2 (`analyze.llm_plan`, `analyze.llm_plan_retry`) + 사건 n |
+| `kosis_chat.analyze.node.step_event_lookup(inp, res, *, llm)` | `EventLookupIn(name, called)` → `EventLookupOut(start, call)` | plan_write_llm 안의 콜백(계산 중 호출), 질문당 사건마다 1 |
+| `kosis_chat.compose.node.step_compose_llm(inp, res, *, llm)` | `ComposeLLMIn(question, computed, cautions, context_ids, attempt, problems, prompt, called)` → `ComposeLLMOut(parts, prompt, call, meta, route)` | `verify` / `template` · `ask`의 compose↔verify 루프가 `COMPOSE_MAX_ATTEMPTS`(=2, `compose/schemas.py` 하나)번 |
+| `kosis_chat.legacy.fallback.step_fallback_chatbot(inp, res, *, chatbot, llm)` | `FallbackIn(question, golden_scope)` → `FallbackOut(answer, call)` | 챗봇 자체 2(답 + 형식 재시도). `call.summed=False`(챗봇 Answer가 자기 호출을 보고) |
+
+- 기록 → 출력: `kosis_chat.graph.spans.spans_of(records, t0)`가 옛 `_Calls.span`과 같은 dict(이름·`start_ms`·`duration_ms`·status·attributes, `gen_ai.*`가 먼저, None 제외, 기록 순서). `kosis_chat.graph.legacy.to_answer(...)`·`fallback_answer(...)`가 옛 `_done`·fallback 합치기와 같은 `chatbot.Answer`(합계는 `totals_of`: 옛 `_Calls.add` 순서). `DECISION_KEYS`(29개, `spans` 제외)가 stat 답이 스스로 쓰는 키 집합(테스트 고정).
+- `graph/legacy.py`는 옛 경로 `kosis_chat.chatbot`(Answer·judge_record)을 import한다: S6에서 챗봇이 legacy/로 갈 때까지 `tests/test_layout.py` `OLD_PATH_EXCEPTIONS`의 유일한 예외.
+- `kosis_chat.pipeline`에 남긴 이름: `VERSION`(= `kosis_chat.llm.compose.VERSION`, 같은 객체), `FALLBACK_PROMPT`(legacy/fallback.py), `add_usage`(graph/legacy.py), `_llm_attributes`(graph/spans.py `llm_attributes`). 없앤 것: `_Calls`, `StatPipeline._ask_model _place _fill _build _written _lookup`(Phase 1·eval·Phase 2 grep 0건).
+
+옮긴 모듈(같은 객체 재export, `test_moved_names_are_the_same_objects`):
+
+| 새 위치 | 옛 경로(재export) |
+|---|---|
+| `kosis_chat.analyze.fill` | `kosis_chat.llm.analyze_fill` |
+| `kosis_chat.analyze.write` (place 포함; `build`는 이제 `analyze.blocks` 모듈) | `kosis_chat.llm.analyze_plan` (`build`는 옛날엔 `kosis_chat.compute.build` shim 모듈, 함수는 같은 객체) |
+| `kosis_chat.analyze.event_lookup` | `kosis_chat.llm.event_lookup` |
+| `kosis_chat.compose.compose` | `kosis_chat.llm.compose` (`VERSION` 유지: `pipeline.VERSION`·Phase 2 `scripts/stat_baseline.py:53`) |
+
+프롬프트(D15): `kosis_chat/analyze/prompts/{analyze-fill-v2,analyze-fill-v2-retry,analyze-plan-v1,analyze-plan-v1-examples,analyze-plan-v1-retry,event-lookup-v1}.md`, `kosis_chat/compose/prompts/{compose-v2,compose-v2-example,compose-v2-retry}.md`. 각 패키지 `prompts.py`의 `load(file)`(`importlib.resources` + `functools.cache`, 파일 끝 줄바꿈 하나 제거), `version(file)`(= 파일 이름에서 `.md` 뺀 것). 모듈 상수 `SYSTEM_PROMPT RETRY EXAMPLES EXAMPLE VERSION`은 import 때 읽은 값으로 그대로 있다. `pyproject.toml` package-data(`prompts/*.md`)로 wheel·`pip install -e`·PYTHONPATH 모두 같은 파일. `tests/test_prompts.py`가 옛 상수와 글자 단위 동일을 확인(이동 PR 전용, 이후 삭제).
+
+**monkeypatch 주의(S3a·S3b 공통).** 옛 경로 shim은 이름을 복사해 둔 것이라, 옛 경로 모듈의 **속성을 다시 묶는** monkeypatch(`monkeypatch.setattr(kosis_chat.llm.compose, "SYSTEM_PROMPT", ...)`, `kosis_chat.compute.analyze.build_plan = ...` 등)는 새 모듈과 그 이름을 쓰는 코드에 닿지 않는다. 바꾸려면 새 위치(`kosis_chat.compose.compose` 등)를 패치하거나, 단계 함수의 키워드 인자(`build=`, `llm=`)로 넘긴다. 예외: `kosis_chat.pipeline.build_plan`은 `ask`가 부를 때마다 읽어 `step_plan_rules`·`step_plan_fill_llm`에 넘기므로 패치가 그대로 통한다(`tests/test_analyze_plan.py`). `write.place()`가 부르는 `written`도 이제 `kosis_chat.analyze.blocks`에서 찾으므로 `kosis_chat.compute.build.written` 패치는 닿지 않는다(현재 쓰는 곳 없음). 같은 객체를 **안에서 바꾸는** 패치(`setattr(SomeClass, ...)`, `time.sleep`)는 양쪽에 다 보인다.
 
 ## 반환 객체에서 읽는 속성
 

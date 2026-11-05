@@ -20,8 +20,14 @@ STAGES = ("prepare", "judge", "analyze", "compute", "compose", "chart", "render"
 # (importer, imported) pairs allowed against the order, with the reason.
 STAGE_EXCEPTIONS = {
     # D12 (a): analyze_plan.place runs the model's plan through compute to report problems back to the model
-    # (kosis_chat/llm/analyze_plan.py:224). Kept as is in the first refactor; the analyze package will import compute.
+    # (kosis_chat/analyze/write.py place(), moved from llm/analyze_plan.py in S3b). Kept as is in the first refactor.
     ("analyze", "compute"),
+}
+# (file, old path) pairs allowed against the "no old paths in new code" rule, with the reason.
+OLD_PATH_EXCEPTIONS = {
+    # T1-28 S3b: graph/legacy.py builds the legacy chatbot.Answer (to_answer); Answer stays in kosis_chat/chatbot.py
+    # until S6 moves the chatbot to legacy/.
+    ("kosis_chat/graph/legacy.py", "kosis_chat.chatbot"),
 }
 NEW_PACKAGES = ("schemas", "graph", "shared", "prepare", "analyze", "compose", "chart", "render", "adapters", "legacy")
 # Old module paths that new code must not import (they become re-export shims as files move).
@@ -101,7 +107,8 @@ def test_import_rules(path: Path):
     if top == "shared":
         problems += [n for n in names if _hits(n, tuple(f"kosis_chat.{s}" for s in (*STAGES, "api", "pipeline")))]
     if top in NEW_PACKAGES and top != "legacy":
-        problems += [n for n in names if _hits(n, OLD_PATHS)]
+        allowed = tuple(old for file, old in OLD_PATH_EXCEPTIONS if file == rel)
+        problems += [n for n in names if _hits(n, OLD_PATHS) and not _hits(n, allowed)]
         if top != "graph" and top != "adapters":
             problems += [n for n in names if _hits(n, ("kosis_chat.adapters",))]
     stage = _stage_of(path)

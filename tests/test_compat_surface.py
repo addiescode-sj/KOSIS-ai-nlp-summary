@@ -137,9 +137,40 @@ SURFACE: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("kosis_chat.compute.roles", ("pick_of", "reference_index")),
     ("kosis_chat.judge.messages", ("STOCK_OVER_TIME", "CLARIFY_LABEL", "CLARIFY_ITEM", "CLARIFY_COMPARE", "COMPARE_OPTIONS")),
     ("kosis_chat.pipeline", ("_causal_note",)),
+    # T1-28 S3b: the model steps (node.py, legacy/fallback.py), their records, spans and legacy Answer; the LLM step
+    # modules moved into analyze/ and compose/ with their prompts as .md files
+    ("kosis_chat.analyze.node", ("step_plan_fill_llm", "step_plan_write_llm", "step_event_lookup")),
+    ("kosis_chat.analyze.schemas", ("PlanFillIn", "PlanFillOut", "PlanWriteIn", "PlanWriteOut", "EventLookupIn",
+                                    "EventLookupOut")),
+    ("kosis_chat.compose.node", ("step_compose_llm",)),
+    ("kosis_chat.compose.schemas", ("ComposeLLMIn", "ComposeLLMOut")),
+    ("kosis_chat.legacy.fallback", ("step_fallback_chatbot", "FallbackIn", "FallbackOut", "FALLBACK_PROMPT")),
+    ("kosis_chat.schemas.state", ("LLMCall", "StepSpan", "Record", "called_before")),
+    ("kosis_chat.llm.calls", ("ModelAccess",)),
+    ("kosis_chat.graph.spans", ("spans_of", "span_of", "step_span", "llm_attributes", "SPAN_NAMES")),
+    ("kosis_chat.graph.legacy", ("to_answer", "fallback_answer", "totals_of", "add_usage", "DECISION_KEYS")),
+    ("kosis_chat.analyze.prompts", ("load", "version", "FILL", "PLAN", "EVENT_LOOKUP")),
+    ("kosis_chat.compose.prompts", ("load", "version", "COMPOSE")),
+    ("kosis_chat.analyze.fill", ("AnalyzeFill", "apply", "user_prompt", "retry_prompt", "resolve_code", "menu",
+                                 "asked_axes", "MENU_LIMIT", "VERSION", "SYSTEM_PROMPT", "RETRY", "_move", "_menu_codes")),
+    ("kosis_chat.analyze.write", ("place", "normalized", "query_plan", "user_prompt", "retry_prompt", "menu", "Placed",
+                                  "VERSION", "SYSTEM_PROMPT", "EXAMPLES", "RETRY", "FN_WORDS", "PERIODS_SHOWN",
+                                  "_periods_line", "_missing_periods", "_select", "_codes", "_read")),
+    ("kosis_chat.analyze.event_lookup", ("EventStart", "user_prompt", "VERSION", "SYSTEM_PROMPT", "FIRST_YEAR", "_START")),
+    ("kosis_chat.compose.compose", ("ComposeOutput", "user_prompt", "retry_prompt", "to_parts", "fact_line", "VERSION",
+                                    "SYSTEM_PROMPT", "EXAMPLE", "RETRY", "_PLACEHOLDER")),
+    # ... and the old paths keep every name
+    ("kosis_chat.llm.compose", ("VERSION", "SYSTEM_PROMPT", "EXAMPLE", "RETRY", "user_prompt", "retry_prompt", "to_parts",
+                                "fact_line", "_PLACEHOLDER")),
+    ("kosis_chat.llm.analyze_fill", ("AnalyzeFill", "apply", "user_prompt", "retry_prompt", "resolve_code", "MENU_LIMIT",
+                                     "VERSION", "SYSTEM_PROMPT", "RETRY")),
+    ("kosis_chat.llm.analyze_plan", ("place", "user_prompt", "retry_prompt", "VERSION", "SYSTEM_PROMPT", "EXAMPLES",
+                                     "RETRY", "build", "_read")),
+    ("kosis_chat.llm.event_lookup", ("EventStart", "user_prompt", "VERSION", "SYSTEM_PROMPT")),
+    ("kosis_chat.pipeline", ("add_usage", "FALLBACK_PROMPT", "_llm_attributes")),
 )
 
-# T1-28 S3a moves: (old module, new module); every public and private name of the new module the old one lists is the
+# T1-28 S3a/S3b moves: (old module, new module); every public and private name of the new module the old one lists is the
 # same object at both paths (the old module is a name-by-name re-export).
 MOVED = (
     ("kosis_chat.judge.answerability", "kosis_chat.judge.rules"),
@@ -152,6 +183,11 @@ MOVED = (
     ("kosis_chat.answer.template", "kosis_chat.compose.template"),
     ("kosis_chat.answer.render", "kosis_chat.render.text"),
     ("kosis_chat.answer.chart", "kosis_chat.chart.builders"),
+    # T1-28 S3b
+    ("kosis_chat.llm.analyze_fill", "kosis_chat.analyze.fill"),
+    ("kosis_chat.llm.analyze_plan", "kosis_chat.analyze.write"),
+    ("kosis_chat.llm.event_lookup", "kosis_chat.analyze.event_lookup"),
+    ("kosis_chat.llm.compose", "kosis_chat.compose.compose"),
 )
 
 # Callables whose parameters callers pass by name or position: (module, name, parameter names in order).
@@ -194,6 +230,18 @@ SIGNATURES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("kosis_chat.chart.node", "step_chart", ("inp", "res")),
     ("kosis_chat.render.node", "step_render", ("inp", "res")),
     ("kosis_chat.render.node", "step_answer_final", ("inp", "res")),
+    # T1-28 S3b: the model steps take the model as a keyword (llm=ModelAccess)
+    ("kosis_chat.analyze.node", "step_plan_fill_llm", ("inp", "res", "llm", "build")),
+    ("kosis_chat.analyze.node", "step_plan_write_llm", ("inp", "res", "llm")),
+    ("kosis_chat.analyze.node", "step_event_lookup", ("inp", "res", "llm")),
+    ("kosis_chat.compose.node", "step_compose_llm", ("inp", "res", "llm")),
+    ("kosis_chat.legacy.fallback", "step_fallback_chatbot", ("inp", "res", "chatbot", "llm")),
+    ("kosis_chat.llm.analyze_plan", "place", ("question", "plan", "table", "index", "lookup")),
+    ("kosis_chat.llm.analyze_plan", "user_prompt", ("question", "index", "rule")),
+    ("kosis_chat.llm.analyze_fill", "apply", ("plan", "fill", "index")),
+    ("kosis_chat.llm.analyze_fill", "user_prompt", ("question", "index", "plan")),
+    ("kosis_chat.llm.compose", "user_prompt", ("question", "computed", "cautions", "context_ids")),
+    ("kosis_chat.llm.compose", "to_parts", ("answer", "computed")),
     ("kosis_chat.judge.answerability", "judge", ("question", "table", "index")),
     ("kosis_chat.compute.analyze", "rule_plan", ("question", "index", "default_applied")),
     ("kosis_chat.compute.analyze", "build_plan", ("plan", "index", "table")),
@@ -206,6 +254,11 @@ SIGNATURES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
 )
 KEYWORD_ONLY = {("kosis_chat.api", "summarize_stat"): {"settings", "client", "retry_interval", "llm"},
                 ("kosis_chat.analyze.node", "step_plan_rules"): {"build"},
+                ("kosis_chat.analyze.node", "step_plan_fill_llm"): {"llm", "build"},
+                ("kosis_chat.analyze.node", "step_plan_write_llm"): {"llm"},
+                ("kosis_chat.analyze.node", "step_event_lookup"): {"llm"},
+                ("kosis_chat.compose.node", "step_compose_llm"): {"llm"},
+                ("kosis_chat.legacy.fallback", "step_fallback_chatbot"): {"chatbot", "llm"},
                 ("kosis_chat.contract", "to_stat_answer"): {"org_id"},
                 ("kosis_chat.llm.model", "HCXClient"): {"settings"}}
 

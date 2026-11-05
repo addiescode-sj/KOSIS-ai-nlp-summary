@@ -48,6 +48,8 @@ package-dir = { "kosis_ai" = "src/kosis_ai" }
 
 [tool.setuptools.package-data]
 "kosis_chat.shared" = ["*.json"]  # events.json (moved from kosis_chat/data in T1-28 S2)
+"kosis_chat.analyze" = ["prompts/*.md"]  # the analyze prompts (T1-28 S3b, D15), read with importlib.resources
+"kosis_chat.compose" = ["prompts/*.md"]  # compose-v2
 
 [tool.pytest.ini_options]
 # Was pytest.ini (removed in T1-28 S1a; pytest.ini would win over this table if both existed).
