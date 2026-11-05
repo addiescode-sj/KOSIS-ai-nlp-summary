@@ -93,6 +93,65 @@ SURFACE: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("kosis_chat.llm.providers", ("PROVIDERS", "register_provider", "build_client", "LLMKeyMissing")),
     ("kosis_chat.llm.model", ("BACKENDS", "TraceWriteError")),
     ("kosis_chat.config", ("PROJECT_ROOT", "settings_from_llm", "env_llm_config")),
+    # T1-28 S3a: the pure stage steps (node.py) with their In/Out models, and the modules moved into the stage folders
+    ("kosis_chat.judge.node", ("step_judge",)),
+    ("kosis_chat.judge.schemas", ("JudgeIn", "JudgeOut")),
+    ("kosis_chat.analyze.node", ("step_plan_rules",)),
+    ("kosis_chat.analyze.schemas", ("PlanRulesIn", "PlanRulesOut")),
+    ("kosis_chat.compute.node", ("step_compute",)),
+    ("kosis_chat.compute.schemas", ("ComputeIn", "ComputeOut")),
+    ("kosis_chat.compose.node", ("step_caveats", "step_verify", "step_template")),
+    ("kosis_chat.compose.schemas", ("CaveatsIn", "CaveatsOut", "VerifyIn", "VerifyOut", "TemplateIn", "TemplateOut",
+                                    "COMPOSE_MAX_ATTEMPTS", "ComposeOutput")),
+    ("kosis_chat.chart.node", ("step_chart",)),
+    ("kosis_chat.chart.schemas", ("ChartIn", "ChartOut")),
+    ("kosis_chat.render.node", ("step_render", "step_answer_final", "causal_note")),
+    ("kosis_chat.render.schemas", ("RenderIn", "AnswerFinalIn", "RenderOut")),
+    ("kosis_chat.judge.rules", ("judge", "resolve", "refuse", "Verdict", "Resolved", "defaults", "_period_text",
+                                "_range_text", "_UNIT_SUFFIX", "RECENT_POINTS")),
+    ("kosis_chat.judge.texts", ("REFUSAL_MESSAGES", "refusal_message", "default_note", "josa", "with_josa", "STOCK_OVER_TIME",
+                                "CLARIFY_LABEL", "CLARIFY_ITEM", "CLARIFY_COMPARE", "COMPARE_OPTIONS", "_default_text")),
+    ("kosis_chat.analyze.rules", ("rule_plan", "build_plan", "to_query", "Plan", "Unresolved", "PERIOD_AXIS", "_LATEST",
+                                  "_RECENT", "_PREVIOUS", "_lookup", "_Lookup")),
+    ("kosis_chat.analyze.blocks", ("Built", "TermSteps", "Pattern", "Agg", "AGG_WORDS", "value", "trend", "compare", "share",
+                                   "extreme", "over_periods", "written")),
+    ("kosis_chat.analyze.roles", ("is_province", "pick_of", "reference_index", "_PROVINCE")),
+    ("kosis_chat.compose.caveats", ("caveats_of", "_EVENT_MODEL", "_PREFIX", "_from_caution")),
+    ("kosis_chat.compose.verify", ("verify", "label_digits", "allowed_numbers", "NUMBER")),
+    ("kosis_chat.compose.template", ("template_parts", "_DERIVED_IDS", "_TEMPLATES")),
+    ("kosis_chat.chart.builders", ("chart_spec", "GRID_PATTERNS", "GROUPED_MAX_PERIODS", "_CHARTS", "_grid")),
+    ("kosis_chat.chart.vega", ("SCHEMA", "HIGHLIGHT", "OTHER", "WIDTH", "_base", "_bars", "_timeline", "_row")),
+    ("kosis_chat.chart.grid", ("Grid", "grid")),
+    ("kosis_chat.render.text", ("render_parts", "final_text", "default_sentence")),
+    ("kosis_chat.render.table", ("table_part",)),
+    ("kosis_chat.render.source", ("to_source", "org_id_from_table_path", "_ORG_FILE", "_kosis_host")),
+    # ... and the old paths keep every name (tests, eval and Phase 2 import them there)
+    ("kosis_chat.answer.chart", ("chart_spec", "GRID_PATTERNS", "GROUPED_MAX_PERIODS", "SCHEMA", "HIGHLIGHT", "OTHER",
+                                 "WIDTH", "_CHARTS", "_grid", "_bars", "_base", "_row", "_timeline", "_common", "_differing")),
+    ("kosis_chat.answer.table", ("Grid", "grid", "table_part")),
+    ("kosis_chat.answer.caveats", ("caveats_of",)),
+    ("kosis_chat.answer.template", ("template_parts", "_TEMPLATES")),
+    ("kosis_chat.answer.verify", ("verify", "label_digits", "allowed_numbers")),
+    ("kosis_chat.compute.analyze", ("rule_plan", "build_plan", "to_query", "_lookup", "_Lookup")),
+    ("kosis_chat.compute.build", ("value", "trend", "compare", "share", "extreme", "over_periods", "written", "AGG_WORDS")),
+    ("kosis_chat.compute.roles", ("pick_of", "reference_index")),
+    ("kosis_chat.judge.messages", ("STOCK_OVER_TIME", "CLARIFY_LABEL", "CLARIFY_ITEM", "CLARIFY_COMPARE", "COMPARE_OPTIONS")),
+    ("kosis_chat.pipeline", ("_causal_note",)),
+)
+
+# T1-28 S3a moves: (old module, new module); every public and private name of the new module the old one lists is the
+# same object at both paths (the old module is a name-by-name re-export).
+MOVED = (
+    ("kosis_chat.judge.answerability", "kosis_chat.judge.rules"),
+    ("kosis_chat.judge.messages", "kosis_chat.judge.texts"),
+    ("kosis_chat.compute.analyze", "kosis_chat.analyze.rules"),
+    ("kosis_chat.compute.build", "kosis_chat.analyze.blocks"),
+    ("kosis_chat.compute.roles", "kosis_chat.analyze.roles"),
+    ("kosis_chat.answer.caveats", "kosis_chat.compose.caveats"),
+    ("kosis_chat.answer.verify", "kosis_chat.compose.verify"),
+    ("kosis_chat.answer.template", "kosis_chat.compose.template"),
+    ("kosis_chat.answer.render", "kosis_chat.render.text"),
+    ("kosis_chat.answer.chart", "kosis_chat.chart.builders"),
 )
 
 # Callables whose parameters callers pass by name or position: (module, name, parameter names in order).
@@ -125,8 +184,28 @@ SIGNATURES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("kosis_chat.answer.render", "default_sentence", ("applied",)),
     ("kosis_chat.answer.render", "final_text", ("body", "source", "applied", "notes")),
     ("eval.golden", "load_items", ("path",)),
+    # T1-28 S3a: step_<name>(In, StatResources) -> Out
+    ("kosis_chat.judge.node", "step_judge", ("inp", "res")),
+    ("kosis_chat.analyze.node", "step_plan_rules", ("inp", "res", "build")),
+    ("kosis_chat.compute.node", "step_compute", ("inp", "res")),
+    ("kosis_chat.compose.node", "step_caveats", ("inp", "res")),
+    ("kosis_chat.compose.node", "step_verify", ("inp", "res")),
+    ("kosis_chat.compose.node", "step_template", ("inp", "res")),
+    ("kosis_chat.chart.node", "step_chart", ("inp", "res")),
+    ("kosis_chat.render.node", "step_render", ("inp", "res")),
+    ("kosis_chat.render.node", "step_answer_final", ("inp", "res")),
+    ("kosis_chat.judge.answerability", "judge", ("question", "table", "index")),
+    ("kosis_chat.compute.analyze", "rule_plan", ("question", "index", "default_applied")),
+    ("kosis_chat.compute.analyze", "build_plan", ("plan", "index", "table")),
+    ("kosis_chat.compute.analyze", "to_query", ("plan", "index", "built")),
+    ("kosis_chat.answer.caveats", "caveats_of", ("computed", "table", "alternatives")),
+    ("kosis_chat.answer.chart", "chart_spec", ("kind", "computed")),
+    ("kosis_chat.answer.template", "template_parts", ("kind", "computed")),
+    ("kosis_chat.answer.verify", "verify", ("parts", "computed")),
+    ("kosis_chat.contract", "to_source", ("meta", "org_id")),
 )
 KEYWORD_ONLY = {("kosis_chat.api", "summarize_stat"): {"settings", "client", "retry_interval", "llm"},
+                ("kosis_chat.analyze.node", "step_plan_rules"): {"build"},
                 ("kosis_chat.contract", "to_stat_answer"): {"org_id"},
                 ("kosis_chat.llm.model", "HCXClient"): {"settings"}}
 
@@ -145,6 +224,33 @@ def test_names_import(module: str, names: tuple[str, ...]):
     mod = importlib.import_module(module)
     missing = [n for n in names if not hasattr(mod, n)]
     assert not missing, f"{module} lost {missing}"
+
+
+@pytest.mark.parametrize("old,new", MOVED, ids=[o for o, _ in MOVED])
+def test_moved_names_are_the_same_objects(old: str, new: str):
+    old_mod, new_mod = importlib.import_module(old), importlib.import_module(new)
+    names = [n for n in vars(old_mod) if not (n.startswith("__") and n.endswith("__"))]
+    assert names, old
+    differ = [n for n in names if getattr(old_mod, n) is not getattr(new_mod, n, object())]
+    assert not differ, f"{old} names that are not {new}'s: {differ}"
+
+
+# Split moves: a name each (old module, name, new module).
+SPLIT_MOVES = (
+    ("kosis_chat.answer.table", "Grid", "kosis_chat.chart.grid"),
+    ("kosis_chat.answer.table", "grid", "kosis_chat.chart.grid"),
+    ("kosis_chat.answer.table", "table_part", "kosis_chat.render.table"),
+    ("kosis_chat.answer.chart", "_bars", "kosis_chat.chart.vega"),
+    ("kosis_chat.contract", "to_source", "kosis_chat.render.source"),
+    ("kosis_chat.contract", "org_id_from_table_path", "kosis_chat.render.source"),
+    ("kosis_chat.contract", "_ORG_FILE", "kosis_chat.render.source"),
+    ("kosis_chat.contract", "_kosis_host", "kosis_chat.render.source"),
+)
+
+
+@pytest.mark.parametrize("old,name,new", SPLIT_MOVES, ids=[f"{o}.{n}" for o, n, _ in SPLIT_MOVES])
+def test_split_moved_names_are_the_same_objects(old: str, name: str, new: str):
+    assert getattr(importlib.import_module(old), name) is getattr(importlib.import_module(new), name)
 
 
 @pytest.mark.parametrize("module,name,params", SIGNATURES, ids=[f"{m}.{n}" for m, n, _ in SIGNATURES])

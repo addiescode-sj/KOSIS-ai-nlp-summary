@@ -86,3 +86,25 @@ class Placed(BoundaryModel):
     computed: Any = None
     problems: SkipValidation[list[str]] = Field(default_factory=list)
     clarify: Any = None  # compute.resolve.NeedsClarify (an exception of the compute stage)
+
+
+# ---------------------------------------------------------------- analyze/node.py (T1-28 S3a)
+
+
+class PlanRulesIn(BoundaryModel):
+    """step_plan_rules's input: the question and the defaults the judge applied (Verdict.default_applied)."""
+
+    question: str
+    default_applied: SkipValidation[dict[str, str]] = Field(default_factory=dict)
+
+
+class PlanRulesOut(BoundaryModel):
+    """step_plan_rules's output: the rules' plan and, when the rules could place it, the built v3 plan.
+
+    route "built": built is set. route "unresolved": built is None and unresolved names what the rules could not
+    decide (Unresolved.what), for the model's fill (plan_fill_llm)."""
+
+    rule: SkipValidation[Plan]
+    built: SkipValidation[Built | None] = None
+    unresolved: SkipValidation[list[str] | None] = None
+    route: Literal["built", "unresolved"]

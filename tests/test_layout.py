@@ -27,7 +27,7 @@ NEW_PACKAGES = ("schemas", "graph", "shared", "prepare", "analyze", "compose", "
 # Old module paths that new code must not import (they become re-export shims as files move).
 OLD_PATHS = ("kosis_chat.data", "kosis_chat.answer", "kosis_chat.contract", "kosis_chat.chatbot", "kosis_chat.raw",
              "kosis_chat.llm.compose", "kosis_chat.llm.analyze_fill", "kosis_chat.llm.analyze_plan",
-             "kosis_chat.llm.event_lookup", "kosis_chat.compute.analyze", "kosis_chat.compute.build",
+             "kosis_chat.llm.event_lookup", "kosis_chat.compute.analyze", "kosis_chat.compute.build", "kosis_chat.compute.roles",
              "kosis_chat.judge.answerability", "kosis_chat.judge.messages")
 # pandas / pyarrow: kosis_ai.normalize, and where T1-28 S2 moved the loader's use (adapters, prepare, schemas/io).
 FRAME_LIBS = ("pandas", "pyarrow")

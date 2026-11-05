@@ -113,6 +113,40 @@ Pydantic 모델로 바꿔 단계 `schemas.py`로 옮기고 옛 경로는 이름�
 | `kosis_chat.pipeline` | `StatPipeline(..., llm=None)`, `.llm` | 클라이언트는 LLM 단계가 처음 쓸 때 만든다(`client` property). 규칙만으로 끝나는 거절·되묻기는 키 없이 동작. `Chatbot`·`RawRunner`의 `client`도 같은 방식(property + setter) |
 | `eval.run_eval` | `llm_config(settings)` | `--backend hcx`면 시작 시 셸 환경변수 `HCX_API_KEY`를 읽고 없으면 exit 2. mock은 키 불필요. `--config`는 경고 후 무시. `eval.judge`도 같은 함수 |
 
+## 단계 노드 — 순수 단계 (T1-28 S3a)
+
+`StatPipeline.ask`의 순수 단계를 단계 폴더 `node.py`의 `step_<name>(inp, res: StatResources) -> Out`으로 옮겼다(LangGraph 없음, `ask`가 같은 순서로 부르는 수동 라우터). In/Out은 각 단계 `schemas.py`의 `BoundaryModel`(strict, extra 금지, 컨테이너는 같은 객체 보관). 표·색인은 In이 아니라 `StatResources`로 받는다. LLM 단계(`plan_fill_llm plan_write_llm event_lookup compose_llm fallback`)는 S3b까지 `pipeline.py`에 그대로. `tests/test_nodes_pure.py`.
+
+| 단계 함수 | In → Out | route |
+|---|---|---|
+| `kosis_chat.judge.node.step_judge` | `JudgeIn(question)` → `JudgeOut(verdict, route)` | `final` / `plan` |
+| `kosis_chat.analyze.node.step_plan_rules(inp, res, *, build=build_plan)` | `PlanRulesIn(question, default_applied)` → `PlanRulesOut(rule, built, unresolved, route)` | `built` / `unresolved` |
+| `kosis_chat.compute.node.step_compute` | `ComputeIn(plan, built, default_applied, computed=None)` → `ComputeOut(query, built, alternatives, computed, refusal, route)` | `ok` / `refused` |
+| `kosis_chat.compose.node.step_caveats` | `CaveatsIn(computed, built, alternatives, default_applied)` → `CaveatsOut(context_ids, caveats, shown)` | — |
+| `kosis_chat.compose.node.step_verify` | `VerifyIn(parts, computed, attempt)` → `VerifyOut(problems, route)` | `ok` / `retry` / `template` (`COMPOSE_MAX_ATTEMPTS = 2`) |
+| `kosis_chat.compose.node.step_template` | `TemplateIn(type, computed)` → `TemplateOut(parts, problems, verified)` | — |
+| `kosis_chat.chart.node.step_chart` | `ChartIn(type, computed)` → `ChartOut(chart)` (`kosis_ai.schemas.Chart`, S5에서 ChartSpec) | — |
+| `kosis_chat.render.node.step_render` | `RenderIn(question, query, computed, parts, verified, source, default_applied, caveats, shown, context_ids, chart)` → `RenderOut(stat)` | — |
+| `kosis_chat.render.node.step_answer_final` | `AnswerFinalIn(kind, question, verdict \| refusal+query+source \| clarify)` → `RenderOut(stat)` | kind `verdict` / `refused` / `clarify` |
+
+- `step_plan_rules`의 키워드 전용 `build`: `StatPipeline`이 자기 모듈의 `build_plan`을 넘긴다(`tests/test_analyze_plan.py`가 `pipeline.build_plan`을 바꿔 모델 경로를 강제하므로). 그래프의 노드 교체(E4)도 같은 자리.
+- span 이름·속성 키, `decision_metadata` 키, 재시도 횟수, 거절 문구는 그대로(mock 90문항 패리티 identical). `pipeline._causal_note`는 `render.node.causal_note`와 같은 함수.
+
+옮긴 모듈(옛 경로는 옛 모듈의 모든 최상위 이름을 하나씩 재export, 같은 객체 — `test_moved_names_are_the_same_objects`):
+
+| 새 위치 | 옛 경로(재export) |
+|---|---|
+| `kosis_chat.judge.rules` | `kosis_chat.judge.answerability` |
+| `kosis_chat.judge.texts` | `kosis_chat.judge.messages` |
+| `kosis_chat.analyze.rules` (rule_plan·build_plan·to_query 한 파일, rules/place 분할은 뒤로) | `kosis_chat.compute.analyze` |
+| `kosis_chat.analyze.blocks` | `kosis_chat.compute.build` (`kosis_chat.compute.build` 모듈 객체 그대로: `from kosis_chat.compute import build`) |
+| `kosis_chat.analyze.roles` | `kosis_chat.compute.roles` |
+| `kosis_chat.compose.caveats` · `compose.verify` · `compose.template` | `kosis_chat.answer.caveats` · `answer.verify` · `answer.template` |
+| `kosis_chat.chart.builders` (+ `chart.vega`: `SCHEMA HIGHLIGHT OTHER WIDTH _unit_title _base _color _tooltip _bars _row _timeline`) | `kosis_chat.answer.chart` |
+| `kosis_chat.chart.grid` (`Grid`, `grid`) · `kosis_chat.render.table` (`table_part`) | `kosis_chat.answer.table` |
+| `kosis_chat.render.text` (`render_parts default_sentence final_text` + 공용 재export) | `kosis_chat.answer.render` |
+| `kosis_chat.render.source` (`to_source org_id_from_table_path _ORG_FILE _kosis_host`) | `kosis_chat.contract` (나머지 `strip_model_source render_text to_stat_answer`는 contract에 그대로) |
+
 ## 반환 객체에서 읽는 속성
 
 - `StatPipeline`: `ask(question, golden_scope=None)`, `client` (setter: `eval/run_eval.py:229`), `org_id table prompt_version system_prompt answer_model decision_metadata settings retry_interval`. T1-28 S2부터 `resources`(StatResources)와 `index`(= `resources.index`)도 있음. S2c부터 `llm`(주입한 LLMConfig 또는 None)이 있고, `client`는 처음 읽을 때 만든다(키 없는 hcx면 그때 `LLMKeyMissing`).

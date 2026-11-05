@@ -8,6 +8,8 @@ node boundary); since T1-28 S2 they live in prepare/index.py, re-exported by jud
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import ConfigDict, Field, SkipValidation
 
 from kosis_chat.shared.boundary import BoundaryModel
@@ -100,3 +102,20 @@ class Verdict(BoundaryModel):
 class Resolved(BoundaryModel):
     codes: SkipValidation[dict[str, set[str]]]  # axis -> codes the question names
     ambiguous: SkipValidation[list[tuple[str, list[str]]]]  # (label, options) for a label several parents share
+
+
+# ---------------------------------------------------------------- judge/node.py (T1-28 S3a)
+
+
+class JudgeIn(BoundaryModel):
+    """step_judge's input: the question as asked (the table and its index come from StatResources)."""
+
+    question: str
+
+
+class JudgeOut(BoundaryModel):
+    """step_judge's output. route: "final" when the verdict ends the question (a refusal or an ask-back by the rules),
+    else "plan" (the analysis plans what to compute, with verdict.default_applied)."""
+
+    verdict: SkipValidation[Verdict]
+    route: Literal["final", "plan"]

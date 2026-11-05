@@ -9,14 +9,14 @@ Mapped PlanRun) and engine._Read stay dataclasses: they never leave the stage.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import ConfigDict, Field, SkipValidation
 
-from kosis_chat.analyze.schemas import Pattern
+from kosis_chat.analyze.schemas import Built, Pattern, Plan
 from kosis_chat.shared.boundary import BoundaryModel
 
-from kosis_ai.schemas import StatResult  # isort: skip
+from kosis_ai.schemas import Refusal, StatQuery, StatResult  # isort: skip
 
 # ---------------------------------------------------------------- compute/engine.py
 
@@ -70,3 +70,28 @@ class Alternatives(BoundaryModel):
 class Resolved(BoundaryModel):
     cells: SkipValidation[list[str]]
     cautions: SkipValidation[list[str]] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------- compute/node.py (T1-28 S3a)
+
+
+class ComputeIn(BoundaryModel):
+    """step_compute's input: the plan to compute, the defaults the judge applied, and the facts when the model's own
+    plan (plan_write_llm) computed them already (then only the query is made and nothing is recomputed)."""
+
+    plan: SkipValidation[Plan]
+    built: SkipValidation[Built]
+    default_applied: SkipValidation[dict[str, str]] = Field(default_factory=dict)
+    computed: SkipValidation[Computed | None] = None
+
+
+class ComputeOut(BoundaryModel):
+    """step_compute's output. route "ok": computed is set. route "refused": the table cannot answer it (CalcRefused),
+    refusal holds its reason and message. built carries the other scenarios as context (with_alternatives)."""
+
+    query: SkipValidation[StatQuery]
+    built: SkipValidation[Built]
+    alternatives: SkipValidation[list[Alternatives]] = Field(default_factory=list)
+    computed: SkipValidation[Computed | None] = None
+    refusal: SkipValidation[Refusal | None] = None
+    route: Literal["ok", "refused"]
