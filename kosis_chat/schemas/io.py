@@ -1,22 +1,24 @@
-"""Module input (plans/T1-28.md "입출력 계약"): a loaded Parquet table and the question. T1-28 S2, not yet the entry point.
+"""Module input and output (plans/T1-28.md "입출력 계약"): a loaded Parquet table and the question in, the answer, its
+chart and spans out. T1-28 S2 (input), S5 (StatOutput, StatOptions; the entry point is kosis_chat.api.StatModule).
 
 ParquetTable is a table already read (all or part of its rows), not a file path: the module never opens files
 (kosis_chat/adapters/parquet.py does). Only the column contract is checked here (the columns prepare reads, at least
 one row, one tbl_id on every row, info.tbl_id = that tbl_id); the rows themselves are checked by prepare (kosis_chat/prepare/node.py).
-StatOutput, StatOptions and ChartSpec come with the entry point (T1-28 S5).
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from pathlib import Path
 from typing import Literal
 
 import pandas as pd
 import pyarrow as pa
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
-from kosis_chat.prepare.convert import PARQUET_COLUMNS
+from kosis_chat.prepare.convert import PARQUET_COLUMNS, tbl_id_counts
 
-from kosis_ai.schemas import TableInfo  # isort: skip
+from kosis_ai.schemas import ChartSpec, StatAnswer, TableInfo  # isort: skip
 
 
 def _columns(frame: pa.Table | pd.DataFrame) -> list[str]:
@@ -24,10 +26,8 @@ def _columns(frame: pa.Table | pd.DataFrame) -> list[str]:
 
 
 def _tbl_ids(frame: pa.Table | pd.DataFrame) -> tuple[set, int]:
-    """(the distinct tbl_id values, the number of rows without one: None, NaN or blank)."""
-    values = frame.column("tbl_id").to_pylist() if isinstance(frame, pa.Table) else frame["tbl_id"].tolist()
-    present = [v for v in values if v is not None and v == v and str(v).strip()]  # v == v drops NaN
-    return set(present), len(values) - len(present)
+    """(the distinct tbl_id values, the number of rows without one: None, NaN or blank), by pyarrow.compute."""
+    return tbl_id_counts(frame)
 
 
 class ParquetTable(BaseModel):
@@ -79,3 +79,43 @@ class StatInput(BaseModel):
     schema_version: Literal["1"] = "1"  # E2: a change that breaks a field raises the version
     question: str = Field(min_length=1)
     tables: list[ParquetTable] = Field(min_length=1, max_length=1)
+
+
+class StatOptions(BaseModel):
+    """How StatModule runs (E3). The defaults are the pipeline's behaviour; only retry_interval, node_overrides and
+    catalog_path can differ today (the other fields are the knobs' places: StatModule refuses another value until the
+    pipeline reads them)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", arbitrary_types_allowed=True)
+
+    retry_interval: float = Field(default=0.0, ge=0)  # seconds before a second model call for one question (HCX 429)
+    compose_max_attempts: int = 2
+    fill_retry: bool = True
+    plan_retry: bool = True
+    use_fallback_chatbot: bool = True  # S6 decides the plan-failure answer (plans/T1-28.md S6 (b))
+    prompt_versions: dict[str, str] = Field(default_factory=dict)  # empty: each stage's prompts.py default
+    node_overrides: dict[str, Callable] = Field(default_factory=dict, exclude=True)  # E4: node name -> step
+    catalog_path: Path | None = None  # tables.csv for tables without info; None: kosis_ai.paths.data_dir()/tables.csv
+
+
+class StatOutput(BaseModel):
+    """What StatModule.answer returns: the shared StatAnswer (no chart field since T1-28 S5), the chart as data (Phase 3
+    make_chart input; Vega-Lite by kosis_chat.chart.vega.to_vega) and the spans (decision_metadata["spans"] shape, D7)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["1"] = "1"
+    answer: StatAnswer
+    chart: ChartSpec | None = None
+    spans: list[dict] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _chart_of_the_answer(self) -> StatOutput:
+        # The rule StatAnswer kept for its chart before T1-28 S5, now between the two fields.
+        if self.chart is not None:
+            if self.answer.outcome != "answered" or self.answer.numbers_origin != "code":
+                raise ValueError("a chart belongs to an answered answer whose numbers code computed")
+            unknown = [i for i in self.chart.fact_ids if self.answer.result.get(i) is None]
+            if unknown:
+                raise ValueError(f"chart.fact_ids reference unknown facts: {unknown}")
+        return self

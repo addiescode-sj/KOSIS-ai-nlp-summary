@@ -25,6 +25,21 @@ results.jsonl files without these checks.
 (HTTP attempts) together with call_status, the number of format errors and the (name, status) list of the spans.
 Use it for mock runs, where attempts are deterministic; a change there means a retry count moved.
 
+--mode semantic (T1-28 S5 on, where StatAnswer.chart moved to results.jsonl `chart` as a ChartSpec): each row is first
+turned into the same form for both layouts (semantic_row): call status, outcome, route, the rules' judge record, the
+refusal (reason and message), ask-back options, the facts (id, source_ref, value, unit, period, derivation, round),
+the cited fact ids, default_applied, caveats, context facts, the table, numbers origin and verification, the text, and
+the chart (chart_points: kind, title, unit, fact ids, and every drawn point with its series, label, value, display,
+highlight, share, unit and the fact it shows). An old row's chart is read from stat_answer.chart (kind, Vega-Lite rows
+in spec.data.values, fact_ids); a new row's from the ChartSpec. Which fact a point shows is worked out the same way on
+both sides (the one charted fact with that value, else none), since the old layout did not record it; a new row's own
+point.fact_id must name a charted fact with the point's value (reported as "chart links"). Values compare as numbers
+(3 and 3.0 are equal). A bar chart also compares its orientation and name order, a line its points' periods. The new
+row's links are checked too (chart_points: a point's fact must be charted with the point's value and period, a point
+whose value and period only one charted fact has must name it, the chart's pattern is the plan's). The Vega-Lite of
+every chart (new vega_lite vs old spec) must be equal too (review 11/05: gated, "vega_lite: n/n"). --ignore paths
+name fields of this form (e.g. --ignore text for a model whose sentences may differ).
+
 A printed diff path can be passed back as --ignore: keys that contain dots or brackets are printed quoted, e.g.
 decision_metadata.spans[1].attributes["gen_ai.request.model"], and the --ignore grammar reads that form too.
 """
@@ -36,6 +51,7 @@ import json
 import logging
 import re
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -282,9 +298,9 @@ def compare_calls(base: dict[tuple[str, int], dict], run: dict[tuple[str, int], 
 
 
 def compare(base: dict[tuple[str, int], dict], run: dict[tuple[str, int], dict],
-            ignore: tuple[str, ...] = ()) -> dict:
+            ignore: tuple[str, ...] = (), volatile: tuple[str, ...] = VOLATILE_PATHS) -> dict:
     """Question-by-question parity of two runs -> {'identical', 'diffs', 'only_base', 'only_run', 'order_changed'}."""
-    patterns = [parse_path(p) for p in (*VOLATILE_PATHS, *ignore)]
+    patterns = [parse_path(p) for p in (*volatile, *ignore)]
     diffs = {}
     for key in base:
         if key in run:
@@ -296,6 +312,170 @@ def compare(base: dict[tuple[str, int], dict], run: dict[tuple[str, int], dict],
     order_changed = [k for k in base if k in run] != [k for k in run if k in base]
     return {"identical": not (diffs or only_base or only_run or order_changed), "diffs": diffs,
             "only_base": only_base, "only_run": only_run, "order_changed": order_changed}
+
+
+# ---------------------------------------------------------------- --mode semantic (T1-28 S5)
+
+GRID_KINDS = ("grouped_bar", "multi_line")  # charts with one series per target
+_UNIT_TITLE = re.compile(r"^값 \((.*)\)$")
+
+
+def _num(value: Any) -> Any:
+    """A number as a float (3 and 3.0 compare equal); anything else unchanged."""
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else value
+
+
+def _axis_unit(spec: dict) -> str | None:
+    """The unit an old Vega-Lite spec names in its value axis title ('값 (가구)'), or None."""
+    encodings = [spec.get("encoding") or {}] + [layer.get("encoding") or {} for layer in spec.get("layer") or []]
+    for encoding in encodings:
+        for channel in ("x", "y"):
+            title = (encoding.get(channel) or {}).get("title")
+            if isinstance(title, str) and (m := _UNIT_TITLE.match(title)):
+                return m.group(1)
+    return None
+
+
+def _old_points(spec: dict, kind: str | None) -> list[dict]:
+    rows = (spec.get("data") or {}).get("values") or []
+    return [{"series": r.get("대상"), "label": r.get("시점") if "대상" in r else r.get("이름"), "value": r.get("값"),
+             "display": r.get("표시"), "highlight": r.get("강조") == "예", "share_pct": r.get("비중"),
+             "period": r.get("시점") if kind == "line" else None} for r in rows]
+
+
+def _old_layout(spec: dict, kind: str | None) -> tuple[str | None, Any]:
+    """(orientation, sort) of an old bar chart: the name axis is y for horizontal bars, x for vertical ones."""
+    if kind != "bar":
+        return None, None
+    encoding = ((spec.get("layer") or [{}])[0]).get("encoding") or {}
+    if (encoding.get("y") or {}).get("field") == "이름":
+        return "horizontal", encoding["y"].get("sort")
+    return "vertical", (encoding.get("x") or {}).get("sort")
+
+
+def _inferred(point: dict, charted: list[dict]) -> dict | None:
+    """The one charted fact with the point's value, else None (the old layout did not record which fact a point is)."""
+    same = [f for f in charted if f.get("value") is not None and _num(f.get("value")) == _num(point["value"])]
+    return same[0] if len(same) == 1 else None
+
+
+def chart_points(row: dict) -> tuple[dict | None, list[str]]:
+    """(the row's chart in the common form, link problems of a new-layout chart) — see the module doc.
+
+    Link problems (new layout only): a point names a fact that is not charted, has another value or another period; a
+    point names no fact (or another one) although exactly one charted fact has its value and its period and no other
+    point shows that value; the chart's
+    pattern is not the plan's (decision_metadata.pattern)."""
+    stat = row.get("stat_answer") or {}
+    facts = {f.get("id"): f for f in (stat.get("result") or {}).get("facts") or []}
+    old, new, problems = stat.get("chart"), row.get("chart"), []
+    if isinstance(old, dict) and isinstance(old.get("spec"), dict):  # written before S5
+        kind, fact_ids, spec = old.get("kind"), list(old.get("fact_ids") or []), old["spec"]
+        title, points = spec.get("title"), _old_points(spec, kind)
+        orientation, sort = _old_layout(spec, kind)
+        unit = _axis_unit(spec)
+        if unit is None and kind == "pie" and len(fact_ids) >= 2 and fact_ids[-2] in facts:
+            unit = facts[fact_ids[-2]].get("unit")  # a pie has no value axis: its unit is the total's (parts, total, share)
+        given = None
+    elif isinstance(new, dict) and "series" in new:  # a ChartSpec
+        kind, fact_ids, title, unit = new.get("kind"), list(new.get("fact_ids") or []), new.get("title"), new.get("unit")
+        orientation, sort = (new.get("orientation"), new.get("sort")) if kind == "bar" else (None, None)
+        points, given = [], []
+        for s in new["series"]:
+            for p in s.get("points") or []:
+                points.append({"series": s.get("name") if kind in GRID_KINDS else None, "label": p.get("label"),
+                               "value": p.get("value"), "display": p.get("display"), "highlight": bool(p.get("highlight")),
+                               "share_pct": p.get("share_pct"), "period": p.get("period") if kind == "line" else None})
+                given.append(p)
+        if kind != "bar" and (new.get("orientation") is not None or new.get("sort") is not None):
+            problems.append(f"a {kind} chart has a bar layout (orientation {new.get('orientation')!r}, sort {new.get('sort')!r})")
+        meta = row.get("decision_metadata") or {}
+        if "pattern" in meta and new.get("pattern") != meta["pattern"]:
+            problems.append(f"chart pattern {new.get('pattern')!r} is not the plan's {meta['pattern']!r}")
+    elif new is None and old is None:
+        return None, []
+    else:
+        return {"unreadable": new if new is not None else old}, []
+    charted = [facts[i] for i in fact_ids if i in facts]
+    shown = Counter(_num(p["value"]) for p in points)  # a value two points show (a tie) names no fact for sure
+    for n, point in enumerate(points):
+        found = _inferred(point, charted)
+        if given is not None:
+            p, linked = given[n], given[n].get("fact_id")
+            if linked is not None:
+                fact = facts.get(linked)
+                if linked not in fact_ids or fact is None or _num(fact.get("value")) != _num(p.get("value")):
+                    problems.append(f"point {p.get('label')!r} names {linked!r}, not a charted fact with its value")
+                elif p.get("period") is not None and fact.get("period") is not None and p["period"] != fact["period"]:
+                    problems.append(f"point {p.get('label')!r} is at {p['period']!r}, its fact {linked!r} at {fact['period']!r}")
+            derivable = (found is not None and shown[_num(p.get("value"))] == 1
+                         and (p.get("period") is None or found.get("period") in (None, p.get("period"))))
+            if derivable and linked != found.get("id"):
+                problems.append(f"point {p.get('label')!r} names {linked!r}, but {found.get('id')!r} is the charted fact "
+                                "with its value and period")
+        point["fact_id"] = found.get("id") if found else None
+        point["unit"] = found.get("unit") if found else unit
+        point["value"], point["share_pct"] = _num(point["value"]), _num(point["share_pct"])
+    return {"kind": kind, "title": title, "unit": unit, "fact_ids": fact_ids, "orientation": orientation, "sort": sort,
+            "points": points}, problems
+
+
+def chart_vega(row: dict) -> dict | None:
+    """The row's Vega-Lite spec (old: stat_answer.chart.spec or the row chart; new: chart.vega_lite)."""
+    stat_chart = (row.get("stat_answer") or {}).get("chart")
+    if isinstance(stat_chart, dict) and isinstance(stat_chart.get("spec"), dict):
+        return stat_chart["spec"]
+    chart = row.get("chart")
+    if isinstance(chart, dict):
+        return chart.get("vega_lite") if "series" in chart else chart
+    return None
+
+
+def semantic_row(row: dict) -> dict:
+    """One results.jsonl row in the form --mode semantic compares (old and new layouts alike)."""
+    stat = row.get("stat_answer") or {}
+    meta = row.get("decision_metadata") or {}
+    refusal = stat.get("refusal") or {}
+    facts = (stat.get("result") or {}).get("facts") or []
+    chart, _ = chart_points(row)
+    return {
+        "call_status": row.get("call_status"),
+        "outcome": stat.get("outcome"),
+        "route": meta.get("route"),
+        "judge": row.get("judge"),
+        "refusal": {"reason": refusal.get("reason"), "message": refusal.get("message")} if refusal else None,
+        "clarify_options": stat.get("clarify_options") or [],
+        "facts": [{"id": f.get("id"), "source_ref": f.get("source_ref"), "value": _num(f.get("value")), "unit": f.get("unit"),
+                   "period": f.get("period"), "derivation": f.get("derivation"), "round": f.get("round")} for f in facts],
+        "cited": [p.get("fact_id") for p in stat.get("parts") or [] if p.get("kind") == "fact"],
+        "default_applied": stat.get("default_applied") or {},
+        "caveats": stat.get("caveats") or [],
+        "context_fact_ids": stat.get("context_fact_ids") or [],
+        "table": stat.get("table"),
+        "numbers_origin": stat.get("numbers_origin"),
+        "numbers_verified": stat.get("numbers_verified"),
+        "text": stat.get("text") if stat else row.get("raw_answer"),
+        "chart": chart,
+    }
+
+
+def compare_semantic(base: dict[tuple[str, int], dict], run: dict[tuple[str, int], dict],
+                     ignore: tuple[str, ...] = ()) -> dict:
+    """compare() over semantic_row forms, plus the run's chart link problems and Vega-Lite equality (both gate)."""
+    result = compare({k: semantic_row(r) for k, r in base.items()}, {k: semantic_row(r) for k, r in run.items()},
+                     ignore, volatile=())
+    if "chart" in ignore:  # --ignore chart: no chart check at all
+        result.update(links={}, vega_differ=[], vega_same=0, vega_total=0)
+        return result
+    links = {k: problems for k, r in run.items() if (problems := chart_points(r)[1])}
+    result["links"] = links
+    result["identical"] = result["identical"] and not links
+    shared = [k for k in base if k in run and (chart_vega(base[k]) is not None or chart_vega(run[k]) is not None)]
+    result["vega_differ"] = [k for k in shared if chart_vega(base[k]) != chart_vega(run[k])]
+    result["vega_same"] = len(shared) - len(result["vega_differ"])
+    result["vega_total"] = len(shared)
+    result["identical"] = result["identical"] and not result["vega_differ"]
+    return result
 
 
 def _label(key: tuple[str, int]) -> str:
@@ -316,13 +496,25 @@ def render(result: dict, limit: int = 80) -> str:
         lines.append("only in run: " + ", ".join(_label(k) for k in result["only_run"]))
     if result["order_changed"]:
         lines.append("row order differs between the two results.jsonl files")
+    for key, found in result.get("links", {}).items():
+        lines.append(f"{_label(key)}: chart links")
+        lines += [f"  {problem}" for problem in found]
     for key, found in result.get("calls", {}).items():
         lines.append(f"{_label(key)}: calls differ")
         lines += [f"  {field}: base={short(old, limit)} run={short(new, limit)}" for field, old, new in found]
     lines.append(f"different: {len(result['diffs'])} question(s), only in base {len(result['only_base'])}, "
                  f"only in run {len(result['only_run'])}"
-                 + (f", calls {len(result['calls'])}" if "calls" in result else ""))
+                 + (f", calls {len(result['calls'])}" if "calls" in result else "")
+                 + (f", chart links {len(result['links'])}" if "links" in result else ""))
     return "\n".join(lines)
+
+
+def _vega_note(result: dict) -> str:
+    if "vega_total" not in result:
+        return ""
+    differ = ", ".join(_label(k) for k in result.get("vega_differ", [])[:10])
+    return (f"\nvega_lite: {result['vega_same']}/{result['vega_total']} charts identical"
+            + (f" (differ: {differ})" if differ else ""))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -332,6 +524,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ignore", action="append", default=[], metavar="PATH",
                         help="extra dotted path to skip, `[*]` for every list item (repeatable), e.g. judge.reason")
     parser.add_argument("--width", type=int, default=80, help="characters shown per value (default 80)")
+    parser.add_argument("--mode", choices=("bytes", "semantic"), default="bytes",
+                        help="bytes: rows equal once volatile fields are dropped (S0-S4); semantic: the common form "
+                             "of old and new layouts (T1-28 S5 on, see the module doc)")
     parser.add_argument("--check-calls", action="store_true",
                         help="also compare attempts, call_status, format error count and span (name, status) per row")
     parser.add_argument("--allow-missing-manifest", action="store_true",
@@ -375,11 +570,14 @@ def main(argv: list[str] | None = None) -> int:
             return 2
     log.info("base %s: %d rows, run %s: %d rows, ignored paths %d", args.base, len(base), args.run, len(run),
              len(VOLATILE_PATHS) + len(args.ignore))
-    result = compare(base, run, tuple(args.ignore))
+    if args.mode == "semantic":
+        result = compare_semantic(base, run, tuple(args.ignore))
+    else:
+        result = compare(base, run, tuple(args.ignore))
     if args.check_calls:
         result["calls"] = compare_calls(base, run)
         result["identical"] = result["identical"] and not result["calls"]
-    print(render(result, args.width))
+    print(render(result, args.width) + _vega_note(result))
     return 0 if result["identical"] else 1
 
 

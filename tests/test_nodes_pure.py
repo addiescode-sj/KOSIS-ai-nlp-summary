@@ -210,8 +210,9 @@ def test_render_answered(households):
     source = to_source(households.table.meta, org_id="101")
     chart = step_chart(ChartIn(type="value", computed=done.computed), households).chart
     stat = step_render(RenderIn(question=SEOUL_ONE, query=done.query, computed=done.computed, parts=parts, verified=True,
-                                source=source, chart=chart), households).stat
-    assert stat.outcome == "answered" and stat.numbers_origin == "code" and stat.numbers_verified and stat.chart is chart
+                                source=source), households).stat
+    assert stat.outcome == "answered" and stat.numbers_origin == "code" and stat.numbers_verified and chart is not None
+    assert "chart" not in stat.model_dump()  # T1-28 S5: the chart is StatOutput.chart, not a StatAnswer field
     assert stat.text == final_text(render_parts(parts, done.computed.result), source, {}, [])
     causal = "2023년 서울특별시 1인 가구 수와 그렇게 된 원인은?"
     noted = step_render(RenderIn(question=causal, query=done.query, computed=done.computed, parts=parts, verified=False,

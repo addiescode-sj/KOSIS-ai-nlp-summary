@@ -53,6 +53,75 @@ def rows_of(frame: Any) -> list[dict]:
     return frame.select(PARQUET_COLUMNS).to_pylist()
 
 
+class _HashSink:
+    """A write-only file that feeds what it is given to a hash (Arrow IPC writes here; nothing is kept)."""
+
+    closed = False
+
+    def __init__(self, digest) -> None:
+        self.digest = digest
+
+    def write(self, data) -> int:
+        self.digest.update(data)
+        return len(data)
+
+    def flush(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self.closed = True
+
+    def writable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return False
+
+
+def as_arrow(frame: Any):
+    """A pandas DataFrame as a pyarrow Table (once; missing values None as in rows_of); a pyarrow Table as is."""
+    if hasattr(frame, "to_pylist"):
+        return frame
+    import pyarrow as pa
+
+    return pa.Table.from_pandas(frame, preserve_index=False)
+
+
+def frame_digest(frame: Any, digest) -> None:
+    """Feed a loaded table's content to `digest` (hashlib object): the schema (names and types, columns sorted by
+    name, no metadata) and the Arrow IPC stream of every column chunk. IPC writes each chunk's visible slice and its
+    dictionary, so two different contents never give the same bytes; equal contents chunked differently (or with
+    different bytes under null slots) only cost a cache miss. No Python value per cell (T1-28 S5 review: a 35M-cell
+    table hashed row by row took ~100 s)."""
+    import pyarrow as pa
+    import pyarrow.ipc as ipc
+
+    table = as_arrow(frame)
+    table = table.select(sorted(table.column_names)).replace_schema_metadata(None)
+    schema = pa.schema([pa.field(f.name, f.type, f.nullable) for f in table.schema])
+    table = pa.Table.from_arrays(table.columns, schema=schema)
+    digest.update(str(schema).encode("utf-8"))
+    sink = pa.PythonFile(_HashSink(digest), mode="w")
+    with ipc.new_stream(sink, schema) as writer:
+        writer.write_table(table)
+
+
+def tbl_id_counts(frame: Any) -> tuple[set, int]:
+    """(the distinct tbl_id values, the rows without one: None, NaN or blank) without a Python value per row."""
+    import pyarrow as pa
+    import pyarrow.compute as pc
+
+    column = as_arrow(frame).column("tbl_id")
+    if pa.types.is_floating(column.type):  # an all-NaN pandas column
+        column = pc.if_else(pc.is_nan(column), pa.scalar(None, column.type), column)
+    if not (pa.types.is_string(column.type) or pa.types.is_large_string(column.type)):
+        column = pc.cast(column, pa.string())
+    blank = pc.equal(pc.utf8_trim_whitespace(column), "")
+    missing = column.null_count + pc.sum(pc.fill_null(blank, False)).as_py() if len(column) else 0
+    present = pc.filter(column, pc.fill_null(pc.invert(blank), False))
+    return set(pc.unique(present).to_pylist()), int(missing or 0)
+
+
 def frame_content(frame: Any) -> tuple[list[tuple[str, str]], list[str], list[list]]:
     """Every column of a loaded table, for the content hash: ((name, dtype) sorted by name, the names in that order,
     each row's values in that order). Missing values are None, through pyarrow as in rows_of."""

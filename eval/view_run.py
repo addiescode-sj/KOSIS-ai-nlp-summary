@@ -129,6 +129,21 @@ draw();
 """
 
 
+def vega_of(chart: dict | None) -> dict | None:
+    """The Vega-Lite spec the page draws for a results.jsonl `chart`: a ChartSpec (T1-28 S5, it has kind and series)
+    gives its vega_lite (drawn by chart.vega.to_vega when missing); an older run's chart is the Vega-Lite spec itself."""
+    if not isinstance(chart, dict):
+        return None
+    if "kind" in chart and "series" in chart:
+        if chart.get("vega_lite") is not None:
+            return chart["vega_lite"]
+        from kosis_chat.chart.vega import to_vega
+        from kosis_ai.schemas import ChartSpec
+
+        return to_vega(ChartSpec.model_validate(chart))
+    return chart
+
+
 def _latest_grades(run: Path) -> tuple[dict[str, dict], str]:
     folders = sorted((run / "grades").glob("*/grades.jsonl")) if (run / "grades").exists() else []
     if not folders:
@@ -153,7 +168,7 @@ def build(run: Path, run_index: int = 0) -> Path:
         rows.append({
             "id": qid, "kind": r.get("kind", ""), "type": item.get("type") or "-", "question": item.get("question", ""),
             "answer": stat.get("text") or r.get("raw_answer") or r.get("call_error") or "",
-            "facts": (stat.get("result") or {}).get("facts", []), "chart": r.get("chart"),
+            "facts": (stat.get("result") or {}).get("facts", []), "chart": vega_of(r.get("chart")),
             "plan": meta.get("plan"), "caveats": stat.get("caveats") or [], "table": stat.get("table"),
             "context": stat.get("context_fact_ids") or [],
             "route": f"{meta.get('route', '-')}/{meta.get('compose', '-')}",

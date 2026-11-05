@@ -46,7 +46,7 @@ class Answer:
     decision_metadata: dict[str, Any] = field(default_factory=dict)
     judge: dict[str, Any] = field(default_factory=dict)  # rule verdict (T1-08); empty when judge_mode is off
     stat_answer: Any = None  # the finished StatAnswer when the C pipeline built it (kosis_chat/pipeline.py)
-    chart: dict[str, Any] | None = None  # Vega-Lite spec built from the computed facts (kosis_chat/answer/chart.py)
+    chart: Any = None  # kosis_ai.schemas.ChartSpec built from the computed facts (T1-28 S5; a Vega-Lite dict before)
 
     @property
     def ok(self) -> bool:

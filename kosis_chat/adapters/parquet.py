@@ -17,6 +17,52 @@ from kosis_chat.prepare.convert import PARQUET_COLUMNS, check_meta, convert, met
 from kosis_chat.prepare.schemas import Problem, SchemaError, TableInput, validate
 
 
+# The rows' tbl_id must be the tables.csv row's tbl_id (plans/T1-28.md 검토 반영 2: the file path picks the catalog row
+# by file name and never read the rows' tbl_id). Off until the user's scan of every provided table
+# (scripts/scan_tbl_ids.py) finds no table that breaks it; then set True (one line; tests/test_adapters_tbl_id.py).
+CHECK_CATALOG_TBL_ID = False
+
+
+def read_catalog(path: Path) -> dict[str, dict]:
+    """tables.csv rows by key (what prepare and StatModule take as `catalog`); LookupError when there is no file."""
+    if not path.exists():
+        raise LookupError(f"no tables.csv at {path}")
+    with path.open(encoding="utf-8-sig", newline="") as f:
+        return {row["key"]: row for row in csv.DictReader(f) if row.get("key")}
+
+
+def file_stamp(path: Path) -> tuple[int, int] | None:
+    """(mtime in ns, size) of a file, None when it is missing: what api's caches compare to notice a replaced file."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return st.st_mtime_ns, st.st_size
+
+
+def parquet_stamp(path: Path) -> tuple | None:
+    """file_stamp plus the Parquet footer's row count and serialized size (read_metadata reads only the footer):
+    a file rewritten inside one mtime tick with the same byte size is still seen when its rows or footer differ."""
+    stamp = file_stamp(path)
+    if stamp is None:
+        return None
+    try:
+        import pyarrow.parquet as pq
+
+        footer = pq.read_metadata(path)
+        return (*stamp, footer.num_rows, footer.serialized_size)
+    except Exception:  # not readable as Parquet: the load reports it
+        return (*stamp, None, None)
+
+
+def catalog_tbl_id_problems(rows: list[dict], catalog: dict, where: str) -> list[Problem]:
+    """The rows' tbl_id against the catalog row's: one value on every row, equal to it."""
+    ids = {str(r.get("tbl_id")) for r in rows}
+    if ids != {str(catalog.get("tbl_id"))}:
+        return [Problem(where, f"rows' tbl_id {sorted(ids)[:3]} is not the tables.csv tbl_id {catalog.get('tbl_id')!r}")]
+    return []
+
+
 def sha256_of(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -73,6 +119,10 @@ def load_parquet(path: Path) -> TableInput:
         raise SchemaError([Problem(path.name, f"cannot read Parquet: {exc}")]) from exc
     if not rows:
         raise no_rows(path.name)
+    if CHECK_CATALOG_TBL_ID:
+        problems = catalog_tbl_id_problems(rows, catalog_row(path), path.name)
+        if problems:
+            raise SchemaError(problems)
     meta = parquet_meta(path, period_codes(rows))
     check_meta(meta, where=path.name)
     return convert(rows, meta, sha256_of(path))

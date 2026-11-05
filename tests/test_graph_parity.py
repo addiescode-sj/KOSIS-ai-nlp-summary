@@ -157,10 +157,10 @@ def sequential_ask(bot: StatPipeline, question: str, golden_scope: dict | None =
     chart = step_chart(ChartIn(type=plan.type, computed=computed), res).chart
     stat = step_render(RenderIn(question=question, query=query, computed=computed, parts=parts, verified=verified,
                                 source=source, default_applied=verdict.default_applied, caveats=caveats, shown=shown,
-                                context_ids=context_ids, chart=chart), res).stat
+                                context_ids=context_ids), res).stat
     meta["chart"] = chart.kind if chart else None
     meta["caveats"] = [c.kind for c in caveats]
-    return replace(done(stat, verdict, meta), chart=chart.spec if chart else None)
+    return replace(done(stat, verdict, meta), chart=chart)
 
 
 # ---------------------------------------------------------------- a scripted model (by a hash of the prompt)

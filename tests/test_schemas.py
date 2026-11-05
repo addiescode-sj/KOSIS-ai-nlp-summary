@@ -13,7 +13,9 @@ from kosis_ai.schemas import (
     QUESTION_TYPES,
     REFUSAL_REASONS,
     Cell,
-    Chart,
+    ChartPoint,
+    ChartSeries,
+    ChartSpec,
     Dim,
     Fact,
     FactPart,
@@ -317,14 +319,26 @@ def test_cell_from_row_ignores_columns_outside_the_contract():
 # ---------------------------------------------------------------- T0-03 v2: charts in the contract
 
 
-SPEC = {"$schema": "https://vega.github.io/schema/vega-lite/v5.json", "data": {"values": [{"이름": "2025", "값": 1}]}, "mark": "bar"}
+# T1-28 S5: the chart left StatAnswer; it is the module's StatOutput.chart, a ChartSpec (data + kind, Vega-Lite optional).
+POINT = ChartPoint(label="2025", value=76309, display="76,309명", fact_id="f1", period="2025", highlight=True)
+SPEC = ChartSpec(kind="bar", title="경기도", unit="명", series=[ChartSeries(name="경기도", points=[POINT])], fact_ids=["f1"],
+                 orientation="horizontal", sort="-x")
+OLD_CHART = {"kind": "bar", "spec": {"data": {"values": [{"이름": "2025", "값": 1}]}, "mark": "bar"}, "fact_ids": ["f1"]}
 
 
-def test_chart_valid_shapes():
-    chart = Chart(kind="bar", spec=SPEC, fact_ids=["f1"])
-    answer = StatAnswer(**ANSWERED, numbers_origin="code", chart=chart)
-    assert answer.chart.kind == "bar" and StatAnswer.model_validate_json(answer.model_dump_json()) == answer
-    assert "timeline" in CHART_KINDS
+def test_chart_spec_valid_shapes():
+    assert SPEC.points() == [POINT] and ChartSpec.model_validate_json(SPEC.model_dump_json()) == SPEC
+    assert SPEC.points()[0].value == 76309 and isinstance(SPEC.points()[0].value, int)  # a fact's int stays an int
+    assert ChartSpec(**SPEC.model_dump() | {"kind": "scatter"}).kind == "scatter"  # an open string (E6)
+    assert "timeline" in CHART_KINDS  # the kinds drawn today
+
+
+def test_stat_answer_has_no_chart_and_old_records_still_load():
+    answer = StatAnswer(**ANSWERED, numbers_origin="code")
+    assert "chart" not in answer.model_dump() and "chart" not in StatAnswer.model_fields
+    old = answer.model_dump(mode="json") | {"chart": OLD_CHART}
+    assert StatAnswer.model_validate(old) == answer  # the pre-S5 chart is dropped (kosis_ai/compat.py)
+    assert StatAnswer.model_validate(answer.model_dump(mode="json") | {"chart": None}) == answer
 
 
 def test_records_before_v3_load_without_their_v2_operation():
@@ -338,17 +352,17 @@ def test_records_before_v3_load_without_their_v2_operation():
 @pytest.mark.parametrize(
     "build",
     [
-        pytest.param(lambda: Chart(kind="scatter", spec=SPEC, fact_ids=["f1"]), id="unknown chart kind"),
-        pytest.param(lambda: Chart(kind="bar", spec={"mark": "bar"}, fact_ids=["f1"]), id="chart without inline data"),
-        pytest.param(lambda: Chart(kind="bar", spec=SPEC, fact_ids=[]), id="chart without facts"),
-        pytest.param(lambda: Chart(kind="bar", spec=SPEC, fact_ids=["f1", "f1"]), id="chart with a repeated fact"),
-        pytest.param(lambda: Chart(kind="bar", spec=SPEC, fact_ids=["f1"], title="x"), id="chart with an unknown field"),
-        pytest.param(lambda: StatAnswer(**ANSWERED, numbers_origin="code", chart=Chart(kind="bar", spec=SPEC, fact_ids=["f9"])),
-                     id="chart over an unknown fact"),
-        pytest.param(lambda: StatAnswer(**ANSWERED, chart=Chart(kind="bar", spec=SPEC, fact_ids=["f1"])), id="chart without code numbers"),
-        pytest.param(lambda: StatAnswer(outcome="refused", refusal=Refusal(reason="causal", message="x"), source=SOURCE,
-                                        numbers_origin="none", chart=Chart(kind="bar", spec=SPEC, fact_ids=["f1"])),
-                     id="chart on a refusal"),
+        pytest.param(lambda: ChartSpec(**SPEC.model_dump() | {"fact_ids": []}), id="chart without facts"),
+        pytest.param(lambda: ChartSpec(**SPEC.model_dump() | {"fact_ids": ["f1", "f1"]}), id="chart with a repeated fact"),
+        pytest.param(lambda: ChartSpec(**SPEC.model_dump() | {"series": []}), id="chart without series"),
+        pytest.param(lambda: ChartSeries(name="x", points=[]), id="series without points"),
+        pytest.param(lambda: ChartSpec(**SPEC.model_dump() | {"fact_ids": ["f2"]}), id="point names a fact the chart does not list"),
+        pytest.param(lambda: ChartSpec(**SPEC.model_dump() | {"spec": {}}), id="chart with an unknown field"),
+        pytest.param(lambda: ChartSpec(**SPEC.model_dump() | {"orientation": "diagonal"}), id="unknown orientation"),
+        pytest.param(lambda: ChartPoint(label="x", display="1"), id="point without a value"),
+        pytest.param(lambda: StatAnswer(**ANSWERED, numbers_origin="code", chart=SPEC), id="StatAnswer has no chart field"),
+        pytest.param(lambda: StatAnswer(**ANSWERED, numbers_origin="code", chart={"kind": "bar", "series": []}),
+                     id="a new-style chart under StatAnswer is an unknown field"),
     ],
 )
 def test_chart_violations_are_rejected(build):

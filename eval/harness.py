@@ -19,6 +19,7 @@ from pathlib import Path
 from eval.golden import GoldenItem, load_items, read_cells, read_source
 from eval.grade import FACT_ERRORS, SLOT_FIELDS, Grade, grade
 from eval.scorer import aggregate, read_jsonl, write_jsonl
+from kosis_ai.compat import load_stat_answer
 from kosis_ai.schemas import FactPart, Refusal, StatAnswer, StatResult
 
 REPORTS_DIR = Path(__file__).resolve().parent / "reports"
@@ -185,7 +186,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.oracle:
         answers = {i.id: oracle_answer(i) for i in items}
     else:
-        answers = {r["question_id"]: StatAnswer.model_validate(r["answer"]) for r in read_jsonl(Path(args.answers))}
+        answers = {r["question_id"]: load_stat_answer(r["answer"]) for r in read_jsonl(Path(args.answers))}
     grades = grade_all(items, answers)
     meta = {
         "stage": args.stage,

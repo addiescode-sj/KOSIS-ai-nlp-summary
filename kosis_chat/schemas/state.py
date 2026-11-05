@@ -118,7 +118,7 @@ class StatState(BaseModel):
     compose_prompt: str | None = None
     parts: SkipValidation[list[Any] | None] = None
     verified: bool = False
-    chart_out: Any = None  # kosis_ai.schemas.Chart (written by the chart branch, node "chart")
+    chart_out: Any = None  # kosis_ai.schemas.ChartSpec (written by the chart branch, node "chart")
     stat: Any = None  # kosis_ai.schemas.StatAnswer (render / answer_final)
     fallback: Any = None  # chatbot.Answer of the fallback chatbot
 

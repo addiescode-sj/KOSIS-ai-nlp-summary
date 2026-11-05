@@ -1,8 +1,5 @@
-"""What the chart stage reads and passes on (T1-28 S3a): the computed facts in, the shared Chart out.
-
-ChartSpec (data + kind, Vega-Lite optional) replaces Chart in StatOutput with T1-28 S5; until then the step returns
-the kosis_ai.schemas.Chart that StatAnswer.chart carries.
-"""
+"""What the chart stage reads and passes on (T1-28 S3a): the computed facts in, the shared ChartSpec out (T1-28 S5:
+data + kind, Vega-Lite optional; it is StatOutput.chart, no longer a StatAnswer field)."""
 
 from __future__ import annotations
 
@@ -11,7 +8,7 @@ from pydantic import SkipValidation
 from kosis_chat.compute.schemas import Computed
 from kosis_chat.shared.boundary import BoundaryModel
 
-from kosis_ai.schemas import Chart, QuestionType  # isort: skip
+from kosis_ai.schemas import ChartSpec, QuestionType  # isort: skip
 
 
 class ChartIn(BoundaryModel):
@@ -22,6 +19,6 @@ class ChartIn(BoundaryModel):
 
 
 class ChartOut(BoundaryModel):
-    """chart: kind, Vega-Lite v5 spec and the facts drawn; None when there is nothing to draw."""
+    """chart: kind, the drawn points and the facts drawn (no Vega-Lite); None when there is nothing to draw."""
 
-    chart: SkipValidation[Chart | None] = None
+    chart: SkipValidation[ChartSpec | None] = None

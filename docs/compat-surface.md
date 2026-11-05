@@ -13,14 +13,14 @@
 |---|---|---|
 | `kosis_chat.api` | `summarize_stat(question, table_id, *, settings, client, retry_interval)` | `scripts/stat_baseline.py`, `lab/rag_baseline.py` |
 | | `table_path(table_id)` | `evals/trace.py:61`, `scripts/stat_baseline.py` |
-| | `_build(path, settings, client, retry_interval)` → `.ask(question)`, `.org_id`, `Answer.decision_metadata["spans"]` | `evals/trace.py:61` (S5에서 `summarize_stat_run`으로 대체) |
-| | `_cached` (lru_cache, `cache_clear`) | `tests/test_stat_baseline.py:53` |
+| | `_build(path, settings, client, retry_interval)` → `.ask(question)`, `.org_id`, `Answer.decision_metadata["spans"]` | `evals/trace.py:61` (S5: 서명·동작 그대로 유지, 대체 경로 `summarize_stat_run(...).spans` 제공 — Phase 2 전환은 제안 노트만) |
+| | `_cached` (lru_cache, `cache_clear`) | `tests/test_stat_baseline.py:53` (S5: `cache_clear()`는 `_cached_llm`·파일 스탬프도 비움) |
 | `kosis_chat.config` | `Settings`(`backend serialization model_name temperature max_tokens timeout_seconds api_key_env …`, `model_params()`), `load_settings(path, **overrides)`, `load_env`, `get_secret`, `resolve_path` (S2c부터 shim: 아래 "LLM 설정 주입") | `src/kosis_rag/{chain,clova,hcx}.py`, `evals/ops.py:64`, `scripts/stat_baseline.py`, `tests/test_stat_baseline.py`, `lab/*` |
 | `kosis_chat.contract` | `to_stat_answer(question, answer, *, org_id)` | `evals/trace.py:58` |
 | `kosis_chat.pipeline` | `VERSION` | `scripts/stat_baseline.py:53` |
 | `kosis_chat.llm.model` | `LLMClient`(`generate(system, user)`), `LLMResult`, `MockClient`, `HCXClient`(S2c: `HCXClient(config \| settings)`), `build_client(settings)`, `STATUS_OK`, `STATUS_API_ERROR` | `src/kosis_rag/{chain,graph,hcx,tools,hq/graph}.py`, `evals/{ops,runners/retrieval}.py`, tests 여러 곳 |
 | `kosis_chat.data.loader` | `sha256_of(path)` | `tests/test_stat_baseline.py:16` |
-| `kosis_ai.schemas` | `TableInfo MAX_DIMS Source Cell Fact StatAnswer StatResult StatQuery TextPart FactPart Refusal QuestionKind QuestionType RefusalReason` | `src/kosis_rag/*`, `evals/*`, tests 여러 곳 |
+| `kosis_ai.schemas` | `TableInfo MAX_DIMS Source Cell Fact StatAnswer StatResult StatQuery TextPart FactPart Refusal QuestionKind QuestionType RefusalReason` | `src/kosis_rag/*`, `evals/*`, tests 여러 곳 (S5: `evals/runners/stat.py:70`의 `StatAnswer.model_validate`가 옛 run의 `stat_answer.chart`를 그대로 읽음 — 아래 S5) |
 | `kosis_ai.normalize` | `_meta_unit(table_id, data_dir)` | `src/kosis_rag/metadata.py:22` (S2b에서 공개 별칭 `meta_unit` 추가) |
 | `kosis_ai.paths` | `data_dir`, `workspace_root`, `ENV_VAR` | `tests/test_workspace_default.py` |
 | `eval.golden` | `load_items(path)` | `scripts/stat_baseline.py:50` |
@@ -125,8 +125,8 @@ Pydantic 모델로 바꿔 단계 `schemas.py`로 옮기고 옛 경로는 이름�
 | `kosis_chat.compose.node.step_caveats` | `CaveatsIn(computed, built, alternatives, default_applied)` → `CaveatsOut(context_ids, caveats, shown)` | — |
 | `kosis_chat.compose.node.step_verify` | `VerifyIn(parts, computed, attempt)` → `VerifyOut(problems, route)` | `ok` / `retry` / `template` (`COMPOSE_MAX_ATTEMPTS = 2`) |
 | `kosis_chat.compose.node.step_template` | `TemplateIn(type, computed)` → `TemplateOut(parts, problems, verified)` | — |
-| `kosis_chat.chart.node.step_chart` | `ChartIn(type, computed)` → `ChartOut(chart)` (`kosis_ai.schemas.Chart`, S5에서 ChartSpec) | — |
-| `kosis_chat.render.node.step_render` | `RenderIn(question, query, computed, parts, verified, source, default_applied, caveats, shown, context_ids, chart)` → `RenderOut(stat)` | — |
+| `kosis_chat.chart.node.step_chart` | `ChartIn(type, computed)` → `ChartOut(chart)` (S5부터 `kosis_ai.schemas.ChartSpec`) | — |
+| `kosis_chat.render.node.step_render` | `RenderIn(question, query, computed, parts, verified, source, default_applied, caveats, shown, context_ids)` → `RenderOut(stat)` (S5: `chart` 인자 없음) | — |
 | `kosis_chat.render.node.step_answer_final` | `AnswerFinalIn(kind, question, verdict \| refusal+query+source \| clarify)` → `RenderOut(stat)` | kind `verdict` / `refused` / `clarify` |
 
 - `step_plan_rules`의 키워드 전용 `build`: `StatPipeline`이 자기 모듈의 `build_plan`을 넘긴다(`tests/test_analyze_plan.py`가 `pipeline.build_plan`을 바꿔 모델 경로를 강제하므로). 그래프의 노드 교체(E4)도 같은 자리.
@@ -191,6 +191,32 @@ Pydantic 모델로 바꿔 단계 `schemas.py`로 옮기고 옛 경로는 이름�
 - chart 노드는 caveats 뒤에서 compose 경로와 병렬로 돈다(같은 superstep이면 LangGraph가 스레드로 돌림). chart는 `chart_out`만 쓰고 records·meta는 안 쓴다 → span 순서는 완료 순서와 무관하게 옛 순서. render는 `["compose_done", "chart"]` 합류 뒤에만.
 - 노드 안에서 난 예외는 같은 객체로 `ask` 밖까지 나온다(LangGraph가 `add_note`로 "During task with name ..." 한 줄을 붙여 traceback에만 보임). `LLMKeyMissing`도 첫 LLM 노드에서 그대로.
 - `pipeline.build_plan` monkeypatch는 그대로 통한다(`ask`가 매번 읽어 context로 넘김).
+
+## 진입점·ChartSpec·StatAnswer.chart 제거 (T1-28 S5)
+
+`StatAnswer.chart` 필드와 `Chart` 모델을 없앴다(계약 변경, plan 승인). 차트는 `kosis_ai.schemas.ChartSpec`(data + kind, Vega-Lite 선택)으로 `StatOutput.chart`·`Answer.chart`에 실린다. `tests/test_api_module.py`, `tests/test_chart_spec.py`, `tests/test_parity.py`(semantic), `tests/test_schemas.py`(ChartSpec).
+
+| 위치 | 이름 | 비고 |
+|---|---|---|
+| `kosis_ai.schemas` | `ChartPoint(label, value: int\|float\|None, display, fact_id, period, highlight, share_pct)`, `ChartSeries(name, points≥1)`, `ChartSpec(kind: str, title, unit, series≥1, fact_ids≥1, orientation, sort, pattern, vega_lite)` | `kind`는 열린 문자열(E6, 지금 값 `CHART_KINDS`). fact_ids 중복 금지, 점의 `fact_id`는 fact_ids 안. `value`는 fact 값 그대로(int 유지, 기호 칸은 None) |
+| | `StatAnswer` | `chart` 필드 없음. **before-validator**가 옛 기록의 `chart`(None 또는 `{kind, spec, fact_ids}`)만 버린다 — Phase 2 `evals/runners/stat.py`가 `StatAnswer.model_validate`를 직접 부르므로(Phase 2 무수정). 다른 모양의 `chart`·다른 모르는 키는 여전히 오류 |
+| | `Chart`, `StatAnswer.chart`, `_contract`의 chart 규칙 | **삭제**. chart 규칙(answered + code 숫자, fact_ids ⊂ result)은 `StatOutput` 검증으로 옮김. Phase 1·2 grep: Phase 2 사용 0건 |
+| `kosis_ai.compat` (신규) | `load_stat_answer(data)`, `legacy_chart(data)`, `without_legacy_chart(data)`, `LEGACY_CHART_KEYS` | 저장된 run 읽기 경계. 버리는 옛 chart = v2 Chart가 받던 모양(키 3개 정확히, spec.data.values 목록, fact_ids 비지 않고 중복 없음) + 옛 계약(answered·code, fact_ids ⊂ result)을 지킨 것만; 그 밖은 예전처럼 로드 실패. `eval/grade_run.py`·`eval/recheck_contract.py`·`eval/harness.py`가 사용 |
+| `kosis_chat.schemas.io` | `StatOutput(schema_version="1", answer, chart, spans)`, `StatOptions(retry_interval, compose_max_attempts, fill_retry, plan_retry, use_fallback_chatbot, prompt_versions, node_overrides, catalog_path)` | StatOptions는 지금 `retry_interval node_overrides catalog_path`만 바꿀 수 있음(나머지는 기본값이 아니면 `StatModule`이 ValueError) |
+| `kosis_chat.api` | `StatModule(llm, options=None, *, client=None, cache_size=16)` → `.answer(StatInput) -> StatOutput`, `.pipeline(table)`, `.prepared_key(table)`, `.catalog()` | 준비된 파이프라인을 `content_hash(table, catalog)` 키로 최대 16개(LRU; 모듈 락은 캐시만, 준비는 키별 락으로 락 밖). info 없으면 `catalog_path`(기본 `data_dir()/tables.csv`)의 tbl_id 행(파일 mtime·크기가 바뀌면 다시 읽음). org_id = `info.org_id` 또는 카탈로그 행 `org_id` |
+| | `summarize_stat_run(question, table_id, *, settings, client, retry_interval, llm) -> StatOutput` | `summarize_stat`과 같은 인자·예외·답 + chart·spans. `summarize_stat`은 이것의 `.answer` |
+| | `_build`, `_cached`, `_cached_llm` | 서명 그대로(파일 경로 = `load_table`). 공개 경로에서 같은 경로의 Parquet(mtime_ns·크기·footer 행 수·footer 크기)·tables.csv(mtime_ns·크기)가 바뀌면 캐시 전체를 비우고 다시 읽음(`_STAMPS`). `_cached.cache_clear()` = 두 캐시 + 스탬프 |
+| `kosis_chat.chart.builders` | `BUILDERS`(= 옛 `_CHARTS`, 같은 dict), `register_builder(pattern, fn)`, `chart_spec(kind, computed) -> ChartSpec \| None` | 빌더 14개(패턴 기준) + grid. `vega_lite`는 비워 둠 |
+| `kosis_chat.chart.vega` | `to_vega(spec) -> dict \| None`, `with_vega(spec)`, `DRAW`(kind → 그리기), `register_kind(kind, fn)` | S5 전 빌더가 만들던 Vega-Lite와 같은 dict(mock 90문항 66/66 동일). 모르는 kind는 None |
+| `kosis_chat.chatbot.Answer` | `chart` | Vega-Lite dict → `ChartSpec` 객체 |
+| `kosis_chat.adapters.parquet` | `read_catalog(path)`, `file_stamp(path)`, `parquet_stamp(path)`(+ footer num_rows·serialized_size), `CHECK_CATALOG_TBL_ID = False`, `catalog_tbl_id_problems(rows, catalog, where)` | 파일 경로 행 tbl_id = tables.csv tbl_id 검사는 **꺼 둠**: `scripts/scan_tbl_ids.py` 전수 스캔 0건 확인 뒤 True로 |
+| `eval.run_eval` | results.jsonl `chart` | ChartSpec JSON + `vega_lite` 채움(`chart_record`). `stat_answer`에는 chart 없음 |
+| `eval.view_run` | `vega_of(chart)` | ChartSpec이면 `vega_lite`(없으면 `to_vega`), 옛 run이면 Vega-Lite 그대로 |
+| `eval.parity` | `--mode semantic`, `semantic_row`, `chart_points`, `compare_semantic` | 옛·새 행을 같은 형식으로 비교(차트 kind·제목·단위·fact_ids·점별 값/표시/강조/비중/단위/fact). 막대 orientation·sort, line 점 period도. 새 행의 링크(점 fact_id·period, pattern, 막대 아닌 차트의 layout)와 Vega-Lite 동일(`vega_lite: n/n`)도 게이트 |
+
+- monkeypatch 주의: 테스트가 고쳐 쓰던 `chart.spec["data"]["values"]`는 `to_vega(chart)["data"]["values"]`로(테스트 6파일 수정, 계약 변경에 따른 것).
+
+- `kosis_chat.prepare.node`: `content_hash` 프레임 부분 = `prepare.convert.frame_digest`(정렬 스키마 + Arrow IPC 스트림, `HASH_VERSION` v3), 메모는 pyarrow Table 객체 기준(id + weakref, `_FRAME_HASHES`; 래퍼 `_frame_hash`도 채움). `prepare.convert.tbl_id_counts`(pyarrow.compute)는 `ParquetTable` 검증·`tbl_id()`가 씀.
 
 ## 반환 객체에서 읽는 속성
 

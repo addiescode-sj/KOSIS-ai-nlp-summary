@@ -23,6 +23,7 @@ from dataclasses import replace
 from eval.scorer import KINDS, SCORING_VERSION
 from eval.recording import RecordingClient, RunRecorder, source_snapshot
 from eval.audit_report import save_reports
+from kosis_chat.chart.vega import with_vega
 from kosis_chat.chatbot import JUDGE_MODES, Answer, Chatbot
 from kosis_chat.config import PROJECT_ROOT, Settings, load_settings, resolve_path
 from kosis_chat.contract import org_id_from_table_path, to_stat_answer
@@ -45,6 +46,13 @@ _NUMBER = re.compile(r"\d[\d,]*(?:\.\d+)?")
 
 class GoldenError(ValueError):
     pass
+
+
+def chart_record(chart) -> dict | None:
+    """The results.jsonl `chart`: the ChartSpec as JSON with its Vega-Lite filled in (eval/view_run.py draws it)."""
+    if chart is None:
+        return None
+    return with_vega(chart).model_dump(mode="json")
 
 
 def llm_config(settings: Settings) -> LLMConfig:
@@ -317,8 +325,9 @@ def run(
                         "judge": answer.judge,
                         # The same answer in the shared contract (src/kosis_ai/schemas.py); None when the call failed.
                         "stat_answer": stat_answer.model_dump(mode="json") if stat_answer else None,
-                        # Vega-Lite chart built from the computed facts (--pipeline stat); None otherwise.
-                        "chart": answer.chart,
+                        # The chart built from the computed facts (--pipeline stat; T1-28 S5: the ChartSpec of
+                        # StatOutput.chart, its Vega-Lite in vega_lite; before S5 this key held the Vega-Lite spec).
+                        "chart": chart_record(answer.chart),
                         "latency_seconds": round(answer.latency_seconds, 3),
                         "attempts": answer.attempts,
                         "usage": answer.usage,

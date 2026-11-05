@@ -322,3 +322,133 @@ def test_check_calls_identical_runs(tmp_path, capsys):
     base, run = _write(tmp_path, "a", [_row("Q1")]), _write(tmp_path, "b", [_row("Q1", latency=3.0, start_ms=4.0)])
     assert parity.main(["--base", str(base), "--run", str(run), "--check-calls"]) == 0
     assert capsys.readouterr().out.strip() == "identical"
+
+
+# ---------------------------------------------------------------- --mode semantic (T1-28 S5: chart moved out of StatAnswer)
+
+FACTS = [{"id": "f1", "value": 100, "unit": "명", "period": "2020", "source_ref": "DT_1|T1|00|2020"},
+         {"id": "f2", "value": 120, "unit": "명", "period": "2021", "source_ref": "DT_1|T1|00|2021"}]
+VEGA = {"$schema": "https://vega.github.io/schema/vega-lite/v5.json", "title": "인구",
+        "data": {"values": [{"이름": "2020", "값": 100, "표시": "100명", "강조": "아니오"},
+                            {"이름": "2021", "값": 120, "표시": "120명", "강조": "예"}]},
+        "layer": [{"mark": {"type": "bar"}, "encoding": {"y": {"field": "값", "title": "값 (명)"}}}]}
+SPEC = {"kind": "timeline", "title": "인구", "unit": "명", "fact_ids": ["f1", "f2"], "orientation": None, "sort": None,
+        "pattern": None, "vega_lite": VEGA,
+        "series": [{"name": "인구", "points": [
+            {"label": "2020", "value": 100.0, "display": "100명", "fact_id": "f1", "period": "2020", "highlight": False,
+             "share_pct": None},
+            {"label": "2021", "value": 120.0, "display": "120명", "fact_id": "f2", "period": "2021", "highlight": True,
+             "share_pct": None}]}]}
+
+
+def _stat_row(question_id: str, layout: str) -> dict:
+    """A row as run_eval wrote it before S5 ("old": stat_answer.chart + Vega-Lite row chart) or after ("new")."""
+    stat = {"outcome": "answered", "text": "2021년 인구는 120명입니다.", "result": {"facts": copy.deepcopy(FACTS)},
+            "parts": [{"kind": "fact", "fact_id": "f2"}], "numbers_origin": "code", "numbers_verified": True}
+    row = {"question_id": question_id, "run_index": 0, "call_status": "ok", "judge": {}, "attempts": 1,
+           "decision_metadata": {"route": "rules", "chart": "timeline", "spans": []}, "stat_answer": stat}
+    if layout == "old":
+        stat["chart"] = {"kind": "timeline", "spec": copy.deepcopy(VEGA), "fact_ids": ["f1", "f2"]}
+        row["chart"] = copy.deepcopy(VEGA)
+    else:
+        row["chart"] = copy.deepcopy(SPEC)
+    return row
+
+
+def test_semantic_mode_reads_the_old_and_the_new_layout_alike(tmp_path, capsys):
+    base, run = _write(tmp_path, "a", [_stat_row("Q1", "old")]), _write(tmp_path, "b", [_stat_row("Q1", "new")])
+    assert parity.main(["--base", str(base), "--run", str(run)]) == 1  # bytes: the layouts differ
+    capsys.readouterr()
+    assert parity.main(["--base", str(base), "--run", str(run), "--mode", "semantic"]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("identical") and "vega_lite: 1/1 charts identical" in out
+    form = parity.semantic_row(_stat_row("Q1", "old"))["chart"]
+    assert form["unit"] == "명" and [p["fact_id"] for p in form["points"]] == ["f1", "f2"]
+    assert form == parity.semantic_row(_stat_row("Q1", "new"))["chart"]
+
+
+@pytest.mark.parametrize("change, path", [
+    (lambda c: c["series"][0]["points"][1].update(value=121.0), "chart.points[1].value"),
+    (lambda c: c.update(unit="천명"), "chart.unit"),
+    (lambda c: c.update(kind="bar"), "chart.kind"),
+    (lambda c: c.update(fact_ids=["f2", "f1"]), "chart.fact_ids"),
+])
+def test_semantic_mode_reports_a_changed_point_or_chart(tmp_path, capsys, change, path):
+    new = _stat_row("Q1", "new")
+    change(new["chart"])
+    base, run = _write(tmp_path, "a", [_stat_row("Q1", "old")]), _write(tmp_path, "b", [new])
+    assert parity.main(["--base", str(base), "--run", str(run), "--mode", "semantic"]) == 1
+    assert path in capsys.readouterr().out
+
+
+def test_semantic_mode_checks_the_fact_a_point_names(tmp_path, capsys):
+    new = _stat_row("Q1", "new")
+    new["chart"]["series"][0]["points"][0]["fact_id"] = "f2"  # f2's value is 120, the point shows 100
+    base, run = _write(tmp_path, "a", [_stat_row("Q1", "old")]), _write(tmp_path, "b", [new])
+    assert parity.main(["--base", str(base), "--run", str(run), "--mode", "semantic"]) == 1
+    assert "chart links" in capsys.readouterr().out
+
+
+def test_semantic_mode_compares_the_answer_and_takes_ignore_paths(tmp_path, capsys):
+    new = _stat_row("Q1", "new")
+    new["stat_answer"]["text"] = "인구는 120명이었습니다."
+    new["stat_answer"]["result"]["facts"][1]["value"] = 120.0  # 120 and 120.0 are the same number here
+    base, run = _write(tmp_path, "a", [_stat_row("Q1", "old")]), _write(tmp_path, "b", [new])
+    assert parity.main(["--base", str(base), "--run", str(run), "--mode", "semantic"]) == 1
+    assert "text" in capsys.readouterr().out
+    assert parity.main(["--base", str(base), "--run", str(run), "--mode", "semantic", "--ignore", "text"]) == 0
+
+
+def _semantic(tmp_path, new: dict, old: dict | None = None) -> int:
+    base, run = _write(tmp_path, "a", [old or _stat_row("Q1", "old")]), _write(tmp_path, "b", [new])
+    return parity.main(["--base", str(base), "--run", str(run), "--mode", "semantic"])
+
+
+@pytest.mark.parametrize("change, message", [
+    (lambda r: r["chart"]["series"][0]["points"][0].update(fact_id=None), "but 'f1' is the charted fact"),  # link lost
+    (lambda r: r["chart"]["series"][0]["points"][0].update(period="1999"), "its fact 'f1' at '2020'"),
+    (lambda r: r["chart"].update(pattern="zz"), "chart pattern 'zz'"),
+    (lambda r: r["chart"].update(orientation="vertical"), "bar layout"),  # a timeline has no bar layout
+])
+def test_semantic_mode_gates_the_new_rows_links(tmp_path, capsys, change, message):
+    new = _stat_row("Q1", "new")
+    new["decision_metadata"]["pattern"] = None
+    change(new)
+    assert _semantic(tmp_path, new) == 1
+    assert message in capsys.readouterr().out
+
+
+def test_semantic_mode_gates_the_vega_lite(tmp_path, capsys):
+    new = _stat_row("Q1", "new")
+    new["chart"]["vega_lite"]["title"] = "다른 제목"
+    assert _semantic(tmp_path, new) == 1
+    assert "vega_lite: 0/1 charts identical (differ: Q1)" in capsys.readouterr().out
+
+
+def test_semantic_mode_does_not_ask_a_tie_to_name_a_fact(tmp_path, capsys):
+    """Two points show 120 (the fact f2 and a context row): neither must name f2 (S-EXT-06: a tied candidate)."""
+    old, new = _stat_row("Q1", "old"), _stat_row("Q1", "new")
+    extra = {"이름": "2022", "값": 120, "표시": "120명", "강조": "아니오"}
+    for spec in (old["chart"], old["stat_answer"]["chart"]["spec"], new["chart"]["vega_lite"]):
+        spec["data"]["values"].append(dict(extra))
+    new["chart"]["series"][0]["points"].append({"label": "2022", "value": 120.0, "display": "120명", "fact_id": None,
+                                                "period": "2022", "highlight": False, "share_pct": None})
+    new["chart"]["series"][0]["points"][1]["fact_id"] = "f2"
+    assert _semantic(tmp_path, new, old) == 0, capsys.readouterr().out
+
+
+def test_semantic_mode_compares_bar_layout_and_line_periods():
+    old, new = _stat_row("Q1", "old"), _stat_row("Q1", "new")
+    for row in (old, new):
+        row["decision_metadata"].pop("pattern", None)
+    bars = {"layer": [{"mark": {"type": "bar"}, "encoding": {"y": {"field": "이름", "sort": "-x"}, "x": {"title": "값 (명)"}}}]}
+    old["stat_answer"]["chart"].update(kind="bar", spec={**old["stat_answer"]["chart"]["spec"], **bars})
+    new["chart"].update(kind="bar", orientation="vertical", sort="-x")
+    assert parity.semantic_row(old)["chart"]["orientation"] == "horizontal"
+    assert parity.semantic_row(new)["chart"]["orientation"] == "vertical"  # a difference the gate reports
+    line_old, line_new = _stat_row("Q2", "old"), _stat_row("Q2", "new")
+    for row in line_old["stat_answer"]["chart"]["spec"]["data"]["values"]:
+        row["시점"] = row["이름"]
+    line_old["stat_answer"]["chart"]["kind"] = line_new["chart"]["kind"] = "line"
+    assert [p["period"] for p in parity.semantic_row(line_old)["chart"]["points"]] == ["2020", "2021"]
+    assert parity.semantic_row(line_old)["chart"]["points"] == parity.semantic_row(line_new)["chart"]["points"]

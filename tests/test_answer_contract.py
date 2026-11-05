@@ -9,6 +9,7 @@ from pydantic import ValidationError
 
 from kosis_chat.answer.caveats import caveats_of
 from kosis_chat.answer.chart import chart_spec
+from kosis_chat.chart.vega import to_vega
 from kosis_chat.answer.table import table_part
 from kosis_chat.answer.template import template_parts
 from kosis_chat.answer.verify import verify
@@ -132,7 +133,9 @@ def test_two_targets_at_two_periods_are_a_table_and_grouped_bars(household_path)
     part = table_part(computed)
     assert part.columns == ["2015년", "2024년"] and [r.label for r in part.rows] == ["서울특별시", "부산광역시"]
     chart = chart_spec("compare", computed)
-    assert chart.kind == "grouped_bar" and len(chart.spec["data"]["values"]) == 4 and chart.spec["encoding"]["xOffset"]
+    spec = to_vega(chart)
+    assert chart.kind == "grouped_bar" and len(spec["data"]["values"]) == 4 and spec["encoding"]["xOffset"]
+    assert len(chart.series) == 2 and all(p.fact_id in chart.fact_ids for p in chart.points())
 
 
 def test_two_targets_over_many_periods_are_a_multi_line(household_path):

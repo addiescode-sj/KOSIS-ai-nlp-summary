@@ -2,7 +2,8 @@
 
     python -m eval.recheck_contract --run eval/results/<run folder>
 
-Reads results.jsonl, loads every stat_answer with StatAnswer.model_validate and prints how many load, how many fail
+Reads results.jsonl, loads every stat_answer with kosis_ai.compat.load_stat_answer (StatAnswer.model_validate; a pre-T1-28-S5
+stat_answer.chart is dropped) and prints how many load, how many fail
 and why, and how the answers are distributed over numbers_origin (None = written before T0-03 v2) and route.
 Exit code 1 when any stored answer no longer satisfies the contract.
 """
@@ -17,7 +18,7 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from eval.scorer import read_jsonl
-from kosis_ai.schemas import StatAnswer
+from kosis_ai.compat import load_stat_answer
 
 
 def recheck(rows: list[dict]) -> tuple[int, list[tuple[str, str]], Counter]:
@@ -30,7 +31,7 @@ def recheck(rows: list[dict]) -> tuple[int, list[tuple[str, str]], Counter]:
             origins[f"(no answer: {row.get('call_status')})"] += 1
             continue
         try:
-            loaded = StatAnswer.model_validate(answer)
+            loaded = load_stat_answer(answer)
         except ValidationError as exc:
             bad.append((row["question_id"], str(exc).splitlines()[1].strip()[:160]))
             continue

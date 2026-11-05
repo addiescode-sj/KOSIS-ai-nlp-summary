@@ -109,9 +109,9 @@ def answer_of(state: StatState, *, table_meta: TableMeta, prompt_version: str, f
     """The Answer of a question the graph ran (T1-28 S4): the fallback chatbot's, or the stat answer's with its chart.
 
     The same Answer StatPipeline.ask built at each of its exits before S4 (to_answer / fallback_answer; an answered
-    question carries its chart's Vega-Lite spec in Answer.chart)."""
+    question carries its chart in Answer.chart: a ChartSpec since T1-28 S5, the Vega-Lite spec before)."""
     if state.fallback is not None:
         return fallback_answer(state.fallback, state.meta, state.records, state.started, fallback_prompt=fallback_prompt)
     answer = to_answer(state.stat, state.verdict, state.meta, state.records, state.started, table_meta=table_meta,
                        prompt_version=prompt_version)
-    return replace(answer, chart=state.chart_out.spec) if state.chart_out is not None else answer
+    return replace(answer, chart=state.chart_out) if state.chart_out is not None else answer

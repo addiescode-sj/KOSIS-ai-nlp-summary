@@ -1,6 +1,6 @@
 """What the render stage reads and returns (T1-28 S3a): everything the finished StatAnswer is made of.
 
-RenderIn: an answered question (facts, parts, caveats, chart). AnswerFinalIn: an answer without facts: the judge's
+RenderIn: an answered question (facts, parts, caveats; T1-28 S5: no chart, it is StatOutput.chart). AnswerFinalIn: an answer without facts: the judge's
 refusal or ask-back, the calculation's refusal (CalcRefused), or the model plan's ask-back (NeedsClarify).
 """
 
@@ -14,7 +14,7 @@ from kosis_chat.compute.schemas import Computed
 from kosis_chat.judge.schemas import Verdict
 from kosis_chat.shared.boundary import BoundaryModel
 
-from kosis_ai.schemas import Caveat, Chart, Refusal, Source, StatAnswer, StatQuery  # isort: skip
+from kosis_ai.schemas import Caveat, Refusal, Source, StatAnswer, StatQuery  # isort: skip
 
 
 class RenderIn(BoundaryModel):
@@ -30,7 +30,6 @@ class RenderIn(BoundaryModel):
     caveats: SkipValidation[list[Caveat]] = Field(default_factory=list)
     shown: SkipValidation[list[str]] = Field(default_factory=list)  # caveat texts written as '참고:' lines
     context_ids: SkipValidation[list[str]] = Field(default_factory=list)
-    chart: SkipValidation[Chart | None] = None
 
 
 class AnswerFinalIn(BoundaryModel):

@@ -213,7 +213,7 @@ def render_node(step: Step, res: StatResources) -> Callable:
         chart = state.chart_out
         stat = step(RenderIn(question=state.question, query=state.query, computed=state.computed, parts=state.parts,
                              verified=state.verified, source=state.source, default_applied=state.verdict.default_applied,
-                             caveats=state.caveats_out, shown=state.shown, context_ids=state.context_ids, chart=chart), res).stat
+                             caveats=state.caveats_out, shown=state.shown, context_ids=state.context_ids), res).stat
         return {"stat": stat, "meta": {"chart": chart.kind if chart else None, "caveats": [c.kind for c in state.caveats_out]}}
     return render
 

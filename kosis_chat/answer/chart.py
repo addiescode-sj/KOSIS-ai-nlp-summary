@@ -1,10 +1,14 @@
 """Re-export shim (T1-28 S3a): the chart builders moved to kosis_chat/chart/builders.py (Vega-Lite pieces in
-chart/vega.py, the grid in chart/grid.py). Every name the old module had is re-exported by name, the same objects."""
+chart/vega.py, the grid in chart/grid.py). Every name the old module had is re-exported by name, the same objects
+(T1-28 S5: Chart is gone with StatAnswer.chart; chart_spec returns a ChartSpec, chart.vega.to_vega draws it)."""
 
 from kosis_chat.chart.builders import (  # noqa: F401
     _bars,
     _base,
-    Chart,
+    BUILDERS,
+    ChartPoint,
+    ChartSeries,
+    ChartSpec,
     chart_spec,
     _CHARTS,
     _color,
@@ -27,6 +31,9 @@ from kosis_chat.chart.builders import (  # noqa: F401
     item_label,
     _listed,
     _one_term,
+    _point,
+    register_builder,
+    _spec,
     OTHER,
     period_text,
     QuestionType,

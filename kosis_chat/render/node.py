@@ -22,9 +22,9 @@ def causal_note(question: str) -> str | None:
 
 
 def step_render(inp: RenderIn, res: StatResources) -> RenderOut:
-    """The answered StatAnswer: the parts rendered, the default sentence, '참고:' lines, the source, table and chart.
+    """The answered StatAnswer: the parts rendered, the default sentence, '참고:' lines, the source and table.
 
-    In: RenderIn(question, query, computed, parts, verified, source, default_applied, caveats, shown, context_ids, chart)
+    In: RenderIn(question, query, computed, parts, verified, source, default_applied, caveats, shown, context_ids)
     Out: RenderOut(stat: StatAnswer, outcome "answered")
     Side effects: none
     Node: render (no span)
@@ -36,7 +36,7 @@ def step_render(inp: RenderIn, res: StatResources) -> RenderOut:
         text=final_text(body, inp.source, inp.default_applied, [*inp.shown, causal_note(inp.question)]),
         default_applied=inp.default_applied, source=inp.source,
         numbers_origin="code", numbers_verified=inp.verified, defaults_verified=True,  # rule_plan computed with them
-        chart=inp.chart, caveats=inp.caveats, context_fact_ids=inp.context_ids, table=table,
+        caveats=inp.caveats, context_fact_ids=inp.context_ids, table=table,
     )
     return RenderOut(stat=stat)
 

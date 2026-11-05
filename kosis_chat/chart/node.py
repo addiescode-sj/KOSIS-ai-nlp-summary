@@ -14,7 +14,7 @@ def step_chart(inp: ChartIn, res: StatResources) -> ChartOut:
     """The chart for the computed facts (chart/builders.py: a grid when the cells form one, else by pattern).
 
     In: ChartIn(type, computed)
-    Out: ChartOut(chart: kind, Vega-Lite spec, fact ids; None when there is nothing to draw)
+    Out: ChartOut(chart: ChartSpec (kind, points, fact ids); None when there is nothing to draw)
     Side effects: none
     Node: chart (no span)
     """

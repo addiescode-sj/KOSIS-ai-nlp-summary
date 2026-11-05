@@ -10,31 +10,52 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
+import weakref
 from collections.abc import Mapping
 
 from kosis_chat.prepare.clean import clean
-from kosis_chat.prepare.convert import check_meta, convert, frame_content, meta_from_row, no_rows, period_codes, rows_of
+from kosis_chat.prepare.convert import check_meta, convert, frame_digest, meta_from_row, no_rows, period_codes, rows_of
 from kosis_chat.prepare.schemas import Problem, SchemaError, TableInput, validate
 from kosis_chat.schemas.io import ParquetTable
 
-HASH_VERSION = "prepare-content-v2"
+HASH_VERSION = "prepare-content-v3"  # v3 (T1-28 S5 review): the frame part is the Arrow IPC stream, not JSON rows
 PARTIAL_NOTE = "; coverage partial: 일부 행만 받은 표"
 
 
+# Frame hashes of pyarrow Tables (immutable) by the frame object, not by the ParquetTable wrapper: a new StatInput
+# around the same Table reuses it. id -> (weak reference, hash); the entry goes when the Table is freed, and the weak
+# reference is checked so a reused id never answers. A DataFrame can change in place: hashed on every call.
+_FRAME_HASHES: dict[int, tuple[weakref.ref, str]] = {}
+_FRAME_LOCK = threading.Lock()
+
+
+def _forget(key: int):
+    def drop(_ref) -> None:
+        with _FRAME_LOCK:
+            _FRAME_HASHES.pop(key, None)
+    return drop
+
+
 def _frame_hash(table: ParquetTable) -> str:
-    """sha256 over the column names and dtypes (sorted) and every row. Never a subset of columns: two tables would
-    share a key. Kept on the object only for a pyarrow Table (immutable); a DataFrame is hashed on every call."""
-    if table._frame_hash is not None:
-        return table._frame_hash
-    typed, _, rows = frame_content(table.frame)
+    """sha256 over the frame's schema (sorted columns) and its Arrow IPC stream (prepare.convert.frame_digest). Never a
+    subset of columns: two tables would share a key."""
+    frame = table.frame
+    arrow = hasattr(frame, "to_pylist")  # pyarrow Table, not a pandas DataFrame
+    if arrow:
+        with _FRAME_LOCK:
+            hit = _FRAME_HASHES.get(id(frame))
+        if hit is not None and hit[0]() is frame:
+            table._frame_hash = hit[1]
+            return hit[1]
     digest = hashlib.sha256()
-    digest.update(json.dumps(typed, ensure_ascii=False, default=str).encode("utf-8"))
-    for row in rows:
-        digest.update(b"\n")
-        digest.update(json.dumps(row, ensure_ascii=False, default=repr).encode("utf-8"))
-    if hasattr(table.frame, "to_pylist"):  # pyarrow Table, not a pandas DataFrame
-        table._frame_hash = digest.hexdigest()
-    return digest.hexdigest()
+    frame_digest(frame, digest)
+    value = digest.hexdigest()
+    if arrow:
+        table._frame_hash = value
+        with _FRAME_LOCK:
+            _FRAME_HASHES[id(frame)] = (weakref.ref(frame, _forget(id(frame))), value)
+    return value
 
 
 def _hash(table: ParquetTable, meta: tuple[Mapping[str, str], str] | None) -> str:
