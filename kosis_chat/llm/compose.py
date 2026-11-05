@@ -10,8 +10,6 @@ from __future__ import annotations
 
 import re
 
-from pydantic import BaseModel, ConfigDict, Field
-
 from kosis_chat.answer.render import (
     derived_kind,
     direction,
@@ -23,6 +21,7 @@ from kosis_chat.answer.render import (
 from kosis_chat.compute import Computed
 
 from kosis_ai.schemas import Fact, FactPart, TextPart  # isort: skip
+from kosis_chat.compose.schemas import ComposeOutput  # isort: skip  # re-export: moved in T1-28 S1b
 
 VERSION = "compose-v2"
 SYSTEM_PROMPT = """당신은 KOSIS 통계표의 계산 결과를 한국어 답변 문장으로 쓰는 도우미입니다.
@@ -40,11 +39,6 @@ SYSTEM_PROMPT = """당신은 KOSIS 통계표의 계산 결과를 한국어 답�
 EXAMPLE = '{"answer": "2023년 서울특별시의 1인 가구는 {f1}입니다."}'
 RETRY = "[이전 답변의 문제]\n{problems}\n위 문제를 고쳐 같은 형식의 JSON 객체 하나만 다시 출력하세요."
 _PLACEHOLDER = re.compile(r"\{\s*(f\d+)\s*\}")
-
-
-class ComposeOutput(BaseModel):
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-    answer: str = Field(min_length=1, description="{f번호}를 넣은 답변 문장")
 
 
 def fact_line(fact: Fact, main: bool, context: bool = False) -> str:

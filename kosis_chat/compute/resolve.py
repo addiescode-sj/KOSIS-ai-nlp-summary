@@ -12,7 +12,6 @@ Period strings follow the Parquet files: 'YYYY' a year, 'YYYYMM' a month (a mont
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
 from itertools import product
 
 from kosis_chat.compute.engine import CalcRefused
@@ -24,6 +23,7 @@ from kosis_chat.judge import messages
 from kosis_chat.judge.question import ITEM_AXIS, Axis
 
 from kosis_ai.schemas import PeriodSpec, SelectStep, TargetSpec  # isort: skip
+from kosis_chat.compute.schemas import Resolved  # isort: skip  # re-export: moved in T1-28 S1b (the select's cells)
 
 SPAN_MONTHS = {"year": (1, 12), "H1": (1, 6), "H2": (7, 12), "Q1": (1, 3), "Q2": (4, 6), "Q3": (7, 9), "Q4": (10, 12)}
 CLARIFY_LIMIT = 20  # candidates offered when the plan leaves a category open
@@ -40,12 +40,6 @@ class NeedsClarify(Exception):
         self.axis = axis
         self.options = options
         self.message = message
-
-
-@dataclass
-class Resolved:
-    cells: list[str]
-    cautions: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------- events

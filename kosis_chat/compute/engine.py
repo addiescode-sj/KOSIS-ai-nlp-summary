@@ -11,7 +11,7 @@ an average has at least 1, a sum keeps the inputs' decimals.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from kosis_chat.compute.build import Built, Pattern
@@ -22,6 +22,7 @@ from kosis_chat.judge import messages
 from kosis_chat.judge.question import COUNT_KINDS, cell_measure
 
 from kosis_ai.schemas import Fact, RefusalReason, StatResult  # isort: skip  (question.py puts src/ on the path)
+from kosis_chat.compute.schemas import Computed, TermResult  # isort: skip  # re-export: moved in T1-28 S1b
 
 if TYPE_CHECKING:  # resolve.py imports this module
     from kosis_chat.compute.resolve import EventLookup
@@ -38,34 +39,6 @@ class CalcRefused(Exception):
         super().__init__(message)
         self.reason = reason
         self.message = message
-
-
-@dataclass(frozen=True)
-class TermResult:
-    """What one number of a period pattern became: its cell fact ids and the id of the number it stands for."""
-
-    cell_ids: list[str]
-    value_id: str  # the aggregate / share fact, or the single cell
-    periods: tuple[str, str]  # first and last period of the term's cells
-    digits: int  # decimals the number keeps
-    agg: str | None = None  # "avg" / "sum" / None (a cell or a share)
-
-
-@dataclass(frozen=True)
-class Computed:
-    result: StatResult
-    main: list[str]  # fact ids the answer should cite, in order (the rest are context)
-    note: str | None = None
-    picked: dict[str, str] = field(default_factory=dict)  # extreme: {"winner": fact id, "runner_up": fact id}
-    # extreme: every ranked candidate for the chart, best first: {"dims", "period", "value", "unit"} (facts keep two)
-    ranking: list[dict] = field(default_factory=list)
-    # value: the same cell in every period, for the chart: {"period", "value"} in period order (facts keep one)
-    series: list[dict] = field(default_factory=list)
-    pattern: Pattern | None = None  # the shape the rules built (build.py): templates and charts choose by it
-    # period patterns: what each compared number became, earlier first (templates and charts read them)
-    terms: list[TermResult] = field(default_factory=list)
-    plan: object | None = None  # the PlanV3 that made these facts
-    cautions: list[str] = field(default_factory=list)  # allowed numbers that need a word of care (S6 shows them)
 
 
 def _indexed(table: TableInput) -> tuple[TableInput, dict[str, Cell], bool]:
@@ -207,7 +180,7 @@ def _with_context(table: TableInput, computed: Computed, refs: list[str]) -> Com
     for ref in refs:
         if ref in _by_ref(table) and all(f.source_ref != ref for f in facts):
             facts.append(_cell_fact(f"f{len(facts) + 1}", _read(table, ref)))
-    return replace(computed, result=StatResult(facts=facts))
+    return computed.model_copy(update={"result": StatResult(facts=facts)})
 
 
 def compute(table: TableInput, built: Built, lookup: EventLookup | None = None) -> Computed:
@@ -236,4 +209,4 @@ def compute(table: TableInput, built: Built, lookup: EventLookup | None = None) 
         extra["terms"] = terms
     computed = Computed(StatResult(facts=run.facts), run.main, built.plan.note, pattern=built.pattern,
                         cautions=run.cautions, **extra)
-    return replace(_with_context(table, computed, built.context), plan=built.plan)
+    return _with_context(table, computed, built.context).model_copy(update={"plan": built.plan})

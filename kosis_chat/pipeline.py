@@ -169,7 +169,7 @@ class StatPipeline:
         except Unresolved as exc:
             meta["unresolved"] = exc.what
             calls.span("analyze.rules", started, "error", type=plan.type, unresolved=exc.what)
-        plan = replace(plan, unresolved=plan.unresolved or meta["unresolved"])
+        plan = plan.model_copy(update={"unresolved": plan.unresolved or meta["unresolved"]})
         user = analyze_fill.user_prompt(plan.question, self.index, plan)
         meta["route"] = "llm_fill"
         filled, problems, kind = self._fill(plan, user, calls, meta, "fill")
@@ -199,7 +199,7 @@ class StatPipeline:
     def _build(self, filled: Plan, kind, meta: dict):
         tries = [filled]
         if kind and kind != filled.type and not filled.pattern:  # a period pattern fixes its own type (value/trend/share)
-            tries.append(replace(filled, type=kind))
+            tries.append(filled.model_copy(update={"type": kind}))
         for candidate in tries:
             try:
                 return candidate, build_plan(candidate, self.index, self.table)

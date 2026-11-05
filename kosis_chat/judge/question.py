@@ -22,6 +22,9 @@ except ImportError:  # `python -m eval.run_eval` has no src/ on the path until T
     sys.path.insert(0, str(PROJECT_ROOT / "src"))
     from kosis_ai import normalize
 
+# re-export: moved in T1-28 S1b (after the block above: judge/schemas.py imports kosis_ai)
+from kosis_chat.judge.schemas import Match, Parsed, Periods, in_range  # noqa: E402
+
 ITEM_AXIS = "항목"  # the item column, next to the category names
 COUNT_KINDS = ("count_stock", "count_flow")
 
@@ -86,43 +89,6 @@ def is_total(label: str) -> bool:
 
 
 # ---------------------------------------------------------------- periods
-
-
-def in_range(period: str, start: str, end: str) -> bool:
-    """Whether a table period ('2024', '202406') falls in a year range ('2020', '2024') or a month range
-    ('202401', '202406'); a yearly period never falls in a month range."""
-    if len(start) == 6:
-        return len(period) == 6 and start <= period <= end
-    return start <= period[:4] <= end
-
-
-@dataclass(frozen=True)
-class Periods:
-    """Periods named in the question: single years ('2024') or months ('202401'), year or month ranges, or "최근".
-
-    spans: ranges that name one aggregate period (a half or a quarter of a year), in question order. On a monthly
-    table a value asked for such a span is the sum of its months. previous: "작년 대비" (the latest period against
-    the one before it). before: "10년 전", years before the named year, already turned into a single."""
-
-    singles: tuple[str, ...] = ()
-    ranges: tuple[tuple[str, str], ...] = ()
-    recent_n: int | None = None
-    recent: bool = False
-    spans: tuple[tuple[str, str], ...] = ()
-    previous: bool = False
-    before: int | None = None
-    events: tuple[tuple[str, str], ...] = ()  # (event phrase, event start) a period was read from
-
-    @property
-    def explicit(self) -> bool:
-        return bool(self.singles or self.ranges)
-
-    def contains(self, period: str) -> bool:
-        if not self.explicit:
-            return True
-        if any(period == s or (len(s) == 4 and period[:4] == s) for s in self.singles):
-            return True
-        return any(in_range(period, a, b) for a, b in self.ranges)
 
 
 def _decade_range(m: re.Match) -> tuple[str, str]:
@@ -320,15 +286,6 @@ def build_index(table: TableInput) -> TableIndex:
 # ---------------------------------------------------------------- label matching
 
 
-@dataclass(frozen=True)
-class Match:
-    axis: str
-    code: str
-    label: str
-    form: str  # the squashed text found in the question
-    exact: bool  # the whole label (minus a unit suffix) is in the question
-
-
 def _known_unit(text: str) -> bool:
     return text in normalize.KNOWN_UNITS or (text.endswith("당") and len(text) <= 12)
 
@@ -398,21 +355,6 @@ def _dedupe(found: list[Match]) -> list[Match]:
 
 
 # ---------------------------------------------------------------- the parsed question
-
-
-@dataclass
-class Parsed:
-    question: str
-    periods: Periods
-    matches: list[Match]
-    rest: str  # the question with matched label text removed, for operation words
-    words: tuple[str, ...] = ()  # question words that are not matched labels, particles cut off
-
-    def by_axis(self) -> dict[str, list[Match]]:
-        out: dict[str, list[Match]] = {}
-        for m in self.matches:
-            out.setdefault(m.axis, []).append(m)
-        return out
 
 
 def parse(index: TableIndex, question: str) -> Parsed:

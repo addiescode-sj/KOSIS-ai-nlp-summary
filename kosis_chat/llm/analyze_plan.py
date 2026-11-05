@@ -11,8 +11,6 @@ what it computes, so the sentence can name it.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-
 from pydantic import ValidationError
 
 from kosis_chat.compute import CalcRefused, Computed, build, compute
@@ -26,6 +24,7 @@ from kosis_chat.judge.question import ITEM_AXIS, TableIndex, asked_periods
 from kosis_chat.llm.analyze_fill import MENU_LIMIT, resolve_code
 
 from kosis_ai.schemas import CombineStep, MapStep, PlanV3, RankStep, SelectStep, TargetSpec  # isort: skip
+from kosis_chat.analyze.schemas import Placed  # isort: skip  # re-export: moved in T1-28 S1b
 
 VERSION = "analyze-plan-v1"
 PERIODS_SHOWN = 8  # a long period list shows its first and last periods
@@ -69,19 +68,6 @@ EXAMPLES = """[예 1] 질문: 2010년보다 2020년에 A도와 B도의 사망자
  {"id": "s", "op": "combine", "a": "p", "b": "t", "fn": "share"}],
  "show": ["p", "t", "s"], "present": "share"}"""
 RETRY = "[이전 계획의 문제]\n{problems}\n위 문제를 고쳐 같은 형식의 JSON 객체 하나만 다시 출력하세요."
-
-
-@dataclass
-class Placed:
-    """What place() made of the model's plan: the computed answer, or the problems to say back (and, when the
-    plan named something several codes could be, the ask-back)."""
-
-    plan: PlanV3 | None = None
-    query_plan: Plan | None = None  # the plan as the rules' Plan, for to_query (StatQuery slots)
-    built: Built | None = None
-    computed: Computed | None = None
-    problems: list[str] = field(default_factory=list)
-    clarify: NeedsClarify | None = None
 
 
 def _periods_line(index: TableIndex) -> str:

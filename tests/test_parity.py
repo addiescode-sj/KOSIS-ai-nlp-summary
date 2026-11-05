@@ -222,3 +222,56 @@ def test_printed_diff_path_works_as_ignore(tmp_path, capsys):
     assert parity.main(["--base", str(base), "--run", str(run)]) == 1
     printed = next(l for l in capsys.readouterr().out.splitlines() if l.startswith("  ")).strip().split(": base=")[0]
     assert parity.main(["--base", str(base), "--run", str(run), "--ignore", printed]) == 0
+
+
+def _manifest(run, **changes):
+    data = {"golden_sha256": "g", "golden_snapshot_sha256": "gs", "data_sha256": {"data/values/x.parquet": "d"},
+            "questions": 2, "runs": 1, "pipeline": "stat", "answer_format": "json", "serialization": "long",
+            "scope_mode": "oracle", "judge_mode": "rules", "form": None, "interval_seconds": 0.0,
+            "model": {"backend": "mock", "model_name": "HCX-DASH-002"}, "run_id": run.name, "started_at": run.name}
+    data.update(changes)
+    (run / "manifest.json").write_text(json.dumps(data), encoding="utf-8")
+
+
+def test_matching_manifests_pass_and_bookkeeping_keys_are_free(tmp_path, capsys):
+    rows = [_row("Q1"), _row("Q2")]
+    base, run = _write(tmp_path, "a", rows), _write(tmp_path, "b", copy.deepcopy(rows))
+    _manifest(base)
+    _manifest(run)  # run_id and started_at differ: not conditions
+    assert parity.main(["--base", str(base), "--run", str(run)]) == 0
+    assert capsys.readouterr().out.strip() == "identical"
+
+
+@pytest.mark.parametrize("key,value", [("golden_sha256", "other"), ("questions", 3), ("scope_mode", "catalog"),
+                                       ("model", {"backend": "hcx", "model_name": "HCX-DASH-002"})])
+def test_differing_run_condition_is_an_input_error(tmp_path, key, value):
+    base, run = _write(tmp_path, "a", [_row("Q1")]), _write(tmp_path, "b", [_row("Q1")])
+    _manifest(base)
+    _manifest(run, **{key: value})
+    assert parity.main(["--base", str(base), "--run", str(run)]) == 2
+    assert parity.main(["--base", str(base), "--run", str(run), "--allow-condition", key]) == 0
+
+
+def test_manifest_on_one_side_only_is_a_warning(tmp_path):
+    base, run = _write(tmp_path, "a", [_row("Q1")]), _write(tmp_path, "b", [_row("Q1")])
+    _manifest(base)
+    assert parity.main(["--base", str(base), "--run", str(run)]) == 0
+
+
+def test_check_calls_reports_attempts_and_span_status(tmp_path, capsys):
+    changed = _row("Q1")
+    changed["attempts"] = 2
+    base, run = _write(tmp_path, "a", [_row("Q1")]), _write(tmp_path, "b", [changed])
+    assert parity.main(["--base", str(base), "--run", str(run)]) == 0  # attempts is volatile for the byte check
+    capsys.readouterr()
+    assert parity.main(["--base", str(base), "--run", str(run), "--check-calls"]) == 1
+    out = capsys.readouterr().out
+    assert "Q1: calls differ" in out
+    assert "attempts: base=1 run=2" in out
+    assert "calls 1" in out
+
+
+def test_check_calls_identical_runs(tmp_path, capsys):
+    base, run = _write(tmp_path, "a", [_row("Q1")]), _write(tmp_path, "b", [_row("Q1", latency=3.0, start_ms=4.0)])
+    assert parity.main(["--base", str(base), "--run", str(run), "--check-calls"]) == 0
+    assert capsys.readouterr().out.strip() == "identical"

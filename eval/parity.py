@@ -2,6 +2,7 @@
 
     python -m eval.parity --base eval/results/<run_a> --run eval/results/<run_b>
     python -m eval.parity --base <run_a> --run <run_b> --ignore decision_metadata.compose_status
+    python -m eval.parity --base <run_a> --run <run_b> --check-calls
 
 Place in the flow (T1-28): every refactor step runs the mock golden set and compares its results.jsonl with the
 pinned S0 mock run. Rows are matched by (question_id, run_index). Every field is compared except the paths in
@@ -10,6 +11,14 @@ VOLATILE_PATHS (plus any --ignore paths); values must have the same JSON type an
 exits 0, or prints each differing path per question and exits 1. Exit 2 means the inputs could not be read (missing
 file, bad JSON or encoding, bad run_index, duplicate rows) or the command line was wrong (argparse usage errors, such
 as a missing --base or a bad --ignore path, also exit 2).
+
+Run conditions: when both folders have manifest.json (run_eval writes it), the keys in CONDITION_KEYS (golden and
+data hashes, question count, scope/judge mode, model settings, ...) must match before rows are compared; otherwise
+the two runs did not answer the same thing and parity exits 2. --allow-condition KEY skips one key on purpose.
+
+--check-calls also compares, row by row, what VOLATILE_PATHS leaves out of the byte check on purpose: `attempts`
+(HTTP attempts) together with call_status, the number of format errors and the (name, status) list of the spans.
+Use it for mock runs, where attempts are deterministic; a change there means a retry count moved.
 
 A printed diff path can be passed back as --ignore: keys that contain dots or brackets are printed quoted, e.g.
 decision_metadata.spans[1].attributes["gen_ai.request.model"], and the --ignore grammar reads that form too.
@@ -45,6 +54,15 @@ VOLATILE_PATHS: tuple[str, ...] = (
     # today (StatAnswer.source has no fetched_at); kept so a later StatOutput/source layout stays covered.
     "source.fetched_at",
     "stat_answer.source.fetched_at",
+)
+
+
+MANIFEST_FILE = "manifest.json"
+# manifest.json keys that define what was asked and how (eval/run_eval.py). Timing, run id, source hashes and
+# prompt hashes are outcomes or bookkeeping, not conditions, so they are not here.
+CONDITION_KEYS: tuple[str, ...] = (
+    "golden_sha256", "golden_snapshot_sha256", "data_sha256", "questions", "runs", "pipeline", "answer_format",
+    "serialization", "scope_mode", "judge_mode", "form", "interval_seconds", "model",
 )
 
 
@@ -185,6 +203,55 @@ def load_rows(run_dir: Path) -> dict[tuple[str, int], dict]:
     return rows
 
 
+def load_manifest(run_dir: Path) -> dict | None:
+    """manifest.json of a run folder, or None when the folder has none (a bare results.jsonl was given)."""
+    path = run_dir / MANIFEST_FILE if run_dir.is_dir() else run_dir.parent / MANIFEST_FILE
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ParityError(f"{path}: cannot read ({exc})") from exc
+    if not isinstance(data, dict):
+        raise ParityError(f"{path}: not a JSON object")
+    return data
+
+
+def condition_diffs(base: dict, run: dict, allow: tuple[str, ...] = ()) -> list[tuple[str, Any, Any]]:
+    """(key, base value, run value) for every CONDITION_KEYS entry the two manifests disagree on."""
+    found = []
+    for key in CONDITION_KEYS:
+        if key in allow:
+            continue
+        old, new = base.get(key, MISSING), run.get(key, MISSING)
+        if not (type(old) is type(new) and json.dumps(old, sort_keys=True) == json.dumps(new, sort_keys=True)):
+            found.append((key, old, new))
+    return found
+
+
+def call_record(row: dict) -> dict:
+    """What --check-calls compares for one row: attempts, call status, format error count, span (name, status)."""
+    spans = (row.get("decision_metadata") or {}).get("spans") or []
+    return {
+        "attempts": row.get("attempts", MISSING),
+        "call_status": row.get("call_status", MISSING),
+        "format_errors": len(row.get("format_errors") or []),
+        "spans": [[s.get("name"), s.get("status")] for s in spans if isinstance(s, dict)],
+    }
+
+
+def compare_calls(base: dict[tuple[str, int], dict], run: dict[tuple[str, int], dict]) -> dict:
+    """Rows in both runs whose call_record differs -> {key: [(field, base, run)]}."""
+    out = {}
+    for key in base:
+        if key in run:
+            old, new = call_record(base[key]), call_record(run[key])
+            found = [(f, old[f], new[f]) for f in old if json.dumps(old[f], default=repr) != json.dumps(new[f], default=repr)]
+            if found:
+                out[key] = found
+    return out
+
+
 def compare(base: dict[tuple[str, int], dict], run: dict[tuple[str, int], dict],
             ignore: tuple[str, ...] = ()) -> dict:
     """Question-by-question parity of two runs -> {'identical', 'diffs', 'only_base', 'only_run', 'order_changed'}."""
@@ -220,8 +287,12 @@ def render(result: dict, limit: int = 80) -> str:
         lines.append("only in run: " + ", ".join(_label(k) for k in result["only_run"]))
     if result["order_changed"]:
         lines.append("row order differs between the two results.jsonl files")
+    for key, found in result.get("calls", {}).items():
+        lines.append(f"{_label(key)}: calls differ")
+        lines += [f"  {field}: base={short(old, limit)} run={short(new, limit)}" for field, old, new in found]
     lines.append(f"different: {len(result['diffs'])} question(s), only in base {len(result['only_base'])}, "
-                 f"only in run {len(result['only_run'])}")
+                 f"only in run {len(result['only_run'])}"
+                 + (f", calls {len(result['calls'])}" if "calls" in result else ""))
     return "\n".join(lines)
 
 
@@ -232,6 +303,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ignore", action="append", default=[], metavar="PATH",
                         help="extra dotted path to skip, `[*]` for every list item (repeatable), e.g. judge.reason")
     parser.add_argument("--width", type=int, default=80, help="characters shown per value (default 80)")
+    parser.add_argument("--check-calls", action="store_true",
+                        help="also compare attempts, call_status, format error count and span (name, status) per row")
+    parser.add_argument("--allow-condition", action="append", default=[], metavar="KEY", choices=CONDITION_KEYS,
+                        help="manifest condition key allowed to differ (repeatable)")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format=LOG_FORMAT, datefmt="%H:%M:%S")
     try:
@@ -241,12 +316,26 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(str(exc))
     try:
         base, run = load_rows(Path(args.base)), load_rows(Path(args.run))
+        base_manifest, run_manifest = load_manifest(Path(args.base)), load_manifest(Path(args.run))
     except ParityError as exc:
         log.error("%s", exc)
         return 2
+    if base_manifest is None or run_manifest is None:
+        log.warning("no %s on one side: run conditions not checked", MANIFEST_FILE)
+    else:
+        conditions = condition_diffs(base_manifest, run_manifest, tuple(args.allow_condition))
+        if conditions:
+            for key, old, new in conditions:
+                log.error("run condition %s differs: base=%s run=%s", key, short(old, args.width), short(new, args.width))
+            log.error("the two runs did not answer the same golden set under the same settings; "
+                      "pass --allow-condition KEY to compare anyway")
+            return 2
     log.info("base %s: %d rows, run %s: %d rows, ignored paths %d", args.base, len(base), args.run, len(run),
              len(VOLATILE_PATHS) + len(args.ignore))
     result = compare(base, run, tuple(args.ignore))
+    if args.check_calls:
+        result["calls"] = compare_calls(base, run)
+        result["identical"] = result["identical"] and not result["calls"]
     print(render(result, args.width))
     return 0 if result["identical"] else 1
 

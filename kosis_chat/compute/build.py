@@ -8,41 +8,14 @@ Cells are ordered by period where that order matters; a source_ref ends with its
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from typing import Literal
 
 from kosis_chat.answer.render import span_text
 
 from kosis_ai.schemas import AggregateStep, CombineStep, PlanV3, QuestionType, RankStep, SelectStep  # isort: skip
+from kosis_chat.analyze.schemas import Agg, Built, Pattern, TermSteps  # isort: skip  # re-export: moved in T1-28 S1b
 
-# What the plan does, for the sentence and the chart: the five plain types, one number over periods (avg, sum), two
-# period groups compared (pavg, psum), a period against an average (vsa), two shares compared (shr), the gap between
-# two targets at two periods (gap), and the change of two targets compared (grw); plan: a plan the model wrote
-# (analyze_plan, S5b), whose shape has no name, so its sentence and chart list the numbers it shows.
-Pattern = Literal["value", "trend", "compare", "share", "extreme", "avg", "sum", "pavg", "psum", "vsa", "shr", "gap", "grw",
-                  "plan"]
-Agg = Literal["avg", "sum"]
 AGG_WORDS = {"avg": "평균", "sum": "합계"}
-
-
-@dataclass(frozen=True)
-class TermSteps:
-    """One number a period pattern compares: its cell step (the parts for a share), its value step, its total."""
-
-    cells: str
-    value: str
-    total: str | None = None
-    agg: str | None = None
-    periods: tuple[str, str] = ("", "")
-
-
-@dataclass(frozen=True)
-class Built:
-    plan: PlanV3
-    pattern: Pattern
-    terms: list[TermSteps] = field(default_factory=list)
-    context: list[str] = field(default_factory=list)  # cells shown beside the answer, never computed (a 전국 value)
-    reference: int | None = None  # compare: which of the two cells the question names as the reference
 
 
 def period_of(ref: str) -> str:

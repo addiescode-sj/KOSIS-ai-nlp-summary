@@ -7,7 +7,6 @@ Plan.unresolved for the LLM step.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field, replace
 
 from kosis_chat.compute import build
 from kosis_chat.compute.build import Built, Pattern
@@ -31,6 +30,7 @@ from kosis_chat.judge.question import (
 )
 
 from kosis_ai.schemas import QuestionType, StatQuery  # isort: skip
+from kosis_chat.analyze.schemas import Plan  # isort: skip  # re-export: moved in T1-28 S1b
 
 PERIOD_AXIS = "시점"  # Plan.over when an extreme question ranks periods ("가장 낮았던 해")
 RECENT_POINTS = 5
@@ -60,24 +60,6 @@ _GROWTH_WORDS = re.compile(r"증가율|감소율|증감률|증가\s*폭|감소\s
 _DECLINE = re.compile(r"감소율|감소\s*폭|더\s*(?:많이\s*)?줄")
 _GROWTH_RATE = re.compile(r"증가율|감소율|증감률")
 _AMOUNT = re.compile(r"증가\s*폭|감소\s*폭|증감\s*폭|더\s*(?:많이\s*)?(?:늘|줄)")
-
-
-@dataclass
-class Plan:
-    question: str
-    type: QuestionType | None
-    codes: dict[str, list[str]]  # axis -> named codes ("항목" for items), in the order the question names them
-    periods: list[str]  # table periods asked (all of a range), [] when the question names none
-    over: str | None = None  # extreme: the axis ranked over, or PERIOD_AXIS
-    pick: str | None = None
-    missing_years: list[str] = field(default_factory=list)  # asked years the table does not have
-    default_applied: dict[str, str] = field(default_factory=dict)
-    unresolved: list[str] = field(default_factory=list)
-    # A pattern over periods (avg, sum, pavg, psum, vsa, shr; see build.Pattern) and its period groups (table
-    # periods, in question order). vsa: groups[0] is the averaged range, groups[1] the single period compared with it.
-    pattern: Pattern | None = None
-    groups: list[list[str]] = field(default_factory=list)
-    events: list[tuple[str, str]] = field(default_factory=list)  # (phrase, start) of calendar events periods came from
 
 
 class Unresolved(Exception):
@@ -509,7 +491,7 @@ def _share_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | None
         raise Unresolved(["비중의 분자·분모"])
     name, parts, total = found
     problems: list[str] = []
-    fixed = _fixed(replace(plan, codes={k: v for k, v in plan.codes.items() if k != name}), index, {name}, problems)
+    fixed = _fixed(plan.model_copy(update={"codes": {k: v for k, v in plan.codes.items() if k != name}}), index, {name}, problems)
     if problems:
         raise Unresolved(problems)
     sets = [_with(fixed, name, c) for c in [*parts, total]]
@@ -544,7 +526,7 @@ def _extreme_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | No
     if share and item_total:
         codes[ITEM_AXIS] = [c for c in codes.get(ITEM_AXIS, []) if c != item_total]
     if plan.over == PERIOD_AXIS:
-        fixed = _fixed(replace(plan, codes=codes), index, set(), problems)
+        fixed = _fixed(plan.model_copy(update={"codes": codes}), index, set(), problems)
         if problems:
             raise Unresolved(problems)
         periods = plan.periods or lookup.all_periods(fixed)
@@ -552,7 +534,7 @@ def _extreme_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | No
         context_sets: list[tuple[dict, str]] = []
     else:
         name = plan.over
-        fixed = _fixed(replace(plan, codes={k: v for k, v in codes.items() if k != name}), index, {name}, problems)
+        fixed = _fixed(plan.model_copy(update={"codes": {k: v for k, v in codes.items() if k != name}}), index, {name}, problems)
         if problems:
             raise Unresolved(problems)
         axis = index.axes[name]
@@ -610,7 +592,7 @@ def _period_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | Non
         if found is None:
             raise Unresolved(["비중의 분자·분모"])
         name, parts, total = found
-        fixed = _fixed(replace(plan, codes={k: v for k, v in plan.codes.items() if k != name}), index, {name}, problems)
+        fixed = _fixed(plan.model_copy(update={"codes": {k: v for k, v in plan.codes.items() if k != name}}), index, {name}, problems)
         if problems:
             raise Unresolved(problems)
         shares = []

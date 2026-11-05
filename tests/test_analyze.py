@@ -1,7 +1,5 @@
 """Rule question analysis (T1-06): question -> Plan -> blocks (build.py) -> StatQuery, on the made-up household table."""
 
-from dataclasses import replace
-
 import pytest
 
 from conftest import write_table
@@ -100,7 +98,7 @@ def test_most_recent_is_a_period_not_a_ranking(table, index):
 def test_extreme_without_ranked_axis_is_unresolved_not_a_crash(table, index):
     plan, _ = analyze("2023년 1인 가구가 가장 많은 시도는?", table, index)
     with pytest.raises(Unresolved) as exc:
-        build_plan(replace(plan, over=None), index, table)  # what a model fill with over=null leaves
+        build_plan(plan.model_copy(update={"over": None}), index, table)  # what a model fill with over=null leaves
     assert exc.value.what == ["over"]
 
 

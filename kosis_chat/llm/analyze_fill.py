@@ -9,7 +9,6 @@ table never get through.
 
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -154,7 +153,9 @@ def apply(plan: Plan, fill: AnalyzeFill, index: TableIndex) -> tuple[Plan, list[
     if fill.over and over is None and (fill.over == PERIOD_AXIS or fill.over in index.axes):
         over = fill.over
     kind = plan.type or fill.type
-    return replace(plan, codes=codes, over=over, pick=plan.pick or fill.pick, type=kind, unresolved=[]), ignored, problems
+    filled = plan.model_copy(update={"codes": codes, "over": over, "pick": plan.pick or fill.pick, "type": kind,
+                                     "unresolved": []})
+    return filled, ignored, problems
 
 
 def _move(chosen: list[str], axes: list[str], index: TableIndex) -> dict[str, list[str]]:

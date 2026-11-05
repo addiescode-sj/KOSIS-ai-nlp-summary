@@ -164,7 +164,7 @@ def test_a_written_plan_is_worded_by_what_each_number_was_computed_from(househol
 
 
 def test_computed_holds_cautions_for_caveats():
-    assert "cautions" in Computed.__dataclass_fields__
+    assert "cautions" in Computed.model_fields  # Pydantic since T1-28 S1b
 
 
 def test_a_number_inside_a_name_is_not_a_number_of_the_caveat():

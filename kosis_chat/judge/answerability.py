@@ -8,7 +8,6 @@ The reasons are the shared RefusalReason values (src/kosis_ai/schemas.py) that e
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
 
 from kosis_chat.data.schema import Cell, TableInput
 from kosis_chat.judge import messages
@@ -37,6 +36,7 @@ from kosis_chat.judge.question import (
 )
 
 from kosis_ai.schemas import Outcome, Refusal  # isort: skip  (question.py puts src/ on the path)
+from kosis_chat.judge.schemas import Resolved, Verdict  # isort: skip  # re-export: moved in T1-28 S1b
 
 _UNIT_SUFFIX = re.compile(r"\s*\([^()]*\)\s*$")
 RECENT_POINTS = 5  # "최근 추이" with no number of years, as in scope.py
@@ -46,20 +46,10 @@ _DEFAULT_SCENARIO = "중위"
 _COUNTRY_WORD = "전국"
 
 
-@dataclass(frozen=True)
-class Verdict:
-    outcome: Outcome
-    rule: str | None = None  # the rule that decided; None when no rule fired
-    refusal: Refusal | None = None
-    clarify_question: str = ""
-    clarify_options: tuple[str, ...] = ()
-    default_applied: dict[str, str] = field(default_factory=dict)
-    final: bool = False  # True: use this outcome and skip the LLM
-
-    @classmethod
-    def refuse(cls, rule: str, reason: str, available: str | None = None, **fields: str) -> Verdict:
-        message = messages.refusal_message(reason, **fields)
-        return cls("refused", rule, Refusal(reason=reason, message=message, available=available), final=True)
+def refuse(rule: str, reason: str, available: str | None = None, **fields: str) -> Verdict:
+    """A final refusal with the code-written sentence (was the classmethod Verdict.refuse before T1-28 S1b)."""
+    message = messages.refusal_message(reason, **fields)
+    return Verdict("refused", rule, Refusal(reason=reason, message=message, available=available), final=True)
 
 
 # T1-14: docs/question_types.md criteria the rules did not implement yet
@@ -67,12 +57,6 @@ EVALUATIVE = re.compile(r"(높|많|낮|적)은\s*편")  # "높은 편이야?": n
 
 
 # ---------------------------------------------------------------- resolving labels to codes
-
-
-@dataclass
-class Resolved:
-    codes: dict[str, set[str]]  # axis -> codes the question names
-    ambiguous: list[tuple[str, list[str]]]  # (label, options) for a label several parents share
 
 
 def resolve(index: TableIndex, parsed: Parsed) -> Resolved:
@@ -167,13 +151,13 @@ def _named_text(index: TableIndex, resolved: Resolved, periods: tuple[str, ...])
 
 def _causal(p: Parsed, **_) -> Verdict | None:
     if CAUSAL_WORDS.search(p.question) and not VALUE_ASKS.search(p.question):
-        return Verdict.refuse("causal", "causal")
+        return refuse("causal", "causal")
     return None
 
 
 def _out_of_scope(p: Parsed, **_) -> Verdict | None:
     if not p.matches and OUT_OF_DOMAIN.search(p.question):
-        return Verdict.refuse("out_of_scope", "out_of_scope")
+        return refuse("out_of_scope", "out_of_scope")
     return None
 
 
@@ -187,7 +171,7 @@ def _no_period(p: Parsed, index: TableIndex, **_) -> Verdict | None:
     missing += [_range_text(a, b) for a, b in p.periods.ranges if not any(in_range(y, a, b) for y in index.periods)]
     if not missing:
         return None
-    return Verdict.refuse("no_period", "no_period", available=_available(index), asked=", ".join(missing))
+    return refuse("no_period", "no_period", available=_available(index), asked=", ".join(missing))
 
 
 def _sums_or_averages(p: Parsed) -> bool:
@@ -205,7 +189,7 @@ def _partial_range(p: Parsed, index: TableIndex, **_) -> Verdict | None:
     if not missing:
         return None
     asked = ", ".join(_period_text(y) for y in dict.fromkeys(missing))
-    return Verdict.refuse("partial_range", "no_period", available=_available(index), asked=asked)
+    return refuse("partial_range", "no_period", available=_available(index), asked=asked)
 
 
 def _period_text(period: str) -> str:
@@ -263,7 +247,7 @@ def _unit_mismatch(p: Parsed, index: TableIndex, resolved: Resolved, **_) -> Ver
         for b in labels[i + 1 :]:
             if _incompatible(named[a], named[b]):
                 units = " / ".join(f"{_show(x)} {_measure_text(named[x])}" for x in (a, b))
-                return Verdict.refuse("unit_mismatch", "unit_mismatch", what=f"{_show(a)}와(과) {_show(b)}", units=units)
+                return refuse("unit_mismatch", "unit_mismatch", what=f"{_show(a)}와(과) {_show(b)}", units=units)
     return None
 
 
@@ -289,19 +273,19 @@ def _not_aggregatable(p: Parsed, index: TableIndex, resolved: Resolved, **_) -> 
         scenario = SCENARIO_AXIS.search(name) or any(SCENARIO_AXIS.search(axis.labels[c]) for c in codes)
         if len(codes) >= 2 and not axis.has_total and scenario:
             what = "·".join(_show(axis.labels[c].split("(")[0]) for c in sorted(codes))
-            return Verdict.refuse("not_aggregatable", "not_aggregatable", what=what)
+            return refuse("not_aggregatable", "not_aggregatable", what=what)
     named = named_measures(index, resolved)
     kinds = {kind for _, kind in named.values()}
     if not named:  # the question names no measure: the table's only measure, if it has one
         kinds = {kind for found in index.measures.values() for _, kind in found}
     if kinds and all(_kind_class(k) == "rate" for k in kinds):
         what = "·".join(_show(label) for label in named) or "이 표의 값"
-        return Verdict.refuse("not_aggregatable", "not_aggregatable", what=what)
+        return refuse("not_aggregatable", "not_aggregatable", what=what)
     # A stock (가구 수, 인구) summed over several periods counts the same households again (v2, CX-REF-03).
     several = bool(p.periods.ranges) or len(p.periods.singles) >= 2
     if several and kinds and all(k == "count_stock" for k in kinds):
         what = "·".join(_show(label) for label in named) or "이 표의 값"
-        return Verdict.refuse("stock_over_periods", "not_aggregatable", what=what)
+        return refuse("stock_over_periods", "not_aggregatable", what=what)
     return None
 
 
@@ -309,9 +293,9 @@ def _no_cell(p: Parsed, index: TableIndex, resolved: Resolved, cells: list[Cell]
     """Labels and periods each exist but not together (세종 before 2012), or '전국' in a table without it."""
     if _COUNTRY_WORD in p.question and not any(m.form == _COUNTRY_WORD for m in p.matches):
         if any(axis.regional for axis in index.axes.values()):
-            return Verdict.refuse("no_cell", "class_mismatch", what="전국")
+            return refuse("no_cell", "class_mismatch", what="전국")
     if p.periods.explicit and not cells:
-        return Verdict.refuse("no_cell", "class_mismatch", what=_named_text(index, resolved, p.periods.singles))
+        return refuse("no_cell", "class_mismatch", what=_named_text(index, resolved, p.periods.singles))
     return None
 
 
@@ -320,10 +304,10 @@ def _symbol(p: Parsed, index: TableIndex, resolved: Resolved, cells: list[Cell],
         return None
     kinds = {c.value_kind for c in cells}
     if kinds == {"blank"}:  # the cell exists but nothing was collected for that period
-        return Verdict.refuse("symbol", "class_mismatch", what=_named_text(index, resolved, p.periods.singles))
+        return refuse("symbol", "class_mismatch", what=_named_text(index, resolved, p.periods.singles))
     cell = next(c for c in cells if c.value_kind != "blank")
     meaning = normalize.VALUE_LABELS.get(cell.value_kind) or "수치 아님"
-    return Verdict.refuse("symbol", "missing_value", raw=cell.value_raw.strip(), meaning=meaning)
+    return refuse("symbol", "missing_value", raw=cell.value_raw.strip(), meaning=meaning)
 
 
 # Order matters: the first rule that fires decides (a period that is not there beats a label that is shared).
