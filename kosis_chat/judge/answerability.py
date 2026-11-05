@@ -136,7 +136,7 @@ def named_measures(index: TableIndex, resolved: Resolved) -> dict[str, tuple[str
     """Label -> (unit, measure_kind) for named labels that hold exactly one measure (items like '조출생률')."""
     out = {}
     for name, codes in resolved.codes.items():
-        for code in codes:
+        for code in sorted(codes):  # sorted: codes is a set, and set order changes per process (T1-28 S0 parity)
             measure = index.measure_of(name, code)
             if measure is not None and len(_distinct_measures(index, name)) > 1:
                 out[index.axes[name].labels[code]] = measure
@@ -272,7 +272,7 @@ def _total_twin(p: Parsed, index: TableIndex, resolved: Resolved) -> dict:
     ('외국인주민 세대수') and once for the category total ('합계', 명). Returns {total label: measure} or {}."""
     for name, codes in resolved.codes.items():
         axis = index.axes[name]
-        for code in codes:
+        for code in sorted(codes):  # sorted: the first match wins, so set order must not decide it
             head = axis.labels[code].split()[0]
             total = next((c for c, label in axis.labels.items() if is_total(label)), None)
             if total and total != code and len(head) >= 2 and p.question.count(head) >= 2:
