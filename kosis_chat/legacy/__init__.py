@@ -1,1 +1,1 @@
-"""B0 chatbot and old parsers kept for compatibility; the graph does not use them (T1-28 S6)."""
+"""B0 chatbot and old parsers kept for compatibility; the graph reaches them only through graph/legacy.py (T1-28 S6)."""

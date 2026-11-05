@@ -176,6 +176,22 @@ SURFACE: tuple[tuple[str, tuple[str, ...]], ...] = (
                                      "RETRY", "build", "_read")),
     ("kosis_chat.llm.event_lookup", ("EventStart", "user_prompt", "VERSION", "SYSTEM_PROMPT")),
     ("kosis_chat.pipeline", ("add_usage", "FALLBACK_PROMPT", "_llm_attributes")),
+    # T1-28 S6: the B0 modules moved to kosis_chat/legacy/; the old paths (above and eval/run_eval.py) keep every name
+    ("kosis_chat.chatbot", ("Answer", "Chatbot", "JUDGE_MODES", "judge_record", "verdict_answer", "estimate_tokens")),
+    ("kosis_chat.raw", ("RawRunner", "DECISION_METADATA")),
+    ("kosis_chat.data.scope", ("MODES", "Scope", "select", "apply", "fit", "keep", "AUTO_MAX_CHARS")),
+    ("kosis_chat.data.serializer", ("serialize", "meta_header", "STYLES", "to_markdown", "to_wide_markdown")),
+    ("kosis_chat.llm.prompts", ("SYSTEM_PROMPTS", "NUMBER_RULE", "STRUCTURED_PROMPT_VERSIONS", "build_user_prompt",
+                                "get_system_prompt", "resolve_answer_prompt")),
+    ("kosis_chat.llm.raw_prompt", ("VERSION", "SYSTEM_PROMPT", "USER_TEMPLATE", "user_prompt")),
+    ("kosis_chat.llm.answer_schema", ("LLMAnswer", "CompactAnswer", "answer_model", "PLAIN_TEXT")),
+    ("kosis_chat.llm.compact_v2", ("CompactAnswerV2", "VERSION", "repair_hint", "strip_absent")),
+    ("kosis_chat.contract", ("to_stat_answer", "render_text", "strip_model_source", "_SOURCE_LINE", "_is_kosis_link_line")),
+    ("kosis_chat.legacy.chatbot", ("Answer", "Chatbot", "JUDGE_MODES", "judge_record", "verdict_answer")),
+    ("kosis_chat.legacy.contract_text", ("to_stat_answer", "render_text", "strip_model_source")),
+    ("kosis_chat.legacy.cli", ("main", "build_parser", "QUIT_WORDS")),  # the B0 CLI (kosis_chat/cli.py: StatModule)
+    ("kosis_chat.cli", ("main", "build_parser", "llm_config", "QUIT_WORDS")),
+    ("kosis_chat.graph.legacy", ("Answer", "judge_record", "FallbackIn", "step_fallback_chatbot")),
 )
 
 # T1-28 S3a/S3b moves: (old module, new module); every public and private name of the new module the old one lists is the
@@ -196,6 +212,15 @@ MOVED = (
     ("kosis_chat.llm.analyze_plan", "kosis_chat.analyze.write"),
     ("kosis_chat.llm.event_lookup", "kosis_chat.analyze.event_lookup"),
     ("kosis_chat.llm.compose", "kosis_chat.compose.compose"),
+    # T1-28 S6: the B0 modules moved to kosis_chat/legacy/
+    ("kosis_chat.chatbot", "kosis_chat.legacy.chatbot"),
+    ("kosis_chat.raw", "kosis_chat.legacy.raw"),
+    ("kosis_chat.data.scope", "kosis_chat.legacy.scope"),
+    ("kosis_chat.data.serializer", "kosis_chat.legacy.serializer"),
+    ("kosis_chat.llm.prompts", "kosis_chat.legacy.prompts"),
+    ("kosis_chat.llm.raw_prompt", "kosis_chat.legacy.raw_prompt"),
+    ("kosis_chat.llm.answer_schema", "kosis_chat.legacy.answer_schema"),
+    ("kosis_chat.llm.compact_v2", "kosis_chat.legacy.compact_v2"),
 )
 
 # Callables whose parameters callers pass by name or position: (module, name, parameter names in order).
@@ -262,6 +287,14 @@ SIGNATURES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("kosis_chat.answer.template", "template_parts", ("kind", "computed")),
     ("kosis_chat.answer.verify", "verify", ("parts", "computed")),
     ("kosis_chat.contract", "to_source", ("meta", "org_id")),
+    # T1-28 S6: the B0 classes run_eval and tests build through the old paths
+    ("kosis_chat.chatbot", "Chatbot", ("table", "client", "settings", "prompt_version", "form", "scope_mode",
+                                       "answer_format", "retry_interval", "judge_mode")),
+    ("kosis_chat.raw", "RawRunner", ("table", "client", "settings", "scope_mode")),
+    ("kosis_chat.data.scope", "select", ("table", "mode", "question", "golden_scope", "style")),
+    ("kosis_chat.data.serializer", "serialize", ("table", "style")),
+    ("kosis_chat.cli", "main", ("argv",)),
+    ("kosis_chat.legacy.cli", "main", ("argv",)),
 )
 KEYWORD_ONLY = {("kosis_chat.api", "summarize_stat"): {"settings", "client", "retry_interval", "llm"},
                 ("kosis_chat.analyze.node", "step_plan_rules"): {"build"},
@@ -297,6 +330,13 @@ def test_moved_names_are_the_same_objects(old: str, new: str):
     assert names, old
     differ = [n for n in names if getattr(old_mod, n) is not getattr(new_mod, n, object())]
     assert not differ, f"{old} names that are not {new}'s: {differ}"
+    # and the other way for the S6 B0 moves (bodies moved whole, so the shim keeps every name of the new module; earlier
+    # stages' new modules gained names the old paths never had)
+    if not new.startswith("kosis_chat.legacy."):
+        return
+    dropped = [n for n in vars(new_mod) if n.isidentifier() and not (n.startswith("__") and n.endswith("__"))
+               and n != "annotations" and n not in vars(old_mod)]
+    assert not dropped, f"{old} no longer re-exports {dropped}"
 
 
 # Split moves: a name each (old module, name, new module).
@@ -309,6 +349,17 @@ SPLIT_MOVES = (
     ("kosis_chat.contract", "org_id_from_table_path", "kosis_chat.render.source"),
     ("kosis_chat.contract", "_ORG_FILE", "kosis_chat.render.source"),
     ("kosis_chat.contract", "_kosis_host", "kosis_chat.render.source"),
+    # T1-28 S6: the B0 text handling of contract.py
+    ("kosis_chat.contract", "to_stat_answer", "kosis_chat.legacy.contract_text"),
+    ("kosis_chat.contract", "render_text", "kosis_chat.legacy.contract_text"),
+    ("kosis_chat.contract", "strip_model_source", "kosis_chat.legacy.contract_text"),
+    ("kosis_chat.contract", "_SOURCE_LINE", "kosis_chat.legacy.contract_text"),
+    ("kosis_chat.contract", "_SOURCE_LINK", "kosis_chat.legacy.contract_text"),
+    ("kosis_chat.contract", "_SEPARATOR", "kosis_chat.legacy.contract_text"),
+    ("kosis_chat.contract", "_is_kosis_link_line", "kosis_chat.legacy.contract_text"),
+    ("kosis_chat.graph.legacy", "Answer", "kosis_chat.legacy.chatbot"),
+    ("kosis_chat.graph.legacy", "step_fallback_chatbot", "kosis_chat.legacy.fallback"),
+    ("kosis_chat.graph.legacy", "FallbackIn", "kosis_chat.legacy.fallback"),
 )
 
 

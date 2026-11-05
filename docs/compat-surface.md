@@ -5,7 +5,7 @@
 규칙
 - 파일을 옮기면 옛 경로에 재export 파일을 남긴다. `from x import *`는 밑줄 이름을 내보내지 않으므로 **이름을 하나씩 적는다**(`from kosis_chat.prepare.convert import load_table, sha256_of` 같은 식).
 - 목록의 이름을 지우거나 인자를 바꾸려면 plan에 적고, Phase 1·Phase 2 호출처를 다시 grep한 결과를 PR에 남긴다.
-- 확인 시점: 2026-11-05, Phase 2 `src evals scripts tests lab` + Phase 1 `kosis_chat src eval tests` grep.
+- 확인 시점: 2026-11-05, Phase 2 `src evals scripts tests lab` + Phase 1 `kosis_chat src eval tests` grep. S6(11/05): Phase 2 `src evals scripts tests backend` 다시 grep(아래 "B0 → legacy/ (T1-28 S6)").
 
 ## Phase 2 (KOSIS-ai-RAG)가 쓰는 것
 
@@ -57,7 +57,7 @@ Pydantic 모델로 바꿔 단계 `schemas.py`로 옮기고 옛 경로는 이름�
 
 ## 옮긴 data/ 모듈 (T1-28 S2)
 
-`kosis_chat/data/`를 모듈 안(`prepare/`: 행→셀·단위·clean·색인)과 모듈 밖(`adapters/parquet.py`: 파일 열기)으로 나눴다. 옛 모듈은 이름을 적어 재export한다(옛 밑줄 이름은 같은 객체의 별칭). `data/scope.py`·`data/serializer.py`(B0)는 그대로.
+`kosis_chat/data/`를 모듈 안(`prepare/`: 행→셀·단위·clean·색인)과 모듈 밖(`adapters/parquet.py`: 파일 열기)으로 나눴다. 옛 모듈은 이름을 적어 재export한다(옛 밑줄 이름은 같은 객체의 별칭). `data/scope.py`·`data/serializer.py`(B0)는 그대로(S6에서 `legacy/`로 이동, 옛 경로는 shim).
 
 | 새 위치 | 이름 | 옛 경로(재export) |
 |---|---|---|
@@ -160,7 +160,7 @@ Pydantic 모델로 바꿔 단계 `schemas.py`로 옮기고 옛 경로는 이름�
 | `kosis_chat.legacy.fallback.step_fallback_chatbot(inp, res, *, chatbot, llm)` | `FallbackIn(question, golden_scope)` → `FallbackOut(answer, call)` | 챗봇 자체 2(답 + 형식 재시도). `call.summed=False`(챗봇 Answer가 자기 호출을 보고) |
 
 - 기록 → 출력: `kosis_chat.graph.spans.spans_of(records, t0)`가 옛 `_Calls.span`과 같은 dict(이름·`start_ms`·`duration_ms`·status·attributes, `gen_ai.*`가 먼저, None 제외, 기록 순서). `kosis_chat.graph.legacy.to_answer(...)`·`fallback_answer(...)`가 옛 `_done`·fallback 합치기와 같은 `chatbot.Answer`(합계는 `totals_of`: 옛 `_Calls.add` 순서). `DECISION_KEYS`(29개, `spans` 제외)가 stat 답이 스스로 쓰는 키 집합(테스트 고정).
-- `graph/legacy.py`는 옛 경로 `kosis_chat.chatbot`(Answer·judge_record)을 import한다: S6에서 챗봇이 legacy/로 갈 때까지 `tests/test_layout.py` `OLD_PATH_EXCEPTIONS`의 유일한 예외.
+- `graph/legacy.py`는 옛 경로 `kosis_chat.chatbot`(Answer·judge_record)을 import한다: S6에서 챗봇이 legacy/로 갈 때까지 `tests/test_layout.py` `OLD_PATH_EXCEPTIONS`의 유일한 예외. (S6: 이제 `kosis_chat.legacy.chatbot`을 import하고 `OLD_PATH_EXCEPTIONS`는 비었다.)
 - `kosis_chat.pipeline`에 남긴 이름: `VERSION`(= `kosis_chat.llm.compose.VERSION`, 같은 객체), `FALLBACK_PROMPT`(legacy/fallback.py), `add_usage`(graph/legacy.py), `_llm_attributes`(graph/spans.py `llm_attributes`). 없앤 것: `_Calls`, `StatPipeline._ask_model _place _fill _build _written _lookup`(Phase 1·eval·Phase 2 grep 0건).
 
 옮긴 모듈(같은 객체 재export, `test_moved_names_are_the_same_objects`):
@@ -217,6 +217,31 @@ Pydantic 모델로 바꿔 단계 `schemas.py`로 옮기고 옛 경로는 이름�
 - monkeypatch 주의: 테스트가 고쳐 쓰던 `chart.spec["data"]["values"]`는 `to_vega(chart)["data"]["values"]`로(테스트 6파일 수정, 계약 변경에 따른 것).
 
 - `kosis_chat.prepare.node`: `content_hash` 프레임 부분 = `prepare.convert.frame_digest`(정렬 스키마 + Arrow IPC 스트림, `HASH_VERSION` v3), 메모는 pyarrow Table 객체 기준(id + weakref, `_FRAME_HASHES`; 래퍼 `_frame_hash`도 채움). `prepare.convert.tbl_id_counts`(pyarrow.compute)는 `ParquetTable` 검증·`tbl_id()`가 씀.
+
+## B0 → legacy/ (T1-28 S6)
+
+B0(챗봇·raw·B0 CLI·표 자르기·직렬화·B0 프롬프트·답 스키마·compact-v2·자유문 → StatAnswer) 모듈을 `kosis_chat/legacy/`로 옮겼다. 본문은 그대로(import 줄만 새 경로로), 옛 경로는 옛 모듈의 최상위 이름을 **전부 하나씩** 재export한다(같은 객체, `tests/test_compat_surface.py` `MOVED`·`SPLIT_MOVES`, 코드 없는 shim인지는 `tests/test_layout.py` `test_b0_old_paths_are_reexport_shims`).
+
+| 새 위치 | 옛 경로(재export) |
+|---|---|
+| `kosis_chat.legacy.chatbot` (`Answer Chatbot JUDGE_MODES judge_record verdict_answer estimate_tokens`) | `kosis_chat.chatbot` |
+| `kosis_chat.legacy.raw` (`RawRunner DECISION_METADATA`) | `kosis_chat.raw` |
+| `kosis_chat.legacy.scope` | `kosis_chat.data.scope` |
+| `kosis_chat.legacy.serializer` | `kosis_chat.data.serializer` |
+| `kosis_chat.legacy.prompts` | `kosis_chat.llm.prompts` |
+| `kosis_chat.legacy.raw_prompt` | `kosis_chat.llm.raw_prompt` |
+| `kosis_chat.legacy.answer_schema` | `kosis_chat.llm.answer_schema` |
+| `kosis_chat.legacy.compact_v2` | `kosis_chat.llm.compact_v2` |
+| `kosis_chat.legacy.contract_text` (`to_stat_answer render_text strip_model_source _SOURCE_LINE _SOURCE_LINK _SEPARATOR _is_kosis_link_line`) | `kosis_chat.contract` (`to_source org_id_from_table_path _ORG_FILE _kosis_host`는 S3a대로 `render.source`; 나머지 옛 이름 `re sys Path TYPE_CHECKING parse_qs urlsplit PROJECT_ROOT TableMeta ORG_ID Refusal Source StatAnswer StatQuery TextPart`도 같은 객체) |
+| `kosis_chat.legacy.cli` (B0 CLI: `--scope --form --answer-format --prompt-version --config --serialization`) | — (아래) |
+
+- **`kosis_chat.cli`는 shim이 아니다.** plan S6 (a)대로 `StatModule` 호출로 바꿨다: `--table <parquet>`를 `adapters.parquet.read_parquet`로 읽어 `ParquetTable`(fetched_at = 파일 날짜) → `StatInput` → `StatModule(LLMConfig, StatOptions(catalog_path=옆이나 한 단계 위 tables.csv)).answer`, `answer.text` 출력(차트가 있으면 kind·점 개수 한 줄). 인자: `--table --backend {mock,hcx} --model --thinking --max-tokens -q`; hcx 키는 셸 `HCX_API_KEY`(없으면 규칙 거절·되묻기는 답하고, 모델이 필요한 질문에서 exit 2). 이름 `main build_parser QUIT_WORDS` + 신규 `llm_config KEY_ENV`. 옛 B0 CLI는 `python -m kosis_chat.legacy.cli`(같은 인자·출력, prog 이름만 바뀜). Phase 1·2 import 0건(Phase 2 `scripts/phase1.py`는 docstring에 `kosis_chat.cli --table ...` 실행 예만 — 새 CLI도 `--table`을 받음). `tests/test_chatbot.py`의 CLI 테스트 3건은 `kosis_chat.legacy.cli`로, 새 CLI는 `tests/test_cli.py`.
+- 그래프·단계 폴더(`prepare judge analyze compute compose chart render graph` + `schemas shared adapters`)에서 `kosis_chat.legacy` import는 `graph/legacy.py` 한 곳뿐(`tests/test_layout.py` `test_legacy_is_reached_only_through_graph_legacy`). fallback 노드(`legacy/fallback.py`의 `step_fallback_chatbot FallbackIn`)는 `graph/legacy.py`가 재export하고 `graph/build.py`·`graph/adapters.py`는 거기서 가져온다(같은 객체).
+- 옛 경로 금지 규칙(`OLD_PATHS`)에 `kosis_chat.llm.{prompts,raw_prompt,answer_schema,compact_v2}`를 더했고, 이제 `legacy/`와 최상위 `api.py cli.py pipeline.py`에도 적용한다(예외: `pipeline.py` → `kosis_chat.llm.compose`, `pipeline.VERSION`이 그 객체라서). `api.py`는 `legacy.chatbot.Answer`·`legacy.contract_text.to_stat_answer`·`render.source.org_id_from_table_path`를, `pipeline.py`·`legacy/fallback.py`는 `legacy.chatbot`을 import한다.
+- 모듈 객체 이름은 새 모듈을 가리킨다: 예) `kosis_chat.chatbot.scope`는 이제 `kosis_chat.legacy.scope`(옛날엔 `kosis_chat.data.scope`), `chatbot.preprocessing`은 `kosis_chat.prepare.clean`(옛 `data.preprocessing`이 재export하던 모듈). 함수·클래스·상수는 같은 객체. Pydantic 모델(`LLMAnswer CompactAnswer CompactAnswerV2 …`)의 `__module__`이 `kosis_chat.legacy.*`로 바뀜(이름·JSON 스키마 제목은 그대로). monkeypatch 주의는 S3과 같다(옛 경로 속성 재바인딩은 새 모듈에 닿지 않음; Phase 1·eval·Phase 2 grep에서 이 모듈들 대상 monkeypatch 0건).
+- `kosis_chat.pipeline.StatPipeline`: docstring에 진입점으로는 deprecated(→ `api.StatModule`·`summarize_stat[_run]`) 표시만, 경고는 내지 않음(run_eval·`api._build`가 계속 씀). `VERSION` 유지.
+- 의존성: `requirements.txt`·`pyproject.toml`에서 `google-genai` 제거(Phase 1 코드 import 0건; Phase 2는 자기 목록에 따로 둠). `python-dotenv`는 `config.load_env`(Phase 2 shim) 때문에 유지.
+- 남긴 것: `sys.path.insert` 폴백 7곳(`config.py contract→legacy/contract_text.py judge/question.py llm/answer_schema→legacy/answer_schema.py shared/patterns.py prepare/index.py prepare/convert.py` + `eval/__init__.py`) — Colab 노트북(`pip install -r requirements.txt` 뒤 `python -m kosis_chat.cli`)과 `sys.path`에 레포 루트만 둔 import가 `kosis_ai` 설치 없이 이것에 기댄다. Phase 2 쪽 shim(`config.*`, `api._build/_cached`, `contract.to_stat_answer`, `data.loader.sha256_of`, `llm.model.*`)과 옛 경로 shim 전부, fallback 노드(S6 (b), 사용자 결정 대기).
 
 ## 반환 객체에서 읽는 속성
 

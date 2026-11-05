@@ -31,13 +31,14 @@ from functools import lru_cache
 from pathlib import Path
 
 from kosis_chat.adapters.parquet import file_stamp, load_table, parquet_stamp, read_catalog
-from kosis_chat.chatbot import Answer
 from kosis_chat.config import Settings
-from kosis_chat.contract import org_id_from_table_path, to_stat_answer
+from kosis_chat.legacy.chatbot import Answer
+from kosis_chat.legacy.contract_text import to_stat_answer
 from kosis_chat.llm.model import LLMClient
 from kosis_chat.graph.build import build_graph
 from kosis_chat.pipeline import StatPipeline
 from kosis_chat.prepare.node import _catalog_row, content_hash, table_input
+from kosis_chat.render.source import org_id_from_table_path
 from kosis_chat.schemas.io import ParquetTable, StatInput, StatOptions, StatOutput
 from kosis_chat.schemas.resources import LLMConfig
 

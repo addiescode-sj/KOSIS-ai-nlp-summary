@@ -35,7 +35,7 @@ from kosis_chat.compute.node import step_compute
 from kosis_chat.graph import adapters
 from kosis_chat.graph.adapters import StatContext
 from kosis_chat.judge.node import step_judge
-from kosis_chat.legacy.fallback import step_fallback_chatbot
+from kosis_chat.graph.legacy import step_fallback_chatbot  # legacy/fallback.py, through graph/legacy.py
 from kosis_chat.render.node import step_answer_final, step_render
 from kosis_chat.schemas.resources import StatResources
 from kosis_chat.schemas.state import StatState

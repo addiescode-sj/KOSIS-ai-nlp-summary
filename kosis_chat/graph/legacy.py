@@ -3,8 +3,9 @@
 eval/run_eval.py and Phase 2 read the chatbot.Answer of StatPipeline.ask (attempts, usage, raw_responses,
 format_errors, retry_wait_seconds, latency_seconds, input_tokens_estimate, decision_metadata with its spans), so the
 totals are summed from the LLMCall records exactly as the pipeline's _Calls summed them, in call order.
-kosis_chat.chatbot is imported here although it is an old path: Answer stays there until S6 moves the chatbot to
-legacy/ (tests/test_layout.py lists this file as the one exception).
+This file is the graph's one door to kosis_chat/legacy/ (T1-28 S6): the B0 chatbot's Answer and judge_record, and the
+fallback node (legacy/fallback.py) that graph/build.py and graph/adapters.py take from here. No other graph or stage
+file imports legacy/ (tests/test_layout.py).
 """
 
 from __future__ import annotations
@@ -13,9 +14,10 @@ import time
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from kosis_chat.chatbot import Answer, judge_record
 from kosis_chat.graph.spans import spans_of
 from kosis_chat.judge.schemas import Verdict
+from kosis_chat.legacy.chatbot import Answer, judge_record
+from kosis_chat.legacy.fallback import FallbackIn, step_fallback_chatbot  # noqa: F401  for graph/build.py, adapters.py
 from kosis_chat.llm.model import STATUS_OK
 from kosis_chat.prepare.schemas import TableMeta
 from kosis_chat.schemas.state import LLMCall, Record, StatState

@@ -23,11 +23,11 @@ from dataclasses import replace
 
 import kosis_chat.shared.patterns  # noqa: F401  first: puts src/ on the path when kosis_ai is not installed (S6 removes)
 from kosis_chat.analyze.rules import build_plan
-from kosis_chat.chatbot import Answer, Chatbot
 from kosis_chat.config import Settings, load_settings, settings_from_llm
 from kosis_chat.graph.build import StatContext, build_graph, run
 from kosis_chat.graph.legacy import add_usage, answer_of  # noqa: F401  add_usage: old name
 from kosis_chat.graph.spans import llm_attributes
+from kosis_chat.legacy.chatbot import Answer, Chatbot
 from kosis_chat.legacy.fallback import FALLBACK_PROMPT
 from kosis_chat.llm import compose  # the old path kept: pipeline.VERSION is kosis_chat.llm.compose.VERSION (Phase 2)
 from kosis_chat.llm.calls import ModelAccess
@@ -45,7 +45,12 @@ _causal_note = causal_note  # T1-28 S3a: moved to render/node.py (the same funct
 
 
 class StatPipeline:
-    """Answers questions about one table; same attributes run_eval reads from a Chatbot."""
+    """Answers questions about one table; same attributes run_eval reads from a Chatbot.
+
+    Deprecated as an entry point (T1-28 S6): callers outside kosis_chat use kosis_chat.api.StatModule (a loaded
+    table) or summarize_stat / summarize_stat_run (a tables.csv key), which build this class. It stays, with the same
+    arguments and attributes, for eval/run_eval.py (decision_metadata, attempts) and api._build (Phase 2); no
+    warning is raised. pipeline.VERSION stays."""
 
     def __init__(
         self,

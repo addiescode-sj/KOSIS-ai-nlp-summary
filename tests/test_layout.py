@@ -24,17 +24,40 @@ STAGE_EXCEPTIONS = {
     ("analyze", "compute"),
 }
 # (file, old path) pairs allowed against the "no old paths in new code" rule, with the reason.
-OLD_PATH_EXCEPTIONS = {
-    # T1-28 S3b: graph/legacy.py builds the legacy chatbot.Answer (to_answer); Answer stays in kosis_chat/chatbot.py
-    # until S6 moves the chatbot to legacy/.
-    ("kosis_chat/graph/legacy.py", "kosis_chat.chatbot"),
+OLD_PATH_EXCEPTIONS: set[tuple[str, str]] = set()  # T1-28 S6: graph/legacy.py imports kosis_chat.legacy.chatbot now
+# Top-level modules held to the old-path rule too (T1-28 S6), with the old paths each may still import and why.
+TOP_LEVEL_NEW = {
+    "kosis_chat/api.py": (),
+    "kosis_chat/cli.py": (),
+    # pipeline.VERSION is kosis_chat.llm.compose.VERSION, the object Phase 2 scripts/stat_baseline.py reads.
+    "kosis_chat/pipeline.py": ("kosis_chat.llm.compose",),
+}
+# The one graph / stage file that may import kosis_chat.legacy (plans/T1-28.md S6 Done): the legacy Answer adapter,
+# which also hands the fallback node (legacy/fallback.py) to graph/build.py and graph/adapters.py.
+LEGACY_DOOR = "kosis_chat/graph/legacy.py"
+# Packages that must not import kosis_chat.legacy (beside LEGACY_DOOR): the graph, the stages and what they build on.
+NO_LEGACY = (*STAGES, "schemas", "shared", "adapters")
+# B0 modules moved to kosis_chat/legacy/ in T1-28 S6: old path -> new module. The old files are re-export shims.
+B0_MOVES = {
+    "kosis_chat/chatbot.py": "kosis_chat.legacy.chatbot",
+    "kosis_chat/raw.py": "kosis_chat.legacy.raw",
+    "kosis_chat/data/scope.py": "kosis_chat.legacy.scope",
+    "kosis_chat/data/serializer.py": "kosis_chat.legacy.serializer",
+    "kosis_chat/llm/prompts.py": "kosis_chat.legacy.prompts",
+    "kosis_chat/llm/raw_prompt.py": "kosis_chat.legacy.raw_prompt",
+    "kosis_chat/llm/answer_schema.py": "kosis_chat.legacy.answer_schema",
+    "kosis_chat/llm/compact_v2.py": "kosis_chat.legacy.compact_v2",
+    "kosis_chat/contract.py": "kosis_chat.legacy.contract_text",
 }
 NEW_PACKAGES = ("schemas", "graph", "shared", "prepare", "analyze", "compose", "chart", "render", "adapters", "legacy")
 # Old module paths that new code must not import (they become re-export shims as files move).
 OLD_PATHS = ("kosis_chat.data", "kosis_chat.answer", "kosis_chat.contract", "kosis_chat.chatbot", "kosis_chat.raw",
              "kosis_chat.llm.compose", "kosis_chat.llm.analyze_fill", "kosis_chat.llm.analyze_plan",
              "kosis_chat.llm.event_lookup", "kosis_chat.compute.analyze", "kosis_chat.compute.build", "kosis_chat.compute.roles",
-             "kosis_chat.judge.answerability", "kosis_chat.judge.messages")
+             "kosis_chat.judge.answerability", "kosis_chat.judge.messages",
+             # T1-28 S6: the B0 modules moved to kosis_chat/legacy/
+             "kosis_chat.llm.prompts", "kosis_chat.llm.raw_prompt", "kosis_chat.llm.answer_schema",
+             "kosis_chat.llm.compact_v2")
 # pandas / pyarrow: kosis_ai.normalize, and where T1-28 S2 moved the loader's use (adapters, prepare, schemas/io).
 FRAME_LIBS = ("pandas", "pyarrow")
 FRAME_ALLOWED = ("src/kosis_ai/normalize.py", "kosis_chat/adapters/",
@@ -106,9 +129,11 @@ def test_import_rules(path: Path):
     top = rel.split("/")[1] if rel.startswith("kosis_chat/") and rel.count("/") >= 2 else None
     if top == "shared":
         problems += [n for n in names if _hits(n, tuple(f"kosis_chat.{s}" for s in (*STAGES, "api", "pipeline")))]
-    if top in NEW_PACKAGES and top != "legacy":
-        allowed = tuple(old for file, old in OLD_PATH_EXCEPTIONS if file == rel)
+    if top in NEW_PACKAGES or rel in TOP_LEVEL_NEW:  # legacy/ too since T1-28 S6 (it imports the new paths)
+        allowed = tuple(old for file, old in OLD_PATH_EXCEPTIONS if file == rel) + TOP_LEVEL_NEW.get(rel, ())
         problems += [n for n in names if _hits(n, OLD_PATHS) and not _hits(n, allowed)]
+    if top in NO_LEGACY and rel != LEGACY_DOOR:
+        problems += [n for n in names if _hits(n, ("kosis_chat.legacy",))]
         if top != "graph" and top != "adapters":
             problems += [n for n in names if _hits(n, ("kosis_chat.adapters",))]
     stage = _stage_of(path)
@@ -136,3 +161,23 @@ def test_every_package_is_in_pyproject():
 def test_new_packages_exist():
     for name in NEW_PACKAGES:
         assert (CHAT / name / "__init__.py").is_file(), name
+
+
+def test_legacy_is_reached_only_through_graph_legacy():
+    """T1-28 S6 Done: no graph or stage file imports kosis_chat/legacy/ except graph/legacy.py (the Answer adapter,
+    which hands the fallback node on to graph/build.py and graph/adapters.py)."""
+    users = sorted(_rel(p) for p in ALL_FILES
+                   if any(_hits(n, ("kosis_chat.legacy",)) for n in _imports(p)) and _rel(p).split("/")[1] in NO_LEGACY)
+    assert users == [LEGACY_DOOR], users
+    assert OLD_PATH_EXCEPTIONS == set()
+
+
+@pytest.mark.parametrize("old,new", sorted(B0_MOVES.items()), ids=sorted(B0_MOVES))
+def test_b0_old_paths_are_reexport_shims(old: str, new: str):
+    """The old B0 paths only re-export (T1-28 S6): imports and the docstring, no code; the moved module is imported."""
+    tree = ast.parse((ROOT / old).read_text(encoding="utf-8"))
+    body = tree.body[1:] if ast.get_docstring(tree) is not None else tree.body
+    code = [type(node).__name__ for node in body if not isinstance(node, (ast.Import, ast.ImportFrom))]
+    assert not code, f"{old} holds code: {code}"
+    assert new in _imports(ROOT / old), f"{old} does not import {new}"
+    assert (ROOT / (new.replace(".", "/") + ".py")).is_file()

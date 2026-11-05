@@ -27,7 +27,7 @@ from kosis_chat.compose.verify import label_digits
 from kosis_chat.compute.schemas import ComputeIn
 from kosis_chat.graph.spans import step_span
 from kosis_chat.judge.schemas import JudgeIn
-from kosis_chat.legacy.fallback import FallbackIn
+from kosis_chat.graph.legacy import FallbackIn  # legacy/fallback.py, through graph/legacy.py
 from kosis_chat.llm.calls import ModelAccess
 from kosis_chat.render.schemas import AnswerFinalIn, RenderIn
 from kosis_chat.render.source import to_source

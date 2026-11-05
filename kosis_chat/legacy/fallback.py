@@ -1,6 +1,7 @@
 """The fallback node (T1-28 S3b): the compact-v2 chatbot answers what neither the rules nor the model's plan placed.
 
-It lives in legacy/ because it runs the B0 chatbot (kosis_chat/chatbot.py), which the stage packages must not import.
+It lives in legacy/ because it runs the B0 chatbot (kosis_chat/legacy/chatbot.py), which the stage packages must not
+import; the graph reaches it only through kosis_chat/graph/legacy.py.
 S6 decides whether it stays (D2: StatOptions.use_fallback_chatbot).
 """
 
@@ -12,7 +13,7 @@ from typing import Any
 
 from pydantic import ConfigDict, SkipValidation
 
-from kosis_chat.chatbot import Answer, Chatbot
+from kosis_chat.legacy.chatbot import Answer, Chatbot
 from kosis_chat.llm.calls import ModelAccess
 from kosis_chat.schemas.resources import StatResources
 from kosis_chat.schemas.state import LLMCall

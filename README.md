@@ -318,13 +318,14 @@ python -m kosis_chat.cli --table <표 파일> -q "질문"
 # 모델·thinking 바꾸기 (thinking을 켜면 max-tokens를 늘린다)
 python -m kosis_chat.cli --table <표 파일> --thinking low --max-tokens 5120 -q "질문"
 python -m kosis_chat.cli --table <표 파일> --model HCX-DASH-002 -q "질문"
+# kosis_chat.cli는 StatModule(C 파이프라인)로 답한다(T1-28 S6). 옛 B0 챗봇 CLI(--scope --form --answer-format)는
+python -m kosis_chat.legacy.cli --table <표 파일> --backend mock -q "질문"
 ```
 
 | 환경변수 | 용도 |
 | --- | --- |
 | `KOSIS_API_KEY` | KOSIS OpenAPI |
 | `HCX_API_KEY` | 기본·평가 대상 모델 HCX (CLOVA Studio v3, `nv-`로 시작하는 키) |
-| `GEMINI_API_KEY` | HCX 이전 개발용 모델 (Gemini, `--backend gemini`) |
 | `PRETEST_API_KEY` | OpenAI 호환 API로 다른 모델 사전 테스트 |
 | `LINEAR_API_KEY`, `LINEAR_TEAM_KEY` | TASK.md → Linear 자동 동기화 (선택) |
 
