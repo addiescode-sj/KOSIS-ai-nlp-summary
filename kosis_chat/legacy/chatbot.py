@@ -6,7 +6,7 @@ T1-28 S6: moved here from kosis_chat/chatbot.py (B0); the old path re-exports ev
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, replace  # noqa: F401  dataclass, field: names the old path re-exports
 from typing import Any
 
 from kosis_chat.config import Settings, load_settings
@@ -26,34 +26,11 @@ from kosis_chat.llm.model import (
 )
 from kosis_chat.llm.providers import build_client
 from kosis_chat.prepare import clean as preprocessing  # the module data/preprocessing.py re-exports
-from kosis_chat.prepare.schemas import TableInput, TableMeta
+from kosis_chat.prepare.schemas import TableInput, TableMeta  # noqa: F401  TableMeta: re-exported by the old path
+from kosis_chat.schemas.answer import Answer
 
 
-@dataclass(frozen=True)
-class Answer:
-    text: str
-    status: str
-    table_meta: TableMeta
-    prompt_version: str
-    error: str | None = None
-    input_tokens_estimate: int = 0
-    latency_seconds: float = 0.0  # call/validation wall time including HTTP retries, excluding format-retry interval
-    attempts: int = 0  # HTTP requests made (0 when no call was sent)
-    usage: dict[str, Any] = field(default_factory=dict)  # token counts reported by the API
-    scope: dict[str, Any] = field(default_factory=dict)  # table part sent: mode, scope, cells, table_chars
-    parsed: LLMAnswer | None = None
-    format_errors: list[str] = field(default_factory=list)
-    raw_responses: list[str] = field(default_factory=list)
-    answer_format: str = "text"
-    retry_wait_seconds: float = 0.0
-    decision_metadata: dict[str, Any] = field(default_factory=dict)
-    judge: dict[str, Any] = field(default_factory=dict)  # rule verdict (T1-08); empty when judge_mode is off
-    stat_answer: Any = None  # the finished StatAnswer when the C pipeline built it (kosis_chat/pipeline.py)
-    chart: Any = None  # kosis_ai.schemas.ChartSpec built from the computed facts (T1-28 S5; a Vega-Lite dict before)
-
-    @property
-    def ok(self) -> bool:
-        return self.status == STATUS_OK
+# Answer moved to kosis_chat/schemas/answer.py (T1-28 S6 legacy isolation); imported above, the same class.
 
 
 JUDGE_MODES = ("off", "rules")

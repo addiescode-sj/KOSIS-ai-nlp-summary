@@ -32,12 +32,12 @@ from pathlib import Path
 
 from kosis_chat.adapters.parquet import file_stamp, load_table, parquet_stamp, read_catalog
 from kosis_chat.config import Settings
-from kosis_chat.legacy.chatbot import Answer
-from kosis_chat.legacy.contract_text import to_stat_answer
 from kosis_chat.llm.model import LLMClient
 from kosis_chat.graph.build import build_graph
+from kosis_chat.graph.legacy import stat_answer_of  # the fallback answer's B0 conversion, through the one legacy door
 from kosis_chat.pipeline import StatPipeline
 from kosis_chat.prepare.node import _catalog_row, content_hash, table_input
+from kosis_chat.schemas.answer import Answer
 from kosis_chat.render.source import org_id_from_table_path
 from kosis_chat.schemas.io import ParquetTable, StatInput, StatOptions, StatOutput
 from kosis_chat.schemas.resources import LLMConfig
@@ -152,7 +152,7 @@ def summarize_stat_run(question: str, table_id: str, *, settings: Settings | Non
 
 def _output(question: str, answer: Answer, org_id: str | None, label: str) -> StatOutput:
     """The StatOutput of one Answer; RuntimeError when the model call failed (summarize_stat's contract)."""
-    stat = to_stat_answer(question, answer, org_id=org_id)
+    stat = stat_answer_of(question, answer, org_id=org_id)
     if stat is None:
         raise RuntimeError(f"{label}: the model call failed ({answer.status}: {answer.error})")
     spans = (answer.decision_metadata or {}).get("spans") or []

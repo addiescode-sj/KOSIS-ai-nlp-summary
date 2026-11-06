@@ -3,9 +3,11 @@
 eval/run_eval.py and Phase 2 read the chatbot.Answer of StatPipeline.ask (attempts, usage, raw_responses,
 format_errors, retry_wait_seconds, latency_seconds, input_tokens_estimate, decision_metadata with its spans), so the
 totals are summed from the LLMCall records exactly as the pipeline's _Calls summed them, in call order.
-This file is the graph's one door to kosis_chat/legacy/ (T1-28 S6): the B0 chatbot's Answer and judge_record, and the
-fallback node (legacy/fallback.py) that graph/build.py and graph/adapters.py take from here. No other graph or stage
-file imports legacy/ (tests/test_layout.py).
+This file is the one door to kosis_chat/legacy/ (T1-28 S6), and what goes through it is the fallback chatbot only:
+judge_record, the fallback node (legacy/fallback.py) that graph/build.py and graph/adapters.py take from here, the
+Chatbot and FALLBACK_PROMPT that pipeline.py builds the fallback from, and the B0 text-to-StatAnswer conversion of a
+fallback answer (stat_answer_of). The Answer itself is kosis_chat/schemas/answer.py. No other new-code file (graph,
+stages, schemas, shared, adapters, api.py, pipeline.py, cli.py) imports legacy/ (tests/test_layout.py).
 """
 
 from __future__ import annotations
@@ -16,10 +18,16 @@ from typing import Any
 
 from kosis_chat.graph.spans import spans_of
 from kosis_chat.judge.schemas import Verdict
-from kosis_chat.legacy.chatbot import Answer, judge_record
-from kosis_chat.legacy.fallback import FallbackIn, step_fallback_chatbot  # noqa: F401  for graph/build.py, adapters.py
+from kosis_chat.legacy.chatbot import Chatbot, judge_record  # noqa: F401  Chatbot: pipeline.py's fallback chatbot
+from kosis_chat.legacy.contract_text import to_stat_answer as _text_to_stat_answer
+from kosis_chat.legacy.fallback import (  # noqa: F401  for graph/build.py, adapters.py and pipeline.py
+    FALLBACK_PROMPT,
+    FallbackIn,
+    step_fallback_chatbot,
+)
 from kosis_chat.llm.model import STATUS_OK
 from kosis_chat.prepare.schemas import TableMeta
+from kosis_chat.schemas.answer import Answer
 from kosis_chat.schemas.state import LLMCall, Record, StatState
 
 from kosis_ai.schemas import StatAnswer  # isort: skip
@@ -117,3 +125,16 @@ def answer_of(state: StatState, *, table_meta: TableMeta, prompt_version: str, f
     answer = to_answer(state.stat, state.verdict, state.meta, state.records, state.started, table_meta=table_meta,
                        prompt_version=prompt_version)
     return replace(answer, chart=state.chart_out) if state.chart_out is not None else answer
+
+
+def stat_answer_of(question: str, answer: Answer, *, org_id: str | None = None) -> StatAnswer | None:
+    """The StatAnswer of an Answer (api.py): None when the model call failed, the C pipeline's finished StatAnswer, or
+    the fallback chatbot's text answer through the B0 conversion (legacy/contract_text.py to_stat_answer).
+
+    The same result as contract.to_stat_answer for every Answer: that function answers the first two cases the same
+    way before its B0 branches (tests/test_layout.py keeps the equality)."""
+    if not answer.ok:
+        return None
+    if answer.stat_answer is not None:
+        return answer.stat_answer
+    return _text_to_stat_answer(question, answer, org_id=org_id)

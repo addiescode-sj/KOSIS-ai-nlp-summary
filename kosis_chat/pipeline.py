@@ -25,16 +25,15 @@ import kosis_chat.shared.patterns  # noqa: F401  first: puts src/ on the path wh
 from kosis_chat.analyze.rules import build_plan
 from kosis_chat.config import Settings, load_settings, settings_from_llm
 from kosis_chat.graph.build import StatContext, build_graph, run
-from kosis_chat.graph.legacy import add_usage, answer_of  # noqa: F401  add_usage: old name
+from kosis_chat.graph.legacy import FALLBACK_PROMPT, Chatbot, add_usage, answer_of  # noqa: F401  add_usage: old name
 from kosis_chat.graph.spans import llm_attributes
-from kosis_chat.legacy.chatbot import Answer, Chatbot
-from kosis_chat.legacy.fallback import FALLBACK_PROMPT
 from kosis_chat.llm import compose  # the old path kept: pipeline.VERSION is kosis_chat.llm.compose.VERSION (Phase 2)
 from kosis_chat.llm.calls import ModelAccess
 from kosis_chat.llm.model import LLMClient
 from kosis_chat.llm.providers import build_client
 from kosis_chat.prepare.schemas import TableInput
 from kosis_chat.render.node import causal_note
+from kosis_chat.schemas.answer import Answer
 from kosis_chat.schemas.resources import LLMConfig, StatResources, load_resources
 
 VERSION = compose.VERSION

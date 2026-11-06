@@ -132,8 +132,9 @@ def test_import_rules(path: Path):
     if top in NEW_PACKAGES or rel in TOP_LEVEL_NEW:  # legacy/ too since T1-28 S6 (it imports the new paths)
         allowed = tuple(old for file, old in OLD_PATH_EXCEPTIONS if file == rel) + TOP_LEVEL_NEW.get(rel, ())
         problems += [n for n in names if _hits(n, OLD_PATHS) and not _hits(n, allowed)]
-    if top in NO_LEGACY and rel != LEGACY_DOOR:
+    if (top in NO_LEGACY or rel in TOP_LEVEL_NEW) and rel != LEGACY_DOOR:  # api.py, cli.py, pipeline.py too (S6)
         problems += [n for n in names if _hits(n, ("kosis_chat.legacy",))]
+    if top in NO_LEGACY and rel != LEGACY_DOOR:
         if top != "graph" and top != "adapters":
             problems += [n for n in names if _hits(n, ("kosis_chat.adapters",))]
     stage = _stage_of(path)
@@ -164,10 +165,12 @@ def test_new_packages_exist():
 
 
 def test_legacy_is_reached_only_through_graph_legacy():
-    """T1-28 S6 Done: no graph or stage file imports kosis_chat/legacy/ except graph/legacy.py (the Answer adapter,
-    which hands the fallback node on to graph/build.py and graph/adapters.py)."""
+    """T1-28 S6 Done: no new-code file (graph, stages, schemas, shared, adapters, api.py, cli.py, pipeline.py) imports
+    kosis_chat/legacy/ except graph/legacy.py, the one door, which hands on the fallback chatbot (legacy/fallback.py,
+    Chatbot, FALLBACK_PROMPT, the B0 text conversion); the Answer is kosis_chat/schemas/answer.py."""
     users = sorted(_rel(p) for p in ALL_FILES
-                   if any(_hits(n, ("kosis_chat.legacy",)) for n in _imports(p)) and _rel(p).split("/")[1] in NO_LEGACY)
+                   if any(_hits(n, ("kosis_chat.legacy",)) for n in _imports(p))
+                   and (_rel(p).split("/")[1] in NO_LEGACY or _rel(p) in TOP_LEVEL_NEW))
     assert users == [LEGACY_DOOR], users
     assert OLD_PATH_EXCEPTIONS == set()
 
