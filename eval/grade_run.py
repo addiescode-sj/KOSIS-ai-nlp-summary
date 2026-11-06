@@ -24,6 +24,7 @@ from eval.harness import _failed, save_report, slot_summary
 from eval.regress import grader_sha256
 from eval.scorer import read_jsonl
 
+from kosis_ai.compat import load_stat_answer  # isort: skip
 from kosis_ai.schemas import StatAnswer  # isort: skip
 
 _TEXT_NUMBER = re.compile(r"unsupported text number '([^']+)'")
@@ -76,7 +77,7 @@ def main(argv: list[str] | None = None) -> int:
         if row is None or row.get("stat_answer") is None:  # a failed call: run_failure, as eval.harness grades it
             grades.append(_failed(item, (row or {}).get("call_error") or "no answer"))
             continue
-        answer = StatAnswer.model_validate(row["stat_answer"])
+        answer = load_stat_answer(row["stat_answer"])  # a run saved before T1-28 S5 has stat_answer.chart
         try:
             graded = grade(item, answer, read_cells(item.path))
         except ValueError as exc:  # eval/scorer.RULES has no place for an error type on this kind

@@ -227,11 +227,13 @@ def test_run_eval_stat_pipeline(household_path, mock_settings, tmp_path):
 ])  # gap and grw are drawn as a grid of targets by periods (S6, tests/test_answer_contract.py)
 def test_chart_for_each_type(households, built, kind, rows, highlighted):
     from kosis_chat.answer.chart import SCHEMA, chart_spec
+    from kosis_chat.chart.vega import to_vega
     chart = chart_spec(kind, compute(clean(households), built))
-    spec, values = chart.spec, chart.spec["data"]["values"]
-    assert spec["$schema"] == SCHEMA and len(values) == rows
-    assert [v["이름"] for v in values if v["강조"] == "예"] == highlighted
-    assert chart.fact_ids and chart.model_dump()  # the shared Chart contract: kind, spec, the facts drawn
+    spec = to_vega(chart)
+    values = spec["data"]["values"]
+    assert spec["$schema"] == SCHEMA and len(values) == rows == len(chart.points())
+    assert [v["이름"] for v in values if v["강조"] == "예"] == highlighted == [p.label for p in chart.points() if p.highlight]
+    assert chart.fact_ids and chart.model_dump()  # the shared ChartSpec contract: kind, points, the facts drawn
     json.dumps(spec)  # plain JSON, ready for any Vega-Lite viewer
 
 
@@ -244,7 +246,9 @@ def test_pipeline_answer_carries_a_chart_and_the_page_shows_it(household_path, m
     (gdir / "g.jsonl").write_text(json.dumps(items[0], ensure_ascii=False) + "\n", encoding="utf-8")
     run_dir = run_eval.run(gdir, "C", mock_settings, tmp_path / "results", client=MockClient("x"), pipeline="stat")
     (row,) = scorer.read_jsonl(run_dir / "results.jsonl")
-    assert row["chart"]["data"]["values"][0]["이름"] == "제주특별자치도"
+    assert row["chart"]["series"][0]["points"][0]["label"] == "제주특별자치도"  # a ChartSpec (T1-28 S5)
+    assert row["chart"]["vega_lite"]["data"]["values"][0]["이름"] == "제주특별자치도"  # with its Vega-Lite
+    assert "chart" not in row["stat_answer"]
     page = view_run.build(run_dir).read_text(encoding="utf-8")
     assert "vega-embed@6.26.0" in page and "제주특별자치도" in page and "2023년 1인 가구가 가장 많은 시도는?" in page
     assert PlanV3.model_validate(row["decision_metadata"]["plan"]).present == "extreme"  # the plan is saved
@@ -335,7 +339,8 @@ def test_average_question_is_answered_with_a_chart_in_the_contract(households):
     assert answer.decision_metadata["pattern"] == "avg" and stat.query.periods == ["2015", "2020", "2023", "2024"]
     assert [s.op for s in stat.query.plan.steps] == ["select", "aggregate"]
     assert stat.result.facts[4].derivation == "(f1 + f2 + f3 + f4) / 4" and stat.text.startswith("2015년부터 2024년까지 서울특별시 1인 가구는 연평균 3,101.5가구입니다.")
-    assert stat.chart.kind == "timeline" and stat.chart.fact_ids == ["f1", "f2", "f3", "f4", "f5"] and answer.chart == stat.chart.spec
+    assert answer.chart.kind == "timeline" and answer.chart.fact_ids == ["f1", "f2", "f3", "f4", "f5"]
+    assert [p.fact_id for p in answer.chart.points()] == ["f1", "f2", "f3", "f4"] and "chart" not in stat.model_dump()
     assert stat.numbers_origin == "code" and stat.numbers_verified and answer.decision_metadata["chart"] == "timeline"
     _, user = bot.client.calls[0]
     assert "{f5} [반드시 인용] 평균 ((f1 + f2 + f3 + f4) / 4) = 3,101.5가구 — 2015년~2024년 4개 시점 평균" in user
@@ -362,11 +367,11 @@ def test_pattern_templates_pass_verification(households, question, pattern, text
     assert answer.decision_metadata["compose"] == "template" and answer.decision_metadata["pattern"] == pattern
     assert stat.numbers_verified
     assert stat.text.startswith(text), stat.text
-    assert stat.chart is not None and all(stat.result.get(i) for i in stat.chart.fact_ids)
+    assert answer.chart is not None and all(stat.result.get(i) for i in answer.chart.fact_ids)
 
 
 def test_stock_sum_is_refused_before_any_call(households):
     bot = pipeline(households, [])
     answer = bot.ask("2015~2024년 서울특별시 1인 가구를 모두 합치면 몇 가구야?")
     assert answer.stat_answer.outcome == "refused" and answer.stat_answer.refusal.reason == "not_aggregatable" and bot.client.calls == []
-    assert answer.stat_answer.chart is None and answer.chart is None
+    assert "chart" not in answer.stat_answer.model_dump() and answer.chart is None

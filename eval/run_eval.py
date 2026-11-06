@@ -1,4 +1,9 @@
-"""Run golden questions under fixed conditions and save raw answers, automatic checks and a manifest."""
+"""Run golden questions under fixed conditions and save raw answers, automatic checks and a manifest.
+
+The model (T1-28 S2c): --backend hcx reads the key from the HCX_API_KEY shell environment variable at start (no .env)
+and builds the client from an LLMConfig; --backend mock needs no key. Settings are the built-in defaults plus the
+flags (configs/model.yaml is gone; --config is ignored with a warning).
+"""
 
 from __future__ import annotations
 
@@ -7,6 +12,7 @@ import datetime as dt
 import hashlib
 import json
 import logging
+import os
 import re
 import sys
 import time
@@ -17,13 +23,16 @@ from dataclasses import replace
 from eval.scorer import KINDS, SCORING_VERSION
 from eval.recording import RecordingClient, RunRecorder, source_snapshot
 from eval.audit_report import save_reports
+from kosis_chat.chart.vega import with_vega
 from kosis_chat.chatbot import JUDGE_MODES, Answer, Chatbot
-from kosis_chat.config import PROJECT_ROOT, Settings, load_env, load_settings, resolve_path
+from kosis_chat.config import PROJECT_ROOT, Settings, load_settings, resolve_path
 from kosis_chat.contract import org_id_from_table_path, to_stat_answer
 from kosis_chat.data.loader import load_table, sha256_of
 from kosis_chat.data.scope import MODES as SCOPE_MODES
 from kosis_chat.llm import prompts, raw_prompt
 from kosis_chat.llm.model import BACKENDS, STATUS_FORMAT_ERROR, STATUS_PIPELINE_ERROR, LLMClient, TraceWriteError, build_client
+from kosis_chat.llm.providers import build_client as client_for
+from kosis_chat.schemas.resources import MOCK_PROVIDER, LLMConfig
 from kosis_chat.pipeline import StatPipeline
 from kosis_chat.raw import RawRunner
 
@@ -37,6 +46,24 @@ _NUMBER = re.compile(r"\d[\d,]*(?:\.\d+)?")
 
 class GoldenError(ValueError):
     pass
+
+
+def chart_record(chart) -> dict | None:
+    """The results.jsonl `chart`: the ChartSpec as JSON with its Vega-Lite filled in (eval/view_run.py draws it)."""
+    if chart is None:
+        return None
+    return with_vega(chart).model_dump(mode="json")
+
+
+def llm_config(settings: Settings) -> LLMConfig:
+    """The LLMConfig of the run's settings; a provider other than mock takes its key from the shell environment
+    variable settings.api_key_env (HCX_API_KEY). KeyError when it is unset or empty."""
+    if settings.backend == MOCK_PROVIDER:
+        return LLMConfig.from_settings(settings)
+    key = os.environ.get(settings.api_key_env, "")
+    if not key:
+        raise KeyError(settings.api_key_env)
+    return LLMConfig.from_settings(settings, api_key=key)
 
 
 def load_golden(path: Path) -> tuple[str, list[dict], str]:
@@ -217,6 +244,7 @@ def run(
         "model": settings.model_params(),
         "runs": runs,
         "questions": len(items),
+        "question_ids": sorted({str(item["id"]) for item in items}),  # eval.parity checks the recorded rows against it
         # Mock runs are pre-tests and stay out of eval-history.
         "pretest": settings.backend == "mock",
         "timing": timing,
@@ -297,8 +325,9 @@ def run(
                         "judge": answer.judge,
                         # The same answer in the shared contract (src/kosis_ai/schemas.py); None when the call failed.
                         "stat_answer": stat_answer.model_dump(mode="json") if stat_answer else None,
-                        # Vega-Lite chart built from the computed facts (--pipeline stat); None otherwise.
-                        "chart": answer.chart,
+                        # The chart built from the computed facts (--pipeline stat; T1-28 S5: the ChartSpec of
+                        # StatOutput.chart, its Vega-Lite in vega_lite; before S5 this key held the Vega-Lite spec).
+                        "chart": chart_record(answer.chart),
                         "latency_seconds": round(answer.latency_seconds, 3),
                         "attempts": answer.attempts,
                         "usage": answer.usage,
@@ -393,7 +422,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m eval.run_eval", description="Run the golden set (calls the model).")
     parser.add_argument("--stage", required=True, help="stage name, e.g. B0")
     parser.add_argument("--golden", default="eval/golden/golden.jsonl", help="golden .jsonl file or a directory of them")
-    parser.add_argument("--config", default=None)
+    parser.add_argument("--config", default=None, help="ignored (configs/model.yaml was removed in T1-28 S2c)")
     parser.add_argument("--backend", choices=BACKENDS, default=None)
     parser.add_argument("--answer-format", choices=["text", "json"], default="text")
     parser.add_argument("--prompt-version", choices=sorted(prompts.SYSTEM_PROMPTS), default=None)
@@ -405,7 +434,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--runs", type=int, default=None, help="override eval.runs (changing it requires re-running all stages)")
     parser.add_argument("--interval", type=float, default=1.0, help="seconds to wait between model calls (avoids HTTP 429; default 1)")
     parser.add_argument("--form", default=None, help="text file with answer-format instructions appended to each question")
-    parser.add_argument("--serialization", choices=["long", "wide"], default=None, help="table text style (default: model.yaml)")
+    parser.add_argument("--serialization", choices=["long", "wide"], default=None, help="table text style (default: long)")
     parser.add_argument(
         "--scope", choices=SCOPE_MODES, default="oracle",
         help="table part per question: oracle (golden `scope`), auto (from the question), full (default: oracle)",
@@ -430,9 +459,9 @@ def main(argv: list[str] | None = None) -> int:
         )
     except ValueError as exc:
         parser.error(str(exc))
-    load_env()
+    if args.config:
+        print(f"warning: --config {args.config} is ignored (T1-28 S2c: built-in settings + flags)", file=sys.stderr)
     settings = load_settings(
-        args.config,
         backend=args.backend,
         prompt_version=version,
         model_name=args.model,
@@ -440,6 +469,10 @@ def main(argv: list[str] | None = None) -> int:
         max_tokens=args.max_tokens,
         serialization=args.serialization,
     )
+    try:
+        client = client_for(llm_config(settings))
+    except KeyError as exc:
+        parser.error(f"--backend {settings.backend} needs the {exc.args[0]} shell environment variable (.env is not read)")
     log_path, handlers = setup_logging(resolve_path(args.log_dir), args.stage)
     try:
         run_dir = run(
@@ -447,6 +480,7 @@ def main(argv: list[str] | None = None) -> int:
             args.stage,
             settings,
             resolve_path(args.out),
+            client=client,
             runs=args.runs,
             interval=args.interval,
             form_path=resolve_path(args.form) if args.form else None,

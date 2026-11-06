@@ -117,10 +117,12 @@ def test_missing_key_or_model_is_a_config_error(mock_settings, monkeypatch):
 def test_load_settings_reads_model_block(tmp_path):
     cfg = tmp_path / "m.yaml"
     cfg.write_text("backend: hcx\nmodel: {name: HCX-007, thinking_effort: low, max_tokens: 5120}\n", encoding="utf-8")
-    s = load_settings(cfg)
+    with pytest.deprecated_call():  # a settings file is the Phase 2 shim since T1-28 S2c
+        s = load_settings(cfg)
     assert (s.model_name, s.thinking_level, s.max_tokens) == ("HCX-007", "low", 5120)
     assert (s.base_url, s.api_key_env) == ("https://clovastudio.stream.ntruss.com", "HCX_API_KEY")
-    assert load_settings(cfg, thinking_level="none", model_name="HCX-DASH-002").model_name == "HCX-DASH-002"
+    with pytest.deprecated_call():
+        assert load_settings(cfg, thinking_level="none", model_name="HCX-DASH-002").model_name == "HCX-DASH-002"
 
 
 def test_repo_config_defaults_to_hcx():

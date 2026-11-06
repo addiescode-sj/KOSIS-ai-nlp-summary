@@ -7,13 +7,16 @@ the shared reasons; a caution is kept when the number is allowed but needs a wor
 
 from __future__ import annotations
 
+from kosis_chat.compute import texts
 from kosis_chat.compute.engine import CalcRefused, _Read
 from kosis_chat.data.schema import TableInput
 from kosis_chat.judge import messages
-from kosis_chat.judge.question import COUNT_KINDS, ITEM_AXIS, TableIndex, build_index, is_total
+from kosis_chat.shared import cautions
+from kosis_chat.judge.question import COUNT_KINDS, ITEM_AXIS, TableIndex, is_total
+# One index per TableInput (T1-28 S2: TableInput.caches, was a module dict keyed by id(table)); re-exported here.
+from kosis_chat.prepare.index import index_of
 
 RATE_KINDS = ("ratio", "average", "index")
-_INDEX: dict[int, tuple[TableInput, TableIndex]] = {}
 
 
 def _items(reads: list[_Read]) -> str:
@@ -31,7 +34,7 @@ def check_sum(reads: list[_Read]) -> None:
 def average_caution(reads: list[_Read]) -> str | None:
     """R2: an average over periods of a rate is a simple average (not weighted); allowed, with a caution."""
     if any(r.kind in RATE_KINDS for r in reads):
-        return f"simple_average: {_items(reads)}의 시점 평균은 가중치 없는 단순 평균입니다."
+        return cautions.simple_average(_items(reads))
     return None
 
 
@@ -40,23 +43,13 @@ def check_same_unit(fn: str, a: str | None, b: str | None, what: str) -> None:
     if a and b and a != b:
         raise CalcRefused("unit_mismatch", messages.refusal_message("unit_mismatch", what=what, units=f"{a} / {b}"))
     if fn == "pp_diff" and not (a == "%" and b == "%"):
-        raise CalcRefused("unit_mismatch", f"{what}: %p 차이는 두 값이 모두 %일 때만 구할 수 있습니다(단위 {a} / {b}).")
+        raise CalcRefused("unit_mismatch", texts.pp_diff_units(what, a, b))
 
 
 def check_share_parts(parts: list[_Read]) -> None:
     """R7: several parts are summed for a share, so they must be counts."""
     if len(parts) > 1 and any(r.kind not in COUNT_KINDS for r in parts if r.kind):
         raise CalcRefused("not_aggregatable", messages.refusal_message("not_aggregatable", what=_items(parts)))
-
-
-def index_of(table: TableInput) -> TableIndex:
-    cached = _INDEX.get(id(table))
-    if cached is None or cached[0] is not table:
-        if len(_INDEX) > 8:
-            _INDEX.clear()
-        cached = (table, build_index(table))
-        _INDEX[id(table)] = cached
-    return cached[1]
 
 
 def _whole_label(label: str) -> bool:
@@ -93,13 +86,13 @@ def check_share_scope(table: TableInput, parts: list[_Read], total: _Read) -> No
             if pc is None or tc is None or not _covers(index, name, tc, pc, t.dims.get(name, "")):
                 wrong.append(f"{name} {p.dims.get(name)}⊄{t.dims.get(name)}")
         if wrong:
-            raise CalcRefused("class_mismatch", f"비중의 분모가 분자를 포함하지 않습니다({', '.join(wrong)}).")
+            raise CalcRefused("class_mismatch", texts.share_outside_total(wrong))
 
 
 def check_share_bound(value: float, what: str) -> None:
     """R6: a share of a whole lies in 0..100%."""
     if not 0 <= value <= 100:
-        raise CalcRefused("class_mismatch", f"{what} 비중이 {value:.1f}%로 0~100% 밖이라 분모가 분자의 전체가 아닙니다.")
+        raise CalcRefused("class_mismatch", texts.share_out_of_bounds(what, value))
 
 
 def check_rank_units(units: list[str | None]) -> None:

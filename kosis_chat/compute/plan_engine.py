@@ -14,7 +14,6 @@ import operator
 import re
 from dataclasses import dataclass, field
 
-from kosis_chat.answer.render import span_text
 from kosis_chat.compute import semantics
 from kosis_chat.compute.resolve import EventLookup, resolve_select
 from kosis_chat.compute.engine import (
@@ -32,9 +31,13 @@ from kosis_chat.compute.engine import (
 )
 from kosis_chat.data.schema import TableInput
 from kosis_chat.judge import messages
+from kosis_chat.shared.patterns import FACT_ID
+from kosis_chat.shared.periods import span_text  # T1-28 S2b: was answer.render (compute must not import the answer)
 
 from kosis_ai.schemas import AggregateStep, CombineStep, Fact, FindStep, MapStep, PlanV3, RankStep, SelectStep  # isort: skip
 
+# A whole fact id inside a derivation (renaming f3 must not touch f30): the shared FACT_ID between word boundaries.
+_FACT_ID_WORD = re.compile(rf"\b{FACT_ID.pattern}\b")
 _CMP = {">": operator.gt, ">=": operator.ge, "<": operator.lt, "<=": operator.le, "==": operator.eq}
 AGG_NOTES = {"avg": "평균", "sum": "합계"}
 
@@ -294,7 +297,7 @@ class _Run:
             for f in group:
                 note = (f"{len(ranked)}개 중 {word}" if place == "winner" else "두 번째" if place == "runner_up"
                         else f"{place[6:]}번째") if f.id == scored else None
-                expr = re.sub(r"\bf\d+\b", lambda m: renamed[m.group(0)], f.derivation) if f.derivation else None
+                expr = _FACT_ID_WORD.sub(lambda m: renamed[m.group(0)], f.derivation) if f.derivation else None
                 self.add(f.model_copy(update={"id": renamed[f.id], "derivation": expr, "note": note or f.note}))
             self.ids.n = len(self.facts)
             picked[place] = renamed[scored]

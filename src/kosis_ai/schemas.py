@@ -7,7 +7,8 @@ v2 (2026-10-26, plans/T0-03.md): every model rejects unknown fields (a typo cann
 id, value, raw, source_ref, derivation and round, and StatAnswer records who wrote the numbers (numbers_origin) and
 whether code verified them (numbers_verified). Records written before v2 still load: the new fields default to
 "not recorded" (None / False) and are only cross-checked when set.
-Also v2: the chart drawn from the facts (Chart) carried inside StatAnswer.
+Also v2: the chart drawn from the facts (Chart) carried inside StatAnswer; T1-28 S5 moved it out (ChartSpec, the
+module's StatOutput.chart) and dropped StatAnswer.chart (old records load: kosis_ai/compat.py).
 v3 (T0-04): the calculation as blocks (PlanV3), recorded in StatQuery.plan; it replaced v2's operation over periods
 (StatQuery.op / period_groups), which records written before v3 still carry and which are dropped on load.
 """
@@ -22,6 +23,8 @@ from typing import Annotated, Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from kosis_ai.units import SUFFIX_UNIT, unit_or_suffix
+
 QuestionType = Literal["value", "trend", "compare", "share", "extreme"]
 QuestionKind = Literal["answerable", "not_answerable", "clarify", "default_allowed"]
 RefusalReason = Literal[
@@ -35,7 +38,7 @@ RefusalReason = Literal[
     "out_of_scope",  # outside the provided tables
 ]
 MeasureKind = Literal["count_stock", "count_flow", "ratio", "average", "index"]
-# How a chart is drawn (kosis_chat/answer/chart.py): bars by name, bars in period order, a line over periods, a pie,
+# How a chart is drawn today (kosis_chat/chart/builders.py; ChartSpec.kind is an open string, E6): bars by name, bars in period order, a line over periods, a pie,
 # (S6) one line per series over periods, and bars of several targets side by side at each period.
 ChartKind = Literal["bar", "timeline", "line", "pie", "multi_line", "grouped_bar"]
 # What a caveat warns about (S6, kosis_chat/answer/caveats.py): asked periods the table lacks, a condition the question
@@ -60,9 +63,9 @@ CAVEAT_KINDS = get_args(CaveatKind)
 VALUE_KINDS = get_args(ValueKind)
 MAX_DIMS = 8  # dim1..dim8 columns in the Parquet files
 MAX_ROUND = 10  # decimals a derived fact may keep (the golden set uses 0..5)
-# Trailing "(unit)" in an item name or dim label, e.g. "출생건수 (명)", "출생아수(명)".
-# ponytail: short no-space/no-digit token only, so "(출생시 기대여명)" or "(2012~)" are not units; a unit table if this misses too many.
-_UNIT_SUFFIX = re.compile(r"\(([^()\s\d~]{1,5})\)\s*$")
+# Trailing "(unit)" in an item name or dim label (the strict variant, Cell.unit_or_suffix): moved to
+# kosis_ai/units.py in T1-28 S2b with the rule that reads it; the old name is the same object.
+_UNIT_SUFFIX = SUFFIX_UNIT
 _IDENT = re.compile(r"[A-Za-z_]\w*")
 _ORG_ID = re.compile(r"\d{3}")
 # A derivation is arithmetic over fact ids: + - * / and parentheses (what eval/grade.py recomputes), and ** with a
@@ -192,13 +195,9 @@ class Cell(Contract):
         return "|".join([self.tbl_id, self.item_id, *(d.code for d in self.dims), self.period])
 
     def unit_or_suffix(self) -> str | None:
-        """Unit column, else a trailing '(unit)' in the item name, else in a dim label. None when unknown."""
-        if self.unit:
-            return self.unit
-        for text in [self.item_name, *(d.label for d in self.dims)]:
-            if m := _UNIT_SUFFIX.search(text):
-                return m.group(1)
-        return None
+        """Unit column, else a trailing '(unit)' in the item name, else in a dim label. None when unknown.
+        The rule is kosis_ai.units.unit_or_suffix (T1-28 S2b)."""
+        return unit_or_suffix(self.unit, [self.item_name, *(d.label for d in self.dims)])
 
     def to_fact(self, fact_id: str) -> Fact:
         return Fact(
@@ -642,25 +641,57 @@ class TablePart(Contract):
         return [i for r in self.rows for i in r.fact_ids if i is not None]
 
 
-class Chart(Contract):
-    """A chart code drew from the answer's facts (v2). spec is Vega-Lite v5 JSON; fact_ids names the facts whose
-    values the chart shows (StatAnswer checks they exist). Rows drawn from the table for context only (the other
-    periods of a series, the other candidates of a ranking) are not facts and are not listed."""
+class ChartPoint(Contract):
+    """One drawn value (T1-28 S5). value is the number drawn (a fact's own value, or a row of the table shown for
+    context: the other periods of a series, the other candidates of a ranking, the rest of a pie); display is how it
+    is written; fact_id names the fact it is when it is one; period is the period code; share_pct a pie slice's share."""
 
-    kind: ChartKind
-    spec: dict
+    label: str
+    value: int | float | None  # the fact's own number (int stays int); None where the cell has no number
+    display: str
+    fact_id: str | None = None
+    period: str | None = None
+    highlight: bool = False
+    share_pct: float | None = None
+
+
+class ChartSeries(Contract):
+    name: str
+    points: list[ChartPoint] = Field(min_length=1)
+
+
+class ChartSpec(Contract):
+    """A chart code drew from the answer's facts (T1-28 S5, replaces v2's Chart inside StatAnswer): the data and the
+    kind are the contract, the Vega-Lite spec is optional (kosis_chat/chart/vega.py to_vega makes it). kind is an open
+    string (E6; the kinds drawn today are CHART_KINDS). fact_ids names the facts whose values the chart shows; rows
+    drawn for context only are not facts and are not listed."""
+
+    kind: str = Field(min_length=1)
+    title: str
+    unit: str | None = None
+    series: list[ChartSeries] = Field(min_length=1)
     fact_ids: list[str] = Field(min_length=1)
+    orientation: Literal["horizontal", "vertical"] | None = None  # bars only
+    sort: list[str] | Literal["-x"] | None = None  # bars only: the name order, or by value
+    pattern: str | None = None  # the plan's pattern the builder was chosen by
+    vega_lite: dict | None = None
 
     @model_validator(mode="after")
-    def _spec_has_data(self) -> Chart:
-        if not isinstance(self.spec.get("data"), dict) or not isinstance(self.spec["data"].get("values"), list):
-            raise ValueError("chart spec needs inline data: spec['data']['values'] must be a list")
+    def _facts(self) -> ChartSpec:
         if len(self.fact_ids) != len(set(self.fact_ids)):
             raise ValueError("fact_ids must be unique")
+        stray = [p.fact_id for s in self.series for p in s.points if p.fact_id is not None and p.fact_id not in self.fact_ids]
+        if stray:
+            raise ValueError(f"points name facts the chart does not list: {stray}")
         return self
 
+    def points(self) -> list[ChartPoint]:
+        return [p for s in self.series for p in s.points]
 
-_NUMBER = re.compile(r"\d[\d,]*(?:\.\d+)?")
+
+# A number as the grader reads it (eval/grade.py); public as NUMBER for kosis_chat/shared/patterns.py (T1-28 S2b).
+NUMBER = re.compile(r"\d[\d,]*(?:\.\d+)?")
+_NUMBER = NUMBER
 _PERIOD_AFTER = re.compile(r"\s*(?:년|월|분기|반기)")
 
 
@@ -692,11 +723,20 @@ class StatAnswer(Contract):
     numbers_origin: NumbersOrigin | None = None
     numbers_verified: bool = False
     defaults_verified: bool = False
-    chart: Chart | None = None  # v2: drawn from result by code; only an answered answer with code numbers has one
     # S6: words of care, the facts shown beside the answer (not asked for, never computed with), and a table of facts.
     caveats: list[Caveat] = Field(default_factory=list)
     context_fact_ids: list[str] = Field(default_factory=list)
     table: TablePart | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _legacy_chart(cls, data):
+        # T1-28 S5 removed StatAnswer.chart (the chart is StatOutput.chart). A record saved before that still loads:
+        # its `chart` (None or the old {kind, spec, fact_ids}) is dropped here, nothing else (kosis_ai/compat.py; kept
+        # for Phase 2 readers that call model_validate directly; remove when they use compat.load_stat_answer).
+        from kosis_ai.compat import without_legacy_chart
+
+        return without_legacy_chart(data)
 
     @model_validator(mode="after")
     def _contract(self) -> StatAnswer:
@@ -726,12 +766,6 @@ class StatAnswer(Contract):
             raise ValueError("only numbers code wrote can be verified (numbers_origin 'code')")
         if self.defaults_verified and self.numbers_origin != "code":
             raise ValueError("default_applied is verified only when the calculation used it (numbers_origin 'code')")
-        if self.chart is not None:
-            if self.outcome != "answered" or self.numbers_origin != "code":
-                raise ValueError("a chart belongs to an answered answer whose numbers code computed")
-            unknown = [i for i in self.chart.fact_ids if self.result.get(i) is None]
-            if unknown:
-                raise ValueError(f"chart.fact_ids reference unknown facts: {unknown}")
         self._s6_contract()
         return self
 

@@ -1,0 +1,59 @@
+# Phase 1 package metadata (T1-28 S1a, N5). requirements.txt stays for Phase 2 and Colab; keep the two in step.
+# `pip install -e .` makes kosis_chat and kosis_ai importable without PYTHONPATH; the PYTHONPATH way keeps working.
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kosis-phase1"
+version = "0.1.0"
+description = "KOSIS stat table summary module (Phase 1): question + table -> StatAnswer"
+requires-python = ">=3.11"
+dependencies = [
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0",
+    "pydantic>=2.0",
+    "pyarrow>=15.0",
+    "pandas>=2.0",
+    "langgraph>=1.0,<2",  # kosis_chat/graph/ (T1-28 S4), the same range as Phase 2
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8.0", "hypothesis>=6.100"]
+
+[tool.setuptools]
+# Listed by hand: kosis_ai lives under src/, kosis_chat at the root. tests/test_layout.py checks that every
+# package folder (one with __init__.py) is listed here. eval/ is not installed: run it as `python -m eval.*`
+# from this folder.
+packages = [
+    "kosis_ai",
+    "kosis_chat",
+    "kosis_chat.adapters",
+    "kosis_chat.analyze",
+    "kosis_chat.answer",
+    "kosis_chat.chart",
+    "kosis_chat.compose",
+    "kosis_chat.compute",
+    "kosis_chat.data",
+    "kosis_chat.graph",
+    "kosis_chat.judge",
+    "kosis_chat.legacy",
+    "kosis_chat.llm",
+    "kosis_chat.prepare",
+    "kosis_chat.render",
+    "kosis_chat.schemas",
+    "kosis_chat.shared",
+]
+package-dir = { "kosis_ai" = "src/kosis_ai" }
+
+[tool.setuptools.package-data]
+"kosis_chat.shared" = ["*.json"]  # events.json (moved from kosis_chat/data in T1-28 S2)
+"kosis_chat.analyze" = ["prompts/*.md"]  # the analyze prompts (T1-28 S3b, D15), read with importlib.resources
+"kosis_chat.compose" = ["prompts/*.md"]  # compose-v2
+
+[tool.pytest.ini_options]
+# Was pytest.ini (removed in T1-28 S1a; pytest.ini would win over this table if both existed).
+testpaths = ["tests"]
+pythonpath = [".", "src"]
+addopts = "-q"
+markers = ["offline: runs without the provided data in data/"]

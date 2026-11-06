@@ -12,18 +12,20 @@ Period strings follow the Parquet files: 'YYYY' a year, 'YYYYMM' a month (a mont
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
 from itertools import product
 
+from kosis_chat.compute import texts
 from kosis_chat.compute.engine import CalcRefused
 from kosis_chat.compute.semantics import _whole_label, index_of
-from kosis_chat.data.events import event_key as _key
-from kosis_chat.data.events import load_events
 from kosis_chat.data.schema import Cell, TableInput
+from kosis_chat.shared import cautions as caution_strings
+from kosis_chat.shared.events import event_key as _key
+from kosis_chat.shared.events import load_events
 from kosis_chat.judge import messages
 from kosis_chat.judge.question import ITEM_AXIS, Axis
 
 from kosis_ai.schemas import PeriodSpec, SelectStep, TargetSpec  # isort: skip
+from kosis_chat.compute.schemas import Resolved  # isort: skip  # re-export: moved in T1-28 S1b (the select's cells)
 
 SPAN_MONTHS = {"year": (1, 12), "H1": (1, 6), "H2": (7, 12), "Q1": (1, 3), "Q2": (4, 6), "Q3": (7, 9), "Q4": (10, 12)}
 CLARIFY_LIMIT = 20  # candidates offered when the plan leaves a category open
@@ -42,12 +44,6 @@ class NeedsClarify(Exception):
         self.message = message
 
 
-@dataclass
-class Resolved:
-    cells: list[str]
-    cautions: list[str] = field(default_factory=list)
-
-
 # ---------------------------------------------------------------- events
 
 
@@ -57,8 +53,8 @@ def event_start(name: str, lookup: EventLookup | None, cautions: list[str]) -> s
         return found
     found = lookup(name) if lookup else None
     if not found:
-        raise NeedsClarify("시점", [], f"'{name}'이(가) 언제인지 알 수 없습니다. 연도를 알려 주세요.")
-    cautions.append(f"event_source: model ({name} = {found})")
+        raise NeedsClarify("시점", [], texts.event_unknown(name))
+    cautions.append(caution_strings.event_source(name, found))
     return found
 
 
@@ -105,7 +101,7 @@ def _by_path(axis: Axis, path: list[str]) -> str:
         raise CalcRefused("class_mismatch", messages.refusal_message("class_mismatch", what=" > ".join(path)))
     if len(found) > 1:
         options = [(c, " > ".join([*(axis.labels[a] for a in reversed(axis.ancestors(c))), axis.labels[c]])) for c in found]
-        raise NeedsClarify(axis.name, options, f"'{' > '.join(path)}'이(가) 여러 곳입니다. 어느 것인지 골라 주세요.")
+        raise NeedsClarify(axis.name, options, texts.path_ambiguous(path))
     return found[0]
 
 
@@ -115,10 +111,10 @@ def _default(axis: Axis, cautions: list[str]) -> list[str]:
         return list(axis.labels)
     totals = _totals(axis)
     if totals:
-        cautions.append(f"default_applied: {axis.name} = {axis.labels[totals[0]]}")
+        cautions.append(caution_strings.default_applied(axis.name, axis.labels[totals[0]]))
         return totals[:1]
     top = [c for c in axis.labels if axis.parents.get(c) is None][:CLARIFY_LIMIT]
-    raise NeedsClarify(axis.name, [(c, axis.labels[c]) for c in top], f"{axis.name}을(를) 골라 주세요.")
+    raise NeedsClarify(axis.name, [(c, axis.labels[c]) for c in top], texts.pick_category(axis.name))
 
 
 # ---------------------------------------------------------------- periods
@@ -166,10 +162,10 @@ def resolve_periods(spec: PeriodSpec, periods: list[str], period_type: str, look
         want = [p for p in periods if len(p) == size and p >= target] if spec.to_latest else [target]
     else:  # span
         if period_type in ("Q", "H"):
-            raise CalcRefused("no_period", f"{spec.year}년 {spec.part}: 분기·반기 표의 시점 해석은 아직 지원하지 않습니다.")
+            raise CalcRefused("no_period", texts.span_not_supported(spec.year, spec.part))
         if not monthly:
             if spec.part != "year":
-                raise CalcRefused("no_period", f"이 표는 연 단위라 {spec.year}년 {spec.part} 값이 없습니다.")
+                raise CalcRefused("no_period", texts.span_on_yearly(spec.year, spec.part))
             want = [spec.year]
         else:
             want = _months(spec.year, *SPAN_MONTHS[spec.part])
@@ -178,31 +174,25 @@ def resolve_periods(spec: PeriodSpec, periods: list[str], period_type: str, look
     if not found:
         raise CalcRefused("no_period", messages.refusal_message("no_period", asked=", ".join(lacking[:6])))
     if lacking:
-        cautions.append(f"missing_years: {', '.join(lacking)}")
+        cautions.append(caution_strings.missing_years(lacking))
     return found
 
 
 # ---------------------------------------------------------------- select
 
 
-_CELLS: dict[int, tuple[TableInput, dict[tuple, Cell]]] = {}
-
-
 def _cells_by_key(table: TableInput) -> dict[tuple, Cell]:
-    cached = _CELLS.get(id(table))
-    if cached is None or cached[0] is not table:
-        if len(_CELLS) > 8:
-            _CELLS.clear()
-        cached = (table, {(c.item_code, tuple(sorted(c.dim_codes.items())), c.period_raw): c for c in table.cells})
-        _CELLS[id(table)] = cached
-    return cached[1]
+    # One per TableInput (T1-28 S2: TableInput.caches, was a module dict keyed by id(table)).
+    return table.caches.get(
+        "compute.resolve.cells",
+        lambda: {(c.item_code, tuple(sorted(c.dim_codes.items())), c.period_raw): c for c in table.cells})
 
 
 def resolve_select(table: TableInput, step: SelectStep, lookup: EventLookup | None = None,
                    star: dict[str, str] | None = None) -> Resolved:
     """source_refs of a select named by item / dims / periods; star fills a map's '*' code."""
     if step.table and step.table != table.meta.tbl_id:
-        raise CalcRefused("out_of_scope", f"{step.table}: 이 질문의 표({table.meta.tbl_id})가 아닙니다(여러 표 결합은 아직 엔진만 지원).")
+        raise CalcRefused("out_of_scope", texts.other_table(step.table, table.meta.tbl_id))
     index = index_of(table)
     cautions: list[str] = []
     codes: dict[str, list[str]] = {}
@@ -210,7 +200,7 @@ def resolve_select(table: TableInput, step: SelectStep, lookup: EventLookup | No
         spec = step.item if name == ITEM_AXIS else step.dims.get(name)
         if spec is not None and spec.codes == ["*"]:
             if not star or name not in star:
-                raise CalcRefused("class_mismatch", f"{name}의 '*'는 map 안에서만 쓸 수 있습니다.")
+                raise CalcRefused("class_mismatch", texts.star_outside_map(name))
             spec = TargetSpec(codes=[star[name]])
         codes[name] = resolve_target(axis, spec) if spec is not None else _default(axis, cautions)
     unknown = [n for n in step.dims if n not in index.axes]
@@ -218,7 +208,7 @@ def resolve_select(table: TableInput, step: SelectStep, lookup: EventLookup | No
         raise CalcRefused("class_mismatch", messages.refusal_message("class_mismatch", what=f"분류 {unknown}"))
     spec = step.periods or PeriodSpec(kind="recent", n=1)
     if step.periods is None:
-        cautions.append("default_applied: 시점 = 최신")
+        cautions.append(caution_strings.DEFAULT_LATEST)
     periods = resolve_periods(spec, index.periods, table.meta.period_type, lookup, cautions)
     names = [n for n in index.axes if n != ITEM_AXIS]
     by_key = _cells_by_key(table)
@@ -232,7 +222,7 @@ def resolve_select(table: TableInput, step: SelectStep, lookup: EventLookup | No
         if not periods:
             raise CalcRefused("missing_value", messages.refusal_message("missing_value", raw="-", meaning="숫자가 있는 시점이 없음"))
         if len(periods) < spec.n:
-            cautions.append(f"recent: {spec.n}개 중 {len(periods)}개 시점만 숫자가 있음")
+            cautions.append(caution_strings.recent_short(spec.n, len(periods)))
     refs: list[str] = []
     missing: list[str] = []
     for combo in combos:

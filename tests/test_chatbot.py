@@ -6,7 +6,7 @@ from dataclasses import replace
 
 import pytest
 
-from kosis_chat import cli
+from kosis_chat.legacy import cli  # the B0 CLI (T1-28 S6: kosis_chat/cli.py runs StatModule, tests/test_cli.py)
 from kosis_chat.chatbot import Chatbot
 from kosis_chat.data.loader import load_table
 from kosis_chat.llm.model import HCXClient, LLMResult, MockClient, build_client

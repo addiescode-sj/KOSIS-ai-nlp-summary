@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from kosis_chat import pipeline as pipeline_module
 from kosis_chat.answer.chart import chart_spec
+from kosis_chat.chart.vega import to_vega
 from kosis_chat.answer.template import template_parts
 from kosis_chat.answer.verify import verify
 from kosis_chat.compute.analyze import Plan, Unresolved
@@ -118,7 +119,8 @@ def test_listed_template_and_chart_for_a_written_plan(households):
     parts = template_parts("compare", computed)
     assert verify(parts, computed) == []
     chart = chart_spec("compare", computed)
-    assert chart.kind == "bar" and [r["이름"] for r in chart.spec["data"]["values"]] == ["서울특별시", "부산광역시"]
+    assert chart.kind == "bar" and [p.label for p in chart.points()] == ["서울특별시", "부산광역시"]
+    assert [r["이름"] for r in to_vega(chart)["data"]["values"]] == ["서울특별시", "부산광역시"]
 
 
 def test_prompt_lists_every_category_and_the_periods(households):

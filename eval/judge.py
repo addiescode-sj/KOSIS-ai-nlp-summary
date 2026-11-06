@@ -26,10 +26,12 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from eval.run_eval import llm_config  # the key from the HCX_API_KEY shell environment variable (T1-28 S2c)
 from eval.scorer import read_jsonl, write_jsonl
 from eval.view_raw import load_rows
-from kosis_chat.config import load_env, load_settings, resolve_path
-from kosis_chat.llm.model import STATUS_OK, LLMClient, build_client
+from kosis_chat.config import load_settings, resolve_path
+from kosis_chat.llm.model import STATUS_OK, LLMClient
+from kosis_chat.llm.providers import build_client
 from kosis_chat.llm.structured import ask_structured, structured_prompt
 
 RUBRIC_VERSION = "quality-v2"
@@ -214,9 +216,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--run-index", type=int, default=0)
     args = parser.parse_args(argv)
     run = Path(args.run)
-    load_env()
     settings = load_settings(backend=args.backend, model_name=args.model, thinking_level="none", max_tokens=1024)
-    records = judge_rows(run_rows(run, args.run_index), build_client(settings), args.model, args.interval)
+    try:
+        llm = llm_config(settings)
+    except KeyError as exc:
+        parser.error(f"--backend {args.backend} needs the {exc.args[0]} shell environment variable (.env is not read)")
+    records = judge_rows(run_rows(run, args.run_index), build_client(llm), args.model, args.interval)
     labels = [x for x in read_jsonl(Path(args.labels)) if x["run"] == run.name] if args.labels else []
     manifest = json.loads((run / "manifest.json").read_text(encoding="utf-8"))
     meta = {"run": run.name, "model": args.model, "answer_model": (manifest.get("model") or {}).get("model_name")}

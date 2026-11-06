@@ -1,82 +1,81 @@
-"""Terminal entry point: load one table, then answer questions until the user quits."""
+"""Terminal entry point: load one table, then answer questions with the stat module until the user quits.
+
+T1-28 S6: the questions go to kosis_chat.api.StatModule (the C pipeline: rules, code-computed numbers, model
+sentences), the same answers summarize_stat gives. The file is read here (adapters.parquet.read_parquet) and handed
+to the module as a loaded table (StatInput); its meta is the tables.csv row next to the file or one folder up. The
+B0 chatbot CLI (--scope, --form, --answer-format, --prompt-version) is `python -m kosis_chat.legacy.cli`.
+
+--backend hcx needs HCX_API_KEY in the shell environment (.env is not read since T1-28 S2c); --backend mock needs no
+key (tests and offline checks).
+"""
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
-from kosis_chat.chatbot import Chatbot
-from kosis_chat.config import load_env, load_settings, resolve_path
-from kosis_chat.contract import org_id_from_table_path, to_stat_answer
-from kosis_chat.data.loader import load_table
-from kosis_chat.data.schema import SchemaError
-from kosis_chat.llm import prompts
+from kosis_chat.adapters.parquet import catalog_row, fetched_at_of, find_catalog, read_parquet
+from kosis_chat.api import StatModule
+from kosis_chat.config import resolve_path
 from kosis_chat.llm.model import BACKENDS
+from kosis_chat.llm.providers import LLMKeyMissing
+from kosis_chat.prepare.schemas import Problem, SchemaError
+from kosis_chat.schemas.io import ParquetTable, StatInput, StatOptions
+from kosis_chat.schemas.resources import DEFAULT_MODEL, MOCK_PROVIDER, LLMConfig
 
 QUIT_WORDS = {"q", "quit", "exit", "종료"}
+KEY_ENV = "HCX_API_KEY"  # the shell environment variable the hcx backend's key is read from
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m kosis_chat.cli", description="Ask questions about one KOSIS table.")
     parser.add_argument("--table", required=True, help="table file: data/values/<org>_<tbl>.parquet (meta from data/tables.csv)")
-    parser.add_argument("--config", default=None, help="config file (default: configs/model.yaml)")
-    parser.add_argument("--backend", choices=BACKENDS, default=None, help="override the configured backend")
-    parser.add_argument("--answer-format", choices=["text", "json"], default="text")
-    parser.add_argument("--prompt-version", choices=sorted(prompts.SYSTEM_PROMPTS), default=None)
-    parser.add_argument("--model", default=None, help="override the HCX model name, e.g. HCX-007")
+    parser.add_argument("--backend", choices=BACKENDS, default="hcx", help="model provider (mock: no key, tests only)")
+    parser.add_argument("--model", default=None, help=f"HCX model name (default {DEFAULT_MODEL})")
     parser.add_argument(
-        "--thinking", choices=["none", "low", "medium", "high"], default=None, help="override thinking effort (HCX-007 only)"
+        "--thinking", choices=["none", "low", "medium", "high"], default=None, help="thinking effort (HCX-007 only)"
     )
-    parser.add_argument("--max-tokens", type=int, default=None, help="override max output tokens (raise it when thinking is on)")
-    parser.add_argument("--form", default=None, help="text file with answer-format instructions appended to each question")
-    parser.add_argument("--serialization", choices=["long", "wide"], default=None, help="table text style (default: model.yaml)")
-    parser.add_argument(
-        "--scope", choices=["auto", "full"], default="auto", help="table part per question: auto (from the question) or full"
-    )
+    parser.add_argument("--max-tokens", type=int, default=None, help="max output tokens (raise it when thinking is on)")
     parser.add_argument("--question", "-q", action="append", help="ask this question and exit (repeatable)")
     return parser
 
 
+def llm_config(args: argparse.Namespace) -> LLMConfig:
+    """The LLMConfig of the command line; the hcx key comes from the shell environment (None when unset: the first
+    question that needs the model then reports LLMKeyMissing)."""
+    fields = {"model": args.model or (MOCK_PROVIDER if args.backend == MOCK_PROVIDER else DEFAULT_MODEL),
+              "provider": args.backend}
+    if args.backend != MOCK_PROVIDER:
+        fields["api_key"] = os.environ.get(KEY_ENV) or None
+    if args.thinking is not None:
+        fields["thinking_effort"] = args.thinking
+    if args.max_tokens is not None:
+        fields["max_tokens"] = args.max_tokens
+    return LLMConfig(**fields)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    path = resolve_path(args.table)
     try:
-        version = (
-            prompts.resolve_answer_prompt(args.answer_format, args.prompt_version)
-            if args.prompt_version else None
-        )
-    except ValueError as exc:
-        print(f"설정 오류: {exc}", file=sys.stderr)
-        return 2
-    load_env()
-    settings = load_settings(
-        args.config,
-        backend=args.backend,
-        prompt_version=version,
-        model_name=args.model,
-        thinking_level=args.thinking,
-        max_tokens=args.max_tokens,
-        serialization=args.serialization,
-    )
-    try:
-        table = load_table(resolve_path(args.table))
+        if not path.exists():
+            raise SchemaError([Problem(str(path), "file not found")])
+        if path.suffix.lower() != ".parquet":
+            raise SchemaError([Problem(path.name, f"unsupported input format {path.suffix!r} (use data/values/*.parquet)")])
+        row = catalog_row(path)
+        table = ParquetTable(frame=read_parquet(path), fetched_at=fetched_at_of(path))
     except SchemaError as exc:
         print("입력 표를 읽을 수 없습니다:", file=sys.stderr)
         for problem in exc.problems:
             print(f"  - {problem}", file=sys.stderr)
         return 2
-
-    try:
-        form = resolve_path(args.form).read_text(encoding="utf-8-sig") if args.form else None
-    except OSError as exc:
-        print(f"--form 파일을 읽을 수 없습니다: {exc}", file=sys.stderr)
+    except ValueError as exc:  # the frame breaks the column contract (ParquetTable)
+        print(f"입력 표를 읽을 수 없습니다: {exc}", file=sys.stderr)
         return 2
-
-    try:
-        bot = Chatbot(table, settings=settings, form=form, scope_mode=args.scope, answer_format=args.answer_format)
-    except ValueError as exc:  # backend misconfigured, e.g. HCX_API_KEY missing
-        print(f"설정 오류: {exc}", file=sys.stderr)
-        return 2
-    print(f"[{table.meta.tbl_nm}] backend={settings.backend} model={settings.model_name} prompt={bot.prompt_version}")
+    llm = llm_config(args)
+    module = StatModule(llm, StatOptions(catalog_path=find_catalog(path)))
+    print(f"[{row.get('table_name', '')}] backend={llm.provider} model={llm.model}")
 
     questions = args.question or None
     while True:
@@ -94,15 +93,22 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             if not question:
                 continue
-        answer = bot.ask(question)
-        print(f"[범위 {answer.scope.get('cells', 0):,}칸, {answer.scope.get('table_chars', 0):,}자]")
-        if answer.ok:
-            try:
-                print(to_stat_answer(question, answer, org_id=org_id_from_table_path(args.table, table.meta.tbl_id)).text)
-            except ValueError as exc:
-                print(f"[format_error] {exc}")
-        else:
-            print(f"[{answer.status}] {answer.error}")
+        try:
+            out = module.answer(StatInput(question=question, tables=[table]))
+        except LLMKeyMissing as exc:  # the client is built when a question first needs the model
+            print(f"설정 오류: {exc} (set {KEY_ENV} in the shell)", file=sys.stderr)
+            return 2
+        except SchemaError as exc:  # the table's rows or catalog row break the input contract
+            print("입력 표를 읽을 수 없습니다:", file=sys.stderr)
+            for problem in exc.problems:
+                print(f"  - {problem}", file=sys.stderr)
+            return 2
+        except RuntimeError as exc:  # the model call failed (summarize_stat's contract): this question only
+            print(f"[error] {exc}")
+            continue
+        print(out.answer.text)
+        if out.chart is not None:
+            print(f"[차트: {out.chart.kind}, 점 {sum(len(s.points) for s in out.chart.series)}개]")
 
 
 if __name__ == "__main__":

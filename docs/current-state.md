@@ -60,9 +60,9 @@ KOSIS statistics AI chatbot (국가데이터처 mentoring project): natural-lang
 ## How to verify
 
 - `bash scripts/verify.sh` — offline only (no network, no API key): pytest (MockClient) + checks that real-data paths are gitignored and untracked.
-- Try it: `python -m kosis_chat.cli --table tests/fixtures/pop_a.csv --backend mock -q "2023년 여자 인구는?"`
+- Try it: `python -m kosis_chat.cli --table data/values/<org>_<tbl>.parquet --backend mock -q "2023년 여자 인구는?"` (T1-28 S6: Parquet 표만, 옛 B0 CLI는 `kosis_chat.legacy.cli`)
 - HCX quality evaluation is manual (not part of verify.sh): `python -m eval.run_eval --stage B0` → `python -m eval.review export|apply --run eval/results/<id>` → `python -m eval.scorer --run eval/results/<id> --append-history`
-- Default model (2026-10-21, user decision): Gemini `gemini-3.8-flash` via google-genai (`backend: gemini`, thinking_level low, no temperature). Key `GEMINI_API_KEY` in .env or Colab secrets. Run: `python -m kosis_chat.cli --table <file> -q "..."` or notebooks/colab_run.ipynb. Gemini runs can go to eval-history (model column records backend:model); HCX stays the final target.
+- (Outdated: Gemini/google-genai removed in T1-28 S6; default is HCX via LLMConfig.) Default model (2026-10-21, user decision): Gemini `gemini-3.8-flash` via google-genai (`backend: gemini`, thinking_level low, no temperature). Key `GEMINI_API_KEY` in .env or Colab secrets. Run: `python -m kosis_chat.cli --table <file> -q "..."` or notebooks/colab_run.ipynb. Gemini runs can go to eval-history (model column records backend:model); HCX stays the final target.
 - Other pre-test models: `openai_compat` block + `PRETEST_API_KEY`; these runs (and mock) are marked `pretest` and never appended to eval-history.
 
 ## Context Index

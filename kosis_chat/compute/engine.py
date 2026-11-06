@@ -11,24 +11,24 @@ an average has at least 1, a sum keeps the inputs' decimals.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from kosis_chat.compute.build import Built, Pattern
 from kosis_chat.data.preprocessing import clean_cell
 from kosis_chat.data.schema import Cell, TableInput
-from kosis_chat.data.serializer import display_value
+from kosis_chat.shared.numbers import display_value  # T1-28 S2b: was data.serializer (B0); re-exported there
 from kosis_chat.judge import messages
 from kosis_chat.judge.question import COUNT_KINDS, cell_measure
 
 from kosis_ai.schemas import Fact, RefusalReason, StatResult  # isort: skip  (question.py puts src/ on the path)
+from kosis_chat.compute.schemas import Computed, TermResult  # isort: skip  # re-export: moved in T1-28 S1b
 
 if TYPE_CHECKING:  # resolve.py imports this module
     from kosis_chat.compute.resolve import EventLookup
 
 PERCENT_DIGITS = 1  # growth rate, share and multiple
 _DECIMALS = re.compile(r"\.(\d+)")
-_INDEX_CACHE: dict[int, tuple[TableInput, dict[str, Cell], bool]] = {}
 
 
 class CalcRefused(Exception):
@@ -40,43 +40,12 @@ class CalcRefused(Exception):
         self.message = message
 
 
-@dataclass(frozen=True)
-class TermResult:
-    """What one number of a period pattern became: its cell fact ids and the id of the number it stands for."""
-
-    cell_ids: list[str]
-    value_id: str  # the aggregate / share fact, or the single cell
-    periods: tuple[str, str]  # first and last period of the term's cells
-    digits: int  # decimals the number keeps
-    agg: str | None = None  # "avg" / "sum" / None (a cell or a share)
-
-
-@dataclass(frozen=True)
-class Computed:
-    result: StatResult
-    main: list[str]  # fact ids the answer should cite, in order (the rest are context)
-    note: str | None = None
-    picked: dict[str, str] = field(default_factory=dict)  # extreme: {"winner": fact id, "runner_up": fact id}
-    # extreme: every ranked candidate for the chart, best first: {"dims", "period", "value", "unit"} (facts keep two)
-    ranking: list[dict] = field(default_factory=list)
-    # value: the same cell in every period, for the chart: {"period", "value"} in period order (facts keep one)
-    series: list[dict] = field(default_factory=list)
-    pattern: Pattern | None = None  # the shape the rules built (build.py): templates and charts choose by it
-    # period patterns: what each compared number became, earlier first (templates and charts read them)
-    terms: list[TermResult] = field(default_factory=list)
-    plan: object | None = None  # the PlanV3 that made these facts
-    cautions: list[str] = field(default_factory=list)  # allowed numbers that need a word of care (S6 shows them)
-
-
 def _indexed(table: TableInput) -> tuple[TableInput, dict[str, Cell], bool]:
     """(table, cells by source_ref, whether facts name the item)."""
-    cached = _INDEX_CACHE.get(id(table))
-    if cached is None or cached[0] is not table:
-        if len(_INDEX_CACHE) > 8:
-            _INDEX_CACHE.clear()
-        cached = (table, {c.source_ref: c for c in table.cells}, _item_named(table))
-        _INDEX_CACHE[id(table)] = cached
-    return cached
+    # One per TableInput (T1-28 S2: TableInput.caches, was a module dict keyed by id(table)).
+    by_ref, named = table.caches.get(
+        "compute.engine.indexed", lambda: ({c.source_ref: c for c in table.cells}, _item_named(table)))
+    return table, by_ref, named
 
 
 def _item_named(table: TableInput) -> bool:
@@ -164,20 +133,17 @@ class _Ids:
         return f"f{self.n}"
 
 
-_SERIES_CACHE: dict[int, tuple[TableInput, dict[tuple, list[Cell]]]] = {}
+def _series_groups(table: TableInput) -> dict[tuple, list[Cell]]:
+    groups: dict[tuple, list[Cell]] = {}
+    for c in table.cells:
+        groups.setdefault((c.item_code, tuple(sorted(c.dim_codes.items()))), []).append(c)
+    return groups
 
 
 def _series(table: TableInput, cell: Cell) -> list[dict]:
-    cached = _SERIES_CACHE.get(id(table))
-    if cached is None or cached[0] is not table:
-        if len(_SERIES_CACHE) > 8:
-            _SERIES_CACHE.clear()
-        groups: dict[tuple, list[Cell]] = {}
-        for c in table.cells:
-            groups.setdefault((c.item_code, tuple(sorted(c.dim_codes.items()))), []).append(c)
-        cached = (table, groups)
-        _SERIES_CACHE[id(table)] = cached
-    same = cached[1].get((cell.item_code, tuple(sorted(cell.dim_codes.items()))), [])
+    # One grouping per TableInput (T1-28 S2: TableInput.caches, was a module dict keyed by id(table)).
+    groups = table.caches.get("compute.engine.series", lambda: _series_groups(table))
+    same = groups.get((cell.item_code, tuple(sorted(cell.dim_codes.items()))), [])
     reads = sorted((_read(table, c.source_ref) for c in same), key=lambda r: r.cell.period_raw)
     return [{"period": r.cell.period_raw, "value": r.value} for r in reads if r.value is not None]
 
@@ -207,7 +173,7 @@ def _with_context(table: TableInput, computed: Computed, refs: list[str]) -> Com
     for ref in refs:
         if ref in _by_ref(table) and all(f.source_ref != ref for f in facts):
             facts.append(_cell_fact(f"f{len(facts) + 1}", _read(table, ref)))
-    return replace(computed, result=StatResult(facts=facts))
+    return computed.model_copy(update={"result": StatResult(facts=facts)})
 
 
 def compute(table: TableInput, built: Built, lookup: EventLookup | None = None) -> Computed:
@@ -236,4 +202,4 @@ def compute(table: TableInput, built: Built, lookup: EventLookup | None = None) 
         extra["terms"] = terms
     computed = Computed(StatResult(facts=run.facts), run.main, built.plan.note, pattern=built.pattern,
                         cautions=run.cautions, **extra)
-    return replace(_with_context(table, computed, built.context), plan=built.plan)
+    return _with_context(table, computed, built.context).model_copy(update={"plan": built.plan})

@@ -1,4 +1,9 @@
-"""LLM clients behind one interface: MockClient for offline tests, HCXClient for HyperCLOVA X."""
+"""LLM clients behind one interface: MockClient for offline tests, HCXClient for HyperCLOVA X.
+
+A client is made from an LLMConfig (kosis_chat/schemas/resources.py, T1-28 S2c) through the provider table in
+kosis_chat/llm/providers.py. HCXClient still takes a Settings (Phase 2 src/kosis_rag/hcx.py), whose key is read
+from the shell environment variable it names, and build_client(settings) stays for the Settings callers.
+"""
 
 from __future__ import annotations
 
@@ -14,7 +19,8 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from kosis_chat.config import Settings, get_secret
+from kosis_chat.config import Settings, env_llm_config, settings_from_llm
+from kosis_chat.schemas.resources import MOCK_RESPONSE, LLMConfig, LLMKeyMissing
 
 # Call status values recorded with every answer and eval result.
 STATUS_OK = "ok"
@@ -52,6 +58,11 @@ class LLMClient(ABC):
     def generate(self, system: str, user: str) -> LLMResult:
         """Return the model's reply for one system + user prompt pair."""
 
+    @classmethod
+    def from_config(cls, config: LLMConfig) -> LLMClient:
+        """The client for one LLMConfig (kosis_chat.llm.providers.build_client); a provider class takes the config."""
+        return cls(config)
+
 
 class MockClient(LLMClient):
     """Deterministic client for tests: fixed text, a queue of replies, or a function of the prompt."""
@@ -78,6 +89,10 @@ class MockClient(LLMClient):
             reply = self._response
         return reply if isinstance(reply, LLMResult) else LLMResult(text=str(reply))
 
+    @classmethod
+    def from_config(cls, config: LLMConfig) -> MockClient:
+        return cls(MOCK_RESPONSE)
+
 
 class HCXClient(LLMClient):
     """HyperCLOVA X through the CLOVA Studio v3 chat-completions API (non-streaming).
@@ -96,23 +111,34 @@ class HCXClient(LLMClient):
     CONTEXT_EXCEEDED_CODE = "40003"
 
     def __init__(
-        self, settings: Settings, sleep: Callable[[float], None] = time.sleep,
-        observer: Callable[[dict[str, Any]], None] | None = None,
+        self, config: LLMConfig | Settings | None = None, sleep: Callable[[float], None] = time.sleep,
+        observer: Callable[[dict[str, Any]], None] | None = None, *, settings: Settings | None = None,
     ) -> None:
-        if not settings.model_name or settings.model_name == "TBD":
-            raise ValueError("model.name (HCX model) is not set in configs/model.yaml (or pass --model)")
-        key = get_secret(settings.api_key_env)
+        # settings=: the old keyword spelling (before T1-28 S2c the first parameter was `settings`)
+        if (config is None) == (settings is None):
+            raise TypeError("HCXClient takes one LLMConfig (or one Settings, the Phase 2 shim)")
+        config = config if config is not None else settings
+        settings = config if isinstance(config, Settings) else None
+        if settings is not None:  # Phase 2 shim: the key is the shell environment variable the Settings names
+            config = env_llm_config(settings)
+        if not config.model or config.model == "TBD":
+            raise ValueError("the HCX model name is not set (LLMConfig.model, or pass --model)")
+        if settings is not None and config.api_key is None:
+            raise LLMKeyMissing(f"{settings.api_key_env} is not set in the shell environment "
+                                f"(LLMConfig.api_key is required for provider={config.provider!r})")
+        key = config.require_key()
         if not key:
-            raise ValueError(f"{settings.api_key_env} is not set in .env")
-        self.settings = settings
-        self.url = f"{settings.base_url.rstrip('/')}/v3/chat-completions/{settings.model_name}"
+            raise LLMKeyMissing(f"LLMConfig.api_key is required for provider={config.provider!r}")
+        self.config = config
+        self.settings = settings if settings is not None else settings_from_llm(config)  # read by Phase 2
+        self.url = f"{config.base_url.rstrip('/')}/v3/chat-completions/{config.model}"
         self._key = key
         self._sleep = sleep
         self.observer = observer
 
     @property
     def is_reasoning(self) -> bool:
-        return self.settings.model_name.upper().startswith(self.REASONING_MODELS)
+        return self.config.model.upper().startswith(self.REASONING_MODELS)
 
     def generate(self, system: str, user: str) -> LLMResult:
         result, http_code, retry_after = self._observed_call(system, user, 1)
@@ -169,13 +195,13 @@ class HCXClient(LLMClient):
     def _body(self, system: str, user: str) -> dict[str, Any]:
         body: dict[str, Any] = {
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
-            "temperature": self.settings.temperature,
+            "temperature": self.config.temperature,
         }
         if self.is_reasoning:
-            body["maxCompletionTokens"] = self.settings.max_tokens  # includes thinking tokens
-            body["thinking"] = {"effort": self.settings.thinking_level or "none"}
+            body["maxCompletionTokens"] = self.config.max_tokens  # includes thinking tokens
+            body["thinking"] = {"effort": self.config.thinking_effort or "none"}
         else:
-            body["maxTokens"] = self.settings.max_tokens
+            body["maxTokens"] = self.config.max_tokens
         return body
 
     def _request(self, system: str, user: str) -> urllib.request.Request:
@@ -191,7 +217,7 @@ class HCXClient(LLMClient):
     def _call(self, system: str, user: str) -> tuple[LLMResult, int | None, float | None]:
         """One request -> (result, HTTP error code or None, Retry-After seconds or None)."""
         try:
-            with urllib.request.urlopen(self._request(system, user), timeout=self.settings.timeout_seconds) as resp:
+            with urllib.request.urlopen(self._request(system, user), timeout=self.config.timeout_seconds) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 response_status = getattr(resp, "status", None)
         except urllib.error.HTTPError as exc:
@@ -232,8 +258,12 @@ def _parse_response(data: dict[str, Any]) -> LLMResult:
 BACKENDS = ("mock", "hcx")
 
 
-def build_client(settings: Settings) -> LLMClient:
-    """Create the client named by settings.backend."""
+def build_client(settings: Settings | LLMConfig) -> LLMClient:
+    """Create the client named by settings.backend (Settings callers; an LLMConfig goes to the provider table)."""
+    if isinstance(settings, LLMConfig):
+        from kosis_chat.llm.providers import build_client as from_config  # providers imports this module
+
+        return from_config(settings)
     if settings.backend == "mock":
         return MockClient(settings.mock_response)
     if settings.backend == "hcx":

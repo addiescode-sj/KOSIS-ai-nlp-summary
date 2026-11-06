@@ -8,20 +8,12 @@ every table with a scenario category (21 of the 2,364 tables of data/table_metad
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
-
 from kosis_chat.compute.build import Built
+from kosis_chat.compute.schemas import Alternatives  # re-export: moved in T1-28 S1b
 from kosis_chat.data.schema import TableInput
 from kosis_chat.judge.question import SCENARIO_AXIS, TableIndex
 
 MAX_ALTERNATIVES = 8
-
-
-@dataclass(frozen=True)
-class Alternatives:
-    axis: str
-    chosen: str  # label of the scenario answered
-    refs: list[str]
 
 
 def scenario_alternatives(table: TableInput, index: TableIndex, built: Built, defaulted: dict[str, str]) -> list[Alternatives]:
@@ -51,4 +43,4 @@ def scenario_alternatives(table: TableInput, index: TableIndex, built: Built, de
 
 def with_alternatives(built: Built, found: list[Alternatives]) -> Built:
     refs = [r for a in found for r in a.refs if r not in built.context]
-    return replace(built, context=[*built.context, *refs]) if refs else built
+    return built.model_copy(update={"context": [*built.context, *refs]}) if refs else built

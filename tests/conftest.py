@@ -17,6 +17,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from kosis_chat.config import load_settings
+from kosis_chat.schemas.resources import LLMConfig
 
 PARQUET_COLUMNS = ["org_id", "tbl_id", "source", "prd_se", "period", "item_id", "item_name", "unit"]
 PARQUET_COLUMNS += [f"dim{i}_{part}" for i in range(1, 9) for part in ("name", "code", "label")]
@@ -118,6 +119,12 @@ def household_path(data_dir) -> Path:
 @pytest.fixture
 def mock_settings():
     return load_settings(backend="mock")
+
+
+@pytest.fixture
+def mock_llm() -> LLMConfig:
+    """The mock provider as callers inject it (T1-28 S2c): no key; build_client(mock_llm) is a MockClient."""
+    return LLMConfig(provider="mock", model="mock")
 
 
 class FakeServer:

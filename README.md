@@ -306,29 +306,33 @@ C 파이프라인 · 기본 40문항 자동 채점 결과 (사람 판정 전):
 
 ```bash
 pip install -r requirements.txt            # Python 3.12 권장
-cp .env.example .env                       # 키는 .env에만 둔다 (커밋 금지)
+export HCX_API_KEY=nv-...                  # HCX 키는 셸 환경변수 (Windows cmd: set HCX_API_KEY=nv-...). 코드는 .env를 읽지 않는다
 
 bash scripts/verify.sh                     # 오프라인 검증: pytest(Mock) + 실데이터 커밋 차단 확인
 
 # API 키 없이 흐름만 확인 (Mock)
 python -m kosis_chat.cli --table data/values/101_DT_1B8000H.parquet --backend mock -q "2023년 서울 출생건수는?"
 
-# 실제 모델로 질문 (.env에 HCX_API_KEY 필요, 기본 백엔드: HCX-007 thinking 끔)
+# 실제 모델로 질문 (셸 환경변수 HCX_API_KEY 필요, 기본 백엔드: HCX-DASH-002 thinking 끔)
 python -m kosis_chat.cli --table <표 파일> -q "질문"
 # 모델·thinking 바꾸기 (thinking을 켜면 max-tokens를 늘린다)
 python -m kosis_chat.cli --table <표 파일> --thinking low --max-tokens 5120 -q "질문"
 python -m kosis_chat.cli --table <표 파일> --model HCX-DASH-002 -q "질문"
+# kosis_chat.cli는 StatModule(C 파이프라인)로 답한다(T1-28 S6). 옛 B0 챗봇 CLI(--scope --form --answer-format)는
+python -m kosis_chat.legacy.cli --table <표 파일> --backend mock -q "질문"
 ```
 
 | 환경변수 | 용도 |
 | --- | --- |
 | `KOSIS_API_KEY` | KOSIS OpenAPI |
 | `HCX_API_KEY` | 기본·평가 대상 모델 HCX (CLOVA Studio v3, `nv-`로 시작하는 키) |
-| `GEMINI_API_KEY` | HCX 이전 개발용 모델 (Gemini, `--backend gemini`) |
 | `PRETEST_API_KEY` | OpenAI 호환 API로 다른 모델 사전 테스트 |
 | `LINEAR_API_KEY`, `LINEAR_TEAM_KEY` | TASK.md → Linear 자동 동기화 (선택) |
 
-백엔드·모델 설정은 [configs/model.yaml](configs/model.yaml). Mock 실행 결과는 사전 테스트라 `eval-history`에 올리지 않는다.
+백엔드·모델 기본값은 `LLMConfig`(kosis_chat/schemas/resources.py) 필드 기본값이고(T1-28 S2c에서 `configs/model.yaml` 삭제),
+실행마다 `--backend --model --thinking --max-tokens --serialization`으로 바꾼다. 코드에서 부를 때는
+`LLMConfig(api_key=..., model=..., provider="hcx")`를 넘긴다(키는 호출자가 셸 환경변수 등에서 읽는다. 모듈은 `.env`·환경변수를 읽지 않는다).
+Mock 실행 결과는 사전 테스트라 `eval-history`에 올리지 않는다.
 `--form`을 쓴 실행은 결과 폴더에 그때의 `form.txt` 사본이, `manifest.json`에 해시가 남는다.
 
 ## 평가
@@ -348,7 +352,6 @@ python -m eval.scorer --run eval/results/<id> --append-history       # 집계 �
 ```
 kosis_chat/        서비스 코드: data/(입력·전처리·직렬화), llm/(모델 클라이언트·프롬프트), chatbot.py, cli.py
 eval/              평가: run_eval.py, review.py, scorer.py (golden/, results/ 는 gitignore)
-configs/           model.yaml (백엔드·모델 설정)
 tests/             오프라인 테스트 (가짜 Parquet 표는 conftest.py가 만든다)
 docs/
   current-state.md   현재 상태 인계 문서
@@ -371,7 +374,7 @@ CLAUDE.md          Claude Code 작업 지침
 
 ## 데이터·보안 규칙
 
-- API 키는 `.env`에만 둔다 (gitignore됨). 절대 커밋하지 않는다.
+- API 키는 커밋하지 않는다. `HCX_API_KEY`는 셸 환경변수로 넘긴다(Phase 1 코드는 `.env`를 읽지 않는다). 다른 키를 `.env`에 둘 때도 `.env`는 gitignore 상태로 둔다.
 - 제공 데이터(`data/raw/`, `data/samples/`), 골든셋, 평가 결과는 저장소에 올리지 않는다.
 - 답에 쓰는 숫자는 원본 셀이나 검증 가능한 계산식으로 추적되는 값만 허용하고, 핵심 수치마다 출처 표를 밝힌다.
 - 수치로 뒷받침되지 않는 인과·정치적 주장은 하지 않는다.

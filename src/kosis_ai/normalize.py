@@ -8,7 +8,6 @@ Conditions the table cannot meet raise LookupFailed with a RefusalReason, so T1-
 from __future__ import annotations
 
 import json
-import re
 from functools import lru_cache
 from pathlib import Path
 
@@ -16,22 +15,26 @@ import pandas as pd
 import pyarrow.dataset as ds
 
 from kosis_ai import paths
-from kosis_ai.schemas import MAX_DIMS, MeasureKind, RefusalReason
+from kosis_ai.schemas import MAX_DIMS, RefusalReason
+# The unit and measure_kind rules moved to kosis_ai/units.py in T1-28 S2b; the old names here are the same objects.
+from kosis_ai.units import FLOW_UNITS as _FLOW_UNITS
+from kosis_ai.units import KIND_KEYWORDS as _KIND_KEYWORDS
+from kosis_ai.units import MEASURE_OVERRIDES
+from kosis_ai.units import NOT_COUNT as _NOT_COUNT
+from kosis_ai.units import PAREN as _PAREN
+from kosis_ai.units import RATIO_UNITS as _RATIO_UNITS
+from kosis_ai.units import RESOLVE_KNOWN_UNITS as KNOWN_UNITS
+from kosis_ai.units import RESOLVE_UNIT_OVERRIDES as UNIT_OVERRIDES
+from kosis_ai.units import STOCK_UNITS as _STOCK_UNITS
+from kosis_ai.units import UNIT_PAREN as _UNIT_SUFFIX
+from kosis_ai.units import keyword_kind as _keyword_kind
+from kosis_ai.units import known_unit as _known
+from kosis_ai.units import measure_kind, resolve_unit
+from kosis_ai.units import override_unit as _override_unit
+from kosis_ai.units import paren_unit as _paren_unit
 
 KEY_COLUMNS = ["period", "item_id", *(f"dim{i}_code" for i in range(1, MAX_DIMS + 1))]
 LABEL_COLUMNS = [f"dim{i}_label" for i in range(1, MAX_DIMS + 1)]
-
-# Units seen in the provided data (docs/eda-full.md 2-4). Anything else in a unit column or in parentheses is not a
-# unit: '월세없음', '15세 이상', '4년제이상', '미취학 포함' ...
-KNOWN_UNITS = {
-    "명", "건", "가구", "호", "개", "세", "년", "%", "천명", "원", "천원", "만원", "십만원", "백만원", "명/㎢", "㎢", "㎡",
-    "배", "쌍", "점", "개사", "세대", "평", "척", "대", "여자백명당남자수",
-}  # fmt: skip
-# Names with no unit anywhere in the data; checked after the unit column and parentheses.
-UNIT_OVERRIDES = {"합계출산율": "명", "기대수명": "년"}
-_PAREN = re.compile(r"\(([^()]*)\)")
-# Items that are rates, averages or indexes must not inherit a count unit from the table metadata.
-_NOT_COUNT = re.compile(r"율|비율|성비|부양비|평균|중위|지수")
 
 VALUE_LABELS = {
     "ok": None,
@@ -42,24 +45,6 @@ VALUE_LABELS = {
     "ellipsis": "자료 없음",
     "other_text": "해석할 수 없는 값",
 }
-
-# measure_kind (PREPROCESSING.md 1장). The first label with a keyword decides; dim labels before the item name,
-# because some items are table titles ('인구동태건수 및 동태율 추이') while the dim names the measure ('출생아수(명)').
-_KIND_KEYWORDS: list[tuple[re.Pattern, MeasureKind]] = [
-    (re.compile(r"지수"), "index"),
-    (re.compile(r"평균|중위|기대수명|기대여명"), "average"),
-    (re.compile(r"율|비율|성비|부양비|밀도"), "ratio"),
-    (re.compile(r"건수|출생아수|사망자수|이동자|전입|전출|혼인|이혼|출생|사망"), "count_flow"),
-    (re.compile(r"인구|가구|세대|주택|인원"), "count_stock"),
-]
-_RATIO_UNITS = {"%", "명/㎢", "배", "여자백명당남자수"}
-_STOCK_UNITS = {"명", "가구", "호", "세대", "개", "개사", "천명"}
-_FLOW_UNITS = {"건", "쌍"}
-# Per table or item fixes for the keyword rules: {(tbl_id, item_name or dim label): kind}.
-MEASURE_OVERRIDES: dict[tuple[str, str], MeasureKind] = {}
-
-
-_UNIT_SUFFIX = re.compile(r"\s*\([^()]*\)\s*$")
 
 
 class LookupFailed(Exception):
@@ -112,61 +97,7 @@ def select(df: pd.DataFrame, *, item: str | None = None, dims: dict[str, str] | 
     return out
 
 
-def _known(unit: str | None) -> str | None:
-    if not isinstance(unit, str):  # None or NaN from pandas
-        return None
-    text = unit.strip()
-    return text if text in KNOWN_UNITS or (text.endswith("당") and len(text) <= 12) else None
-
-
-def _paren_unit(name: str | None) -> str | None:
-    for text in reversed(_PAREN.findall(name or "")):
-        if found := _known(text):
-            return found
-    return None
-
-
-def _override_unit(name: str | None) -> str | None:
-    return next((unit for keyword, unit in UNIT_OVERRIDES.items() if keyword in (name or "")), None)
-
-
-def _keyword_kind(name: str | None) -> MeasureKind | None:
-    return next((kind for pattern, kind in _KIND_KEYWORDS if pattern.search(name or "")), None)
-
-
-def resolve_unit(
-    unit: str | None, item_name: str, dim_labels: list[str], meta_unit: str | None = None
-) -> tuple[str | None, str]:
-    """(unit, source). Order: unit column (known units only) -> '(unit)' in item / dim names -> overrides ->
-    meta_unit -> None. Pass meta_unit only when it is safe for the table (see fetch_table)."""
-    if found := _known(unit):
-        return found, "unit_column"
-    for name in (item_name, *dim_labels):
-        if found := _paren_unit(name):
-            return found, "parentheses"
-    for name in (item_name, *dim_labels):
-        if found := _override_unit(name):
-            return found, "override"
-    if meta_unit and not any(_NOT_COUNT.search(n or "") for n in (item_name, *dim_labels)):
-        return meta_unit, "meta"
-    return None, "unknown"
-
-
-def measure_kind(tbl_id: str, unit: str | None, item_name: str, dim_labels: list[str]) -> MeasureKind | None:
-    """count_stock / count_flow / ratio / average / index, or None when the rules cannot tell (then nothing sums)."""
-    for name in (*dim_labels, item_name):
-        if (tbl_id, name) in MEASURE_OVERRIDES:
-            return MEASURE_OVERRIDES[(tbl_id, name)]
-    if unit in _RATIO_UNITS or (unit or "").endswith("당"):
-        return "ratio"
-    for name in (*dim_labels, item_name):
-        if kind := _keyword_kind(name):
-            return kind
-    if unit in _FLOW_UNITS:
-        return "count_flow"
-    if unit in _STOCK_UNITS:
-        return "count_stock"
-    return None
+# resolve_unit, measure_kind, _known, _paren_unit, _override_unit, _keyword_kind: kosis_ai/units.py (imported above).
 
 
 @lru_cache(maxsize=256)
@@ -175,6 +106,11 @@ def _meta_unit(table_id: str, data_dir: Path) -> str | None:
     if not path.exists():
         return None
     return _known(json.loads(path.read_text(encoding="utf-8")).get("unitNmKor"))
+
+
+# Public name of the table metadata unit (T1-28 S2b) for Phase 2 src/kosis_rag/metadata.py, which reads _meta_unit;
+# the same lru_cache'd function, so either name shares one cache.
+meta_unit = _meta_unit
 
 
 def _table_path(table_id: str, data_dir: Path) -> Path:
