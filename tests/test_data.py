@@ -161,11 +161,13 @@ def test_markdown_drops_zip_decimal_zeros(household_path):
 
 
 def test_duplicate_source_ref_is_rejected(data_dir):
+    """validate still rejects two cells with one source_ref; the loader no longer hands it such a table (T1-29:
+    an equal row is kept once, tests/test_tidy_rows.py)."""
     rows = pop_rows()
     path = write_table(data_dir, "FAKE_TBL_003", rows + [rows[0]], {
         "survey_name": "가상 인구조사", "organization": "가상 기관", "table_name": "가상 중복 표",
         "period": "년 (2022 ~ 2024)", "url": "https://example.invalid/fake-table-003"})
-    with pytest.raises(SchemaError) as err:
-        load_table(path)
-    (problem,) = err.value.problems
+    table = load_table(path)
+    assert len(table.cells) == len(rows)
+    (problem,) = validate(replace(table, cells=table.cells + (table.cells[0],)))
     assert problem.where == f"cells[{len(rows)}].source_ref" and problem.message.startswith("duplicate of cells[0] (FAKE_TBL_003|T1|")
