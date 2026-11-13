@@ -13,7 +13,8 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
-from kosis_chat.prepare.convert import PARQUET_COLUMNS, check_meta, convert, meta_from_row, no_rows, period_codes, rows_of
+from kosis_chat.prepare.convert import (PARQUET_COLUMNS, ROW_LIMIT, check_meta, convert, meta_from_row, no_rows, period_codes,
+                                        rows_of, tidy_note, tidy_rows)
 from kosis_chat.prepare.schemas import Problem, SchemaError, TableInput, validate
 
 
@@ -98,6 +99,16 @@ def parquet_meta(path: Path, prd_se: set[str]) -> dict:
     return meta_from_row(row, prd_se, fetched_at_of(path))
 
 
+def footer_rows(path: Path) -> int | None:
+    """The row count in the Parquet footer (no data read); None when it cannot be read (read_parquet reports why)."""
+    try:
+        import pyarrow.parquet as pq
+
+        return pq.read_metadata(path).num_rows
+    except Exception:
+        return None
+
+
 def read_parquet(path: Path) -> Any:
     """The table's columns (prepare.convert.PARQUET_COLUMNS) as a pyarrow Table; SchemaError when it cannot be read."""
     try:
@@ -112,6 +123,9 @@ def read_parquet(path: Path) -> Any:
 
 def load_parquet(path: Path) -> TableInput:
     """One long Parquet file per table (data/values), meta from tables.csv; not yet validated as a whole."""
+    row_count = footer_rows(path)
+    if row_count is not None and row_count > ROW_LIMIT:
+        raise SchemaError([Problem(path.name, f"table has {row_count:,} rows, over the {ROW_LIMIT:,}-row limit of a whole-table load")])
     frame = read_parquet(path)
     try:
         rows = rows_of(frame)
@@ -124,6 +138,10 @@ def load_parquet(path: Path) -> TableInput:
         if problems:
             raise SchemaError(problems)
     meta = parquet_meta(path, period_codes(rows))
+    rows, counts = tidy_rows(rows)
+    if not rows:
+        raise no_rows(path.name)
+    meta["note"] += tidy_note(counts)
     check_meta(meta, where=path.name)
     return convert(rows, meta, sha256_of(path))
 

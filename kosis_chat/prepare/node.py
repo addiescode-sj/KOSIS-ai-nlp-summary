@@ -15,7 +15,8 @@ import weakref
 from collections.abc import Mapping
 
 from kosis_chat.prepare.clean import clean
-from kosis_chat.prepare.convert import check_meta, convert, frame_digest, meta_from_row, no_rows, period_codes, rows_of
+from kosis_chat.prepare.convert import (check_meta, convert, frame_digest, meta_from_row, no_rows, period_codes, rows_of,
+                                        tidy_note, tidy_rows)
 from kosis_chat.prepare.schemas import Problem, SchemaError, TableInput, validate
 from kosis_chat.schemas.io import ParquetTable
 
@@ -109,6 +110,10 @@ def table_input(table: ParquetTable, catalog: Mapping[str, Mapping[str, str]] | 
     if str(row.get("tbl_id")) != tbl_id:
         raise SchemaError([Problem("meta", f"meta tbl_id {row.get('tbl_id')!r} is not the frame's tbl_id {tbl_id!r}")])
     meta = meta_from_row(row, period_codes(rows), fetched_at)
+    rows, counts = tidy_rows(rows)
+    if not rows:
+        raise no_rows("frame")
+    meta["note"] += tidy_note(counts)
     if table.coverage == "partial":
         meta["note"] += PARTIAL_NOTE
     allow_empty = () if fetched_at else ("fetched_at",)

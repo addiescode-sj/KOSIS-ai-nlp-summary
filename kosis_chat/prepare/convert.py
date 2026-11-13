@@ -138,6 +138,68 @@ def period_codes(rows: Iterable[Mapping]) -> set[str]:
     return {str(r["prd_se"]) for r in rows if r["prd_se"]}
 
 
+# A table over this many rows is not loaded whole: every row becomes a Python Cell (T1-29: the provided files over it
+# have 9 to 111 million rows and ran out of memory). adapters/parquet.py checks the Parquet footer before reading.
+ROW_LIMIT = 5_000_000
+
+
+def _blank(value: Any) -> bool:
+    return value is None or not str(value).strip()
+
+
+def _cell_key(r: Mapping) -> tuple:
+    """What cells_of makes the source_ref from: the item, the codes of the named category levels and the period."""
+    return (r["item_id"], tuple((level, r[f"dim{level}_code"]) for level in DIM_LEVELS if r[f"dim{level}_name"]), r["period"])
+
+
+def tidy_rows(rows: list[dict]) -> tuple[list[dict], dict[str, int]]:
+    """Rows a whole table used to be rejected for, settled row by row (T1-29); no number is chosen or made up.
+
+    1. A row with neither a period nor a value is dropped (empty shells in some provided zip tables).
+    2. Two period codes writing one period string (month and quarter both use 197001): the rows of every code other
+       than the table's own (the first code in order, as meta_from_row takes period_type) are dropped.
+    3. Rows with one key: equal values are kept once; different values become one blank cell (value_kind "blank" ->
+       value_flag "missing"), so a question about it is refused as a missing value.
+    Returns (rows in the first-seen order, counts by rule: blank_rows, cycle_rows, same_rows, conflict_cells)."""
+    counts = {"blank_rows": 0, "cycle_rows": 0, "same_rows": 0, "conflict_cells": 0}
+    kept = [r for r in rows if not (_blank(r["period"]) and r["value"] is None and _blank(r["value_raw"]))]
+    counts["blank_rows"] = len(rows) - len(kept)
+    codes = sorted(period_codes(kept))
+    if len(codes) > 1:
+        seen: dict[tuple, set] = {}
+        for r in kept:
+            seen.setdefault(_cell_key(r), set()).add(r["prd_se"])
+        losing = set().union(*(cycles for cycles in seen.values() if len(cycles) > 1)) - {codes[0]}
+        if losing:
+            before = len(kept)
+            kept = [r for r in kept if r["prd_se"] not in losing]
+            counts["cycle_rows"] = before - len(kept)
+    groups: dict[tuple, list[dict]] = {}
+    for r in kept:
+        groups.setdefault(_cell_key(r), []).append(r)
+    if len(groups) == len(kept):
+        return kept, counts
+    out = []
+    for same in groups.values():
+        first = same[0]
+        if len(same) > 1:
+            if len({(r["value_raw"], r["value"], r["value_kind"]) for r in same}) == 1:
+                counts["same_rows"] += len(same) - 1
+            else:
+                counts["conflict_cells"] += 1
+                first = {**first, "value_raw": "", "value": None, "value_kind": "blank"}
+        out.append(first)
+    return out, counts
+
+
+def tidy_note(counts: Mapping[str, int]) -> str:
+    """What tidy_rows did, for TableMeta.note ("" when nothing)."""
+    names = (("blank_rows", "시점·값이 빈 행 {} 제외"), ("cycle_rows", "시점 표기가 겹친 다른 주기 행 {} 제외"),
+             ("same_rows", "같은 행 {} 제외"), ("conflict_cells", "값이 서로 다른 겹친 셀 {}개는 값 없음으로 처리"))
+    parts = [text.format(f"{counts[key]:,}") for key, text in names if counts.get(key)]
+    return f"; 행 정리: {', '.join(parts)}" if parts else ""
+
+
 def meta_from_row(row: Mapping, prd_se: set[str], fetched_at: str) -> dict:
     """Meta of a table from its tables.csv row (or a TableInfo in the same names), its prd_se codes and fetch date."""
     codes = sorted(prd_se)
