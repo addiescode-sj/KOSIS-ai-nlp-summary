@@ -717,6 +717,9 @@ class StatAnswer(Contract):
     clarify_choices: list[ClarifyChoice] = Field(default_factory=list)  # S6: the options with their codes
     default_applied: dict[str, str] = Field(default_factory=dict)  # e.g. {"period": "latest (2025)"}
     source: Source | None = None
+    # T1-30: every table an answer read, in input order; empty for one table (source is that table). With two or
+    # three tables, source is the first of them (kept for readers of one source).
+    sources: list[Source] = Field(default_factory=list)
     # v2 record of trust: see NumbersOrigin. numbers_verified is True only when code checked every number in the
     # parts against result (kosis_chat/answer/verify.py); defaults_verified only when the calculation itself used
     # default_applied (a chatbot answer records the rules' plan without proof the model followed it).
@@ -753,6 +756,8 @@ class StatAnswer(Contract):
         if self.outcome != "answered" and cited:
             raise ValueError(f"a {self.outcome} answer cannot cite facts: {cited}")
         out_of_scope = self.refusal is not None and self.refusal.reason == "out_of_scope"
+        if self.sources and self.source != self.sources[0]:
+            raise ValueError("source must be the first of sources")
         if self.source is None and not out_of_scope:
             raise ValueError("source is required unless the question is out of scope")
         blank = [k for k, v in self.default_applied.items() if not k.strip() or not v.strip()]

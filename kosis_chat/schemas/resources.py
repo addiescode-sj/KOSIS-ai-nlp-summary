@@ -83,11 +83,65 @@ class StatResources:
         return self.table.caches
 
 
+MAX_TABLES = 3  # T1-30 (D2): a question reads at most three tables
+TABLE_LABELS = "ABC"  # how the multi-table plan prompt names the tables, in input order
+
+
+@dataclass(frozen=True)
+class MultiResources:
+    """Two or three tables of one question (T1-30), each prepared as StatResources (cleaned, indexed, cached).
+
+    table, index, org_id and caches are the first table's, so a step that reads one table's resources (render's
+    ask-back source, caveats) works unchanged; the steps that need every table read `tables`."""
+
+    tables: tuple[StatResources, ...]
+
+    def __post_init__(self) -> None:
+        if not 2 <= len(self.tables) <= MAX_TABLES:
+            raise ValueError(f"MultiResources holds 2 to {MAX_TABLES} tables, got {len(self.tables)}")
+        ids = [r.table.meta.tbl_id for r in self.tables]
+        if len(set(ids)) != len(ids):
+            raise ValueError(f"a table is given twice: {ids}")
+
+    @property
+    def primary(self) -> StatResources:
+        return self.tables[0]
+
+    @property
+    def table(self) -> TableInput:
+        return self.primary.table
+
+    @property
+    def index(self) -> TableIndex:
+        return self.primary.index
+
+    @property
+    def org_id(self) -> str | None:
+        return self.primary.org_id
+
+    @property
+    def caches(self) -> LookupCaches:
+        return self.primary.caches
+
+    @property
+    def by_id(self) -> dict[str, StatResources]:
+        return {r.table.meta.tbl_id: r for r in self.tables}
+
+    @property
+    def labels(self) -> dict[str, str]:
+        """Prompt label ("A", "B", "C") -> tbl_id, in input order."""
+        return {label: r.table.meta.tbl_id for label, r in zip(TABLE_LABELS, self.tables)}
+
+    def table_inputs(self) -> dict[str, TableInput]:
+        """tbl_id -> cleaned table, for compute(tables=)."""
+        return {r.table.meta.tbl_id: r.table for r in self.tables}
+
+
 def load_resources(table: TableInput, org_id: str | None = None) -> StatResources:
     """Clean the table and index it (the index is kept in the cleaned table's caches)."""
     cleaned = clean(table)
     return StatResources(table=cleaned, index=index_of(cleaned), org_id=org_id)
 
 
-__all__ = ["DEFAULT_BASE_URL", "DEFAULT_MODEL", "LLMConfig", "LLMKeyMissing", "LookupCaches", "MOCK_PROVIDER",
-           "MOCK_RESPONSE", "StatResources", "load_resources"]
+__all__ = ["DEFAULT_BASE_URL", "DEFAULT_MODEL", "LLMConfig", "LLMKeyMissing", "LookupCaches", "MAX_TABLES", "MOCK_PROVIDER",
+           "MOCK_RESPONSE", "MultiResources", "StatResources", "TABLE_LABELS", "load_resources"]

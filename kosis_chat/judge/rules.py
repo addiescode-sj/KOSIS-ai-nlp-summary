@@ -366,3 +366,27 @@ def judge(question: str, table: TableInput, index: TableIndex | None = None) -> 
             return verdict
     applied = defaults(parsed, index, resolved, cells)
     return Verdict("answered", "default" if applied else None, default_applied=applied)
+
+
+def judge_multi(question: str, indexes: list[TableIndex]) -> Verdict:
+    """The rules for a question over two or three tables (T1-30): only those about the question itself.
+
+    A causal or evaluative question, a question no table matches that names another domain, and a period no table
+    has are decided here, once. What one table lacks (a category, a cell, a symbol) is the other table's business:
+    the plan names a table per select and compute refuses a cell that is not there. No default is applied (the plan
+    prompt asks for the latest period every table has when the question names none)."""
+    parsed = [parse(index, question) for index in indexes]
+    first = parsed[0]
+    for rule in (_causal, _evaluative):
+        if (verdict := rule(first)) is not None:
+            return verdict
+    if all(_out_of_scope(p) is not None for p in parsed):
+        return refuse("out_of_scope", "out_of_scope")
+    missing = [_period_text(s) for s in first.periods.singles if not any(ix.period_ok(s) for ix in indexes)]
+    missing += [_range_text(a, b) for a, b in first.periods.ranges
+                if not any(in_range(y, a, b) for ix in indexes for y in ix.periods)]
+    if missing:
+        available = "; ".join(f"{ix.table.meta.tbl_nm} {_available(ix).split(': ', 1)[-1]}" for ix in indexes)
+        return refuse("no_period", "no_period", available=f"표의 시점: {available}", asked=", ".join(missing))
+    return Verdict("answered")
+

@@ -34,7 +34,7 @@ from kosis_chat.llm.providers import build_client
 from kosis_chat.prepare.schemas import TableInput
 from kosis_chat.render.node import causal_note
 from kosis_chat.schemas.answer import Answer
-from kosis_chat.schemas.resources import LLMConfig, StatResources, load_resources
+from kosis_chat.schemas.resources import LLMConfig, MultiResources, StatResources, load_resources
 
 VERSION = compose.VERSION
 # Kept by name for callers of the old pipeline module (T1-28 S3b): FALLBACK_PROMPT is legacy/fallback.py's,
@@ -133,3 +133,69 @@ class StatPipeline:
                     started=started, golden_scope=golden_scope)
         return answer_of(state, table_meta=self.table.meta, prompt_version=self.prompt_version,
                          fallback_prompt=FALLBACK_PROMPT)
+
+
+class MultiStatPipeline:
+    """Answers questions over two or three tables (T1-30): the multi-table graph (graph/multi.py).
+
+    Built from prepared TableInputs (the first table is the answer's `source`) or from the tables' StatResources, so
+    a module that has prepared a table for one-table questions reuses its cleaning and index. The model is reached as
+    StatPipeline reaches it (client=, llm= or settings=; built on first use, so a question the rules refuse needs no
+    key). A plan the model could not write after one retry is answered as a refusal; a failed model call raises
+    RuntimeError, as summarize_stat does."""
+
+    def __init__(self, tables: list[TableInput] | list[StatResources], client: LLMClient | None = None,
+                 settings: Settings | None = None, org_ids: list[str | None] | None = None,
+                 retry_interval: float = 0.0, llm: LLMConfig | None = None) -> None:
+        self.settings = settings or (settings_from_llm(llm) if llm is not None else load_settings())
+        self.llm = llm
+        self._client: LLMClient | None = client
+        org_ids = org_ids or [None] * len(tables)
+        prepared = [t if isinstance(t, StatResources) else load_resources(t, o) for t, o in zip(tables, org_ids, strict=True)]
+        self.resources = MultiResources(tuple(prepared))
+        self.retry_interval = retry_interval
+        self.prompt_version = VERSION
+        self.decision_metadata = {"pipeline": "stat_multi", "outcome_origin": "rules", "numbers_origin": "code",
+                                  "defaults_origin": "rules"}
+        self._graph = None
+
+    @property
+    def client(self) -> LLMClient:
+        if self._client is None:
+            self._client = build_client(self.llm if self.llm is not None else self.settings)
+        return self._client
+
+    @client.setter
+    def client(self, value: LLMClient) -> None:
+        self._client = value
+
+    @property
+    def model_name(self) -> str:
+        return self.settings.model_name if self.client.name == "hcx" else self.client.name
+
+    def _model_access(self) -> ModelAccess:
+        return ModelAccess(client=lambda: self.client, model_name=lambda: self.model_name,
+                           retry_interval=self.retry_interval, max_input_tokens=self.settings.max_input_tokens)
+
+    @property
+    def graph(self):
+        if self._graph is None:
+            from kosis_chat.graph.multi import build_multi_graph
+
+            self._graph = build_multi_graph(self.resources)
+        return self._graph
+
+    def ask(self, question: str) -> Answer:
+        """One question through the multi-table graph; RuntimeError when the plan's model call failed."""
+        from kosis_chat.graph.multi import run_multi
+
+        started = time.perf_counter()
+        context = StatContext(llm=self._model_access())
+        state = run_multi(self.graph, question, context=context,
+                          meta={**self.decision_metadata, "route": "rules"}, started=started)
+        failed = [state.meta.get(k) for k in ("plan_status", "plan_retry_status") if state.meta.get(k)]
+        if failed:
+            raise RuntimeError(f"the multi-table plan's model call failed: {failed[-1]}")
+        return answer_of(state, table_meta=self.resources.table.meta, prompt_version=self.prompt_version,
+                         fallback_prompt=FALLBACK_PROMPT)
+

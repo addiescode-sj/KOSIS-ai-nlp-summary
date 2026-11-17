@@ -171,3 +171,28 @@ class EventLookupOut(BoundaryModel):
 
     start: str | None = None
     call: SkipValidation[LLMCall]
+
+
+# ---------------------------------------------------------------- analyze/multi.py (T1-30)
+
+
+class PlanMultiIn(BoundaryModel):
+    """step_plan_multi_llm's input: the question and whether a model answer came back already for it."""
+
+    question: str
+    called: bool = False
+
+
+class PlanMultiOut(BoundaryModel):
+    """step_plan_multi_llm's output. route "placed": placed holds the computed plan (built, computed). "clarify": the
+    plan named something several codes could be (two options or more). "refused": the second plan also computed to a
+    refusal (refusal: compute.CalcRefused), which is the answer. "failed": no usable plan (a refusal with reason
+    "class_mismatch" is answered; there is no compact-v2 fallback over several tables)."""
+
+    placed: SkipValidation[Placed | None] = None
+    clarify: Any = None
+    refusal: Any = None
+    calls: SkipValidation[list[LLMCall]] = Field(default_factory=list)
+    meta: SkipValidation[dict[str, Any]] = Field(default_factory=dict)
+    route: Literal["placed", "clarify", "refused", "failed"]
+

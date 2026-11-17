@@ -66,3 +66,10 @@ def final_text(body: str, source: Source | None, applied: dict[str, str] | None 
     lines += [f"참고: {n}" for n in dict.fromkeys(notes or []) if n]
     text = "\n".join(lines)
     return f"{text}\n\n출처: {source.citation()}" if source else text
+
+
+def final_text_multi(body: str, sources: list[Source], notes: list[str] | None = None) -> str:
+    """final_text for an answer read from two or three tables (T1-30): one '출처:' line naming every table."""
+    text = final_text(body, None, None, notes)
+    return f"{text}\n\n출처: " + "; ".join(s.citation() for s in sources) if sources else text
+
