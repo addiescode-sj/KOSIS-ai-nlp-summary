@@ -29,7 +29,7 @@ from kosis_chat.graph.legacy import FALLBACK_PROMPT, Chatbot, add_usage, answer_
 from kosis_chat.graph.spans import llm_attributes
 from kosis_chat.llm import compose  # the old path kept: pipeline.VERSION is kosis_chat.llm.compose.VERSION (Phase 2)
 from kosis_chat.llm.calls import ModelAccess
-from kosis_chat.llm.model import LLMClient
+from kosis_chat.llm.model import STATUS_API_ERROR, STATUS_INPUT_TOO_LONG, STATUS_TIMEOUT, LLMClient
 from kosis_chat.llm.providers import build_client
 from kosis_chat.prepare.schemas import TableInput
 from kosis_chat.render.node import causal_note
@@ -142,7 +142,7 @@ class MultiStatPipeline:
     a module that has prepared a table for one-table questions reuses its cleaning and index. The model is reached as
     StatPipeline reaches it (client=, llm= or settings=; built on first use, so a question the rules refuse needs no
     key). A plan the model could not write after one retry is answered as a refusal; a failed model call raises
-    RuntimeError, as summarize_stat does."""
+    RuntimeError, as summarize_stat does (a reply in the wrong format is not a failed call: it is refused)."""
 
     def __init__(self, tables: list[TableInput] | list[StatResources], client: LLMClient | None = None,
                  settings: Settings | None = None, org_ids: list[str | None] | None = None,
@@ -193,7 +193,9 @@ class MultiStatPipeline:
         context = StatContext(llm=self._model_access())
         state = run_multi(self.graph, question, context=context,
                           meta={**self.decision_metadata, "route": "rules"}, started=started)
-        failed = [state.meta.get(k) for k in ("plan_status", "plan_retry_status") if state.meta.get(k)]
+        # the model could not be reached (not a reply in the wrong format, which is answered as a refusal)
+        failed = [state.meta.get(k) for k in ("plan_status", "plan_retry_status")
+                  if state.meta.get(k) in (STATUS_TIMEOUT, STATUS_API_ERROR, STATUS_INPUT_TOO_LONG)]
         if failed:
             raise RuntimeError(f"the multi-table plan's model call failed: {failed[-1]}")
         return answer_of(state, table_meta=self.resources.table.meta, prompt_version=self.prompt_version,

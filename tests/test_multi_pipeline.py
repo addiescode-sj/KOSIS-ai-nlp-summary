@@ -131,7 +131,7 @@ def test_a_period_no_table_has_is_refused(tables):
 def test_a_failed_model_call_raises(tables):
     from kosis_chat.llm.model import LLMResult
 
-    client = MockClient(lambda s, u: LLMResult(text="", status="http_error", error="boom"))
+    client = MockClient(lambda s, u: LLMResult(text="", status="api_error", error="boom"))
     with pytest.raises(RuntimeError):
         pipeline(tables, ["FAKE_BIRTH", "FAKE_DEATH"], client).ask("2024년 서울 자연증가는?")
 
@@ -201,3 +201,8 @@ def test_summarize_stats_run_reads_the_keys(tables, tmp_path, monkeypatch):
     out = api.summarize_stats_run("2024년 서울 출생아에서 사망자를 빼면?", ["101_FAKE_BIRTH", "101_FAKE_DEATH"],
                                   client=scripted(NATURAL))
     assert out.answer.outcome == "answered" and out.answer.sources[1].tbl_id == "FAKE_DEATH"
+
+
+def test_a_reply_in_the_wrong_format_is_refused_not_raised(tables):
+    stat = pipeline(tables, ["FAKE_BIRTH", "FAKE_DEATH"], MockClient()).ask("2024년 서울 자연증가는?").stat_answer
+    assert stat.outcome == "refused" and stat.refusal.reason == "class_mismatch"

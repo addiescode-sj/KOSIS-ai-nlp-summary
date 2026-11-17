@@ -223,6 +223,22 @@ def _grw(facts: list[Fact], computed: Computed) -> list:
 _DERIVED_IDS = FACT_ID  # T1-28 S2b: the shared fact id pattern (the same text)
 
 
+def _tables(facts: list[Fact], by_id: dict[str, Fact], seen: set[str] | None = None) -> set[str]:
+    """The tbl_ids the facts were read from, through derivations (T1-30); one table gives one id."""
+    seen = set() if seen is None else seen
+    out: set[str] = set()
+    for f in facts:
+        if f.id in seen:
+            continue
+        seen.add(f.id)
+        if f.source_ref:
+            out.add(f.source_ref.split("|", 1)[0])
+        elif f.derivation:
+            inner = [by_id[i] for i in _DERIVED_IDS.findall(f.derivation) if i in by_id]
+            out |= _tables(inner, by_id, seen)
+    return out
+
+
 def _listed(facts: list[Fact], computed: Computed) -> list:
     """plan (a plan the model wrote), worded by its blocks (S6): each cell as '시점 대상 값', each computed number as
     '<what it was computed from>의 <what it is> 값' ('2005년 경기도·부산광역시의 차이'), from the facts' own labels.
@@ -234,6 +250,8 @@ def _listed(facts: list[Fact], computed: Computed) -> list:
             return f"{period_text(fact.period) + ' ' if fact.period else ''}{fact_label(fact)}".strip()
         operands = [by_id[i] for i in dict.fromkeys(_DERIVED_IDS.findall(fact.derivation)) if i in by_id]
         cells = [o for o in operands if not o.derivation]
+        if fact.note and len(_tables(operands, by_id)) > 1:  # T1-30: two tables' numbers; the plan's note names it
+            return fact.note
         if len(cells) == len(operands) == 2:
             a, b = cells
             if a.period == b.period:
