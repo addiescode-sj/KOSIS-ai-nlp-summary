@@ -318,6 +318,7 @@ class _Run:
             _check_units(parts.reads)
             semantics.check_share_parts(parts.reads)
             semantics.check_share_periods(parts.reads, total.reads[0])
+            values = [_numeric(r) for r in parts.reads]
             whole = _numeric(total.reads[0])
             unit, total_unit = parts.reads[0].unit, total.reads[0].unit
             if unit and total_unit and unit != total_unit:
@@ -331,8 +332,8 @@ class _Run:
             _check_units([*parts.reads, *total.reads])
             semantics.check_share_parts(parts.reads)
             semantics.check_share_scope(self.table, parts.reads, total.reads[0])
+            values = [_numeric(r) for r in parts.reads]  # the parts first, then the whole (the order before T1-30)
             whole = _numeric(total.reads[0])
-        values = [_numeric(r) for r in parts.reads]
         if not whole:
             raise CalcRefused("missing_value", messages.refusal_message("missing_value", raw="0", meaning="합계가 0"))
         top = " + ".join(parts.ids)
