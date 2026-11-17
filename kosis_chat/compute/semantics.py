@@ -69,6 +69,15 @@ def _period_covers(whole: str, part: str) -> bool:
     return whole == part or (len(whole) == 4 and len(part) > 4 and part.startswith(whole))
 
 
+def check_share_periods(parts: list[_Read], total: _Read) -> None:
+    """R5 for a part and a whole from two tables (T1-30): only the periods can be checked (the categories are
+    another table's codes); the whole's period is the part's or the year that holds it."""
+    t = total.cell
+    wrong = [f"시점 {p.cell.period_raw}≠{t.period_raw}" for p in parts if not _period_covers(t.period_raw, p.cell.period_raw)]
+    if wrong:
+        raise CalcRefused("class_mismatch", messages.refusal_message("class_mismatch", what=", ".join(wrong)))
+
+
 def check_share_scope(table: TableInput, parts: list[_Read], total: _Read) -> None:
     """R5: the denominator holds the numerator: on every category where they differ, the total's code is an
     ancestor of the part's code (KOSIS codes nest by prefix) or the whole of that category; the total's period

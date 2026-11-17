@@ -176,13 +176,15 @@ def _with_context(table: TableInput, computed: Computed, refs: list[str]) -> Com
     return computed.model_copy(update={"result": StatResult(facts=facts)})
 
 
-def compute(table: TableInput, built: Built, lookup: EventLookup | None = None) -> Computed:
+def compute(table: TableInput, built: Built, lookup: EventLookup | None = None,
+            tables: dict[str, TableInput] | None = None) -> Computed:
     """Facts of the built plan; Computed also keeps what templates and charts read beside the facts.
 
-    lookup answers an event the calendar does not have (a plan the model wrote may name one)."""
+    lookup answers an event the calendar does not have (a plan the model wrote may name one). tables (T1-30): every
+    table of the question by tbl_id, table among them (a select without `table` reads table)."""
     from kosis_chat.compute.plan_engine import run_plan
 
-    run = run_plan(table, built.plan, lookup)
+    run = run_plan(table, built.plan, lookup, tables)
     by_id = {f.id: f for f in run.facts}
     extra: dict = {}
     if built.pattern == "value":

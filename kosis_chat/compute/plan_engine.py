@@ -14,7 +14,7 @@ import operator
 import re
 from dataclasses import dataclass, field
 
-from kosis_chat.compute import semantics
+from kosis_chat.compute import scale, semantics
 from kosis_chat.compute.resolve import EventLookup, resolve_select
 from kosis_chat.compute.engine import (
     PERCENT_DIGITS,
@@ -110,8 +110,11 @@ class PlanRun:
 
 
 class _Run:
-    def __init__(self, table: TableInput, lookup: EventLookup | None = None) -> None:
-        self.table = table
+    def __init__(self, table: TableInput, lookup: EventLookup | None = None,
+                 tables: dict[str, TableInput] | None = None) -> None:
+        self.table = table  # the first table: a select without `table` reads it
+        # T1-30: every table of the question by tbl_id; one table is the only entry (the behaviour before T1-30)
+        self.tables = dict(tables) if tables else {table.meta.tbl_id: table}
         self.lookup = lookup
         self.star: dict[str, str] = {}
         self.facts: list[Fact] = []
@@ -119,20 +122,51 @@ class _Run:
         self.results: dict[str, object] = {}
         self.cautions: list[str] = []
         self.raw: dict[str, float] = {}  # derived fact id -> its value before rounding
+        self.origin: dict[str, frozenset[str]] = {}  # step id -> the tbl_ids its numbers come from (T1-30)
 
     def add(self, fact: Fact) -> Fact:
         self.facts.append(fact)
         return fact
+
+    @property
+    def multi(self) -> bool:
+        return len(self.tables) > 1
+
+    def _of(self, ref: str) -> TableInput:
+        """The table a source_ref names (its first part is the tbl_id); the first table when no table has it."""
+        return self.tables.get(ref.split("|", 1)[0], self.table)
+
+    def _for(self, step: SelectStep) -> TableInput:
+        """The table a select reads: its `table`, else the first table. A table the question was not given is left to
+        resolve_select, which refuses it as before (out_of_scope)."""
+        return self.tables.get(step.table, self.table) if step.table else self.table
+
+    def origin_of(self, step) -> frozenset[str]:
+        """The tbl_ids a step's numbers come from (T1-30): a select's table, the union of its inputs' otherwise."""
+        if isinstance(step, SelectStep):
+            if step.cells:
+                return frozenset(ref.split("|", 1)[0] for ref in step.cells)
+            return frozenset({step.table if step.table and step.table not in self.tables else self._for(step).meta.tbl_id})
+        if isinstance(step, MapStep):
+            for body in step.body:
+                self.origin[body.id] = self.origin_of(body)
+            out = frozenset().union(*(self.origin.pop(b.id) for b in step.body))
+            return out
+        return frozenset().union(*(self.origin.get(i, frozenset()) for i in step.inputs()))
+
+    def _cross(self, *step_ids: str) -> bool:
+        """The steps' numbers come from different tables (T1-30); never true for one table."""
+        return self.multi and len({self.origin.get(i, frozenset()) for i in step_ids}) > 1
 
     # ------------------------------------------------------------ blocks
 
     def select(self, step: SelectStep) -> Cells:
         cells = step.cells
         if not cells:
-            resolved = resolve_select(self.table, step, self.lookup, self.star)
+            resolved = resolve_select(self._for(step), step, self.lookup, self.star)
             cells = resolved.cells
             self.cautions += [c for c in resolved.cautions if c not in self.cautions]
-        reads = [_read(self.table, ref) for ref in cells]
+        reads = [_read(self._of(ref), ref) for ref in cells]
         _check_units(reads)
         return Cells([self.add(_cell_fact(self.ids(), r)).id for r in reads], reads)
 
@@ -186,11 +220,12 @@ class _Run:
         if step.fn == "share":
             return self._share(step)
         a_src, b_src = self.results[step.a], self.results[step.b]
+        cross = self._cross(step.a, step.b)  # T1-30: two tables; their units are aligned below, not compared here
         for src in (a_src, b_src):
             if isinstance(src, Cells):
                 _check_units([*src.reads])
         reads = [s.reads[0] for s in (a_src, b_src) if isinstance(s, Cells)]
-        if len(reads) == 2:
+        if len(reads) == 2 and not cross:
             _check_units(reads)
         a, b = self._scalar(step.a), self._scalar(step.b)
         if a.id == b.id:  # first and last of a series with one number, or one cell against itself
@@ -198,6 +233,8 @@ class _Run:
             if symbol is not None:
                 _numeric(symbol)
             raise CalcRefused("missing_value", messages.refusal_message("missing_value", raw="-", meaning="비교할 값이 부족함"))
+        if cross:
+            a, b = self._aligned(step.fn, a, b)
         if (step.orient == "larger_first" and a.value < b.value) or (step.orient == "smaller_first" and a.value > b.value):
             a, b = b, a
         if step.fn in ("diff", "pp_diff", "pct_change", "cagr"):
@@ -235,6 +272,32 @@ class _Run:
         self.raw[fact.id] = value
         return fact
 
+    def _converted(self, x: Scalar, unit: str) -> Scalar:
+        """x in another unit of the same base (T1-30, '천명' -> '명'): a derived fact whose derivation names the factor."""
+        op, factor = scale.conversion(x.unit, unit)
+        zeros = len(str(factor)) - 1
+        if op == "*":
+            value, digits = x.value * factor, max(0, x.digits - zeros)
+        else:
+            value, digits = x.value / factor, x.digits + zeros
+        fact = self._make(f"{x.id} {op} {factor}", value, digits, unit, f"{x.unit}→{unit} 환산")
+        self.add(fact)
+        return Scalar(fact.id, fact.value, unit, digits, x.periods, exact=value)
+
+    def _aligned(self, fn: str, a: Scalar, b: Scalar) -> tuple[Scalar, Scalar]:
+        """Two numbers from different tables in one unit (T1-30, D5): a unit that differs only by a prefix is
+        converted to the finer one; other different units are refused, except for per, ratio and index, whose
+        result does not keep the inputs' unit (births per 1,000 people)."""
+        if not a.unit or not b.unit or a.unit == b.unit:
+            return a, b
+        target = scale.common_unit(a.unit, b.unit)
+        if target is None:
+            if fn in ("per", "ratio", "index"):
+                return a, b
+            raise CalcRefused("unit_mismatch", messages.refusal_message("unit_mismatch", what=f"{a.id}·{b.id}",
+                                                                        units=f"{a.unit} / {b.unit}"))
+        return (a if a.unit == target else self._converted(a, target)), (b if b.unit == target else self._converted(b, target))
+
     @staticmethod
     def _meaningless(fn: str, a: Scalar, b: Scalar, unit: str | None) -> bool:
         if fn == "ratio":
@@ -250,15 +313,30 @@ class _Run:
         parts, total = self.results[step.a], self.results[step.b]
         if not (isinstance(parts, Cells) and isinstance(total, Cells) and len(total.ids) == 1):
             raise CalcRefused("class_mismatch", messages.refusal_message("class_mismatch", what=step.id))
-        _check_units([*parts.reads, *total.reads])
-        semantics.check_share_parts(parts.reads)
-        semantics.check_share_scope(self.table, parts.reads, total.reads[0])
+        total_id = total.ids[0]
+        if self._cross(step.a, step.b):  # T1-30: the part and the whole are in two tables
+            _check_units(parts.reads)
+            semantics.check_share_parts(parts.reads)
+            semantics.check_share_periods(parts.reads, total.reads[0])
+            whole = _numeric(total.reads[0])
+            unit, total_unit = parts.reads[0].unit, total.reads[0].unit
+            if unit and total_unit and unit != total_unit:
+                if scale.conversion(total_unit, unit) is None:
+                    raise CalcRefused("unit_mismatch", messages.refusal_message(
+                        "unit_mismatch", what=f"{step.a}·{step.b}", units=f"{unit} / {total_unit}"))
+                r = total.reads[0]
+                converted = self._converted(Scalar(total_id, whole, total_unit, r.digits, (r.cell.period_raw,) * 2), unit)
+                total_id, whole = converted.id, converted.value
+        else:
+            _check_units([*parts.reads, *total.reads])
+            semantics.check_share_parts(parts.reads)
+            semantics.check_share_scope(self.table, parts.reads, total.reads[0])
+            whole = _numeric(total.reads[0])
         values = [_numeric(r) for r in parts.reads]
-        whole = _numeric(total.reads[0])
         if not whole:
             raise CalcRefused("missing_value", messages.refusal_message("missing_value", raw="0", meaning="합계가 0"))
         top = " + ".join(parts.ids)
-        expr = f"({top}) / {total.ids[0]} * 100" if len(parts.ids) > 1 else f"{top} / {total.ids[0]} * 100"
+        expr = f"({top}) / {total_id} * 100" if len(parts.ids) > 1 else f"{top} / {total_id} * 100"
         semantics.check_share_bound(sum(values) / whole * 100, "·".join(r.cell.item for r in parts.reads))
         fact = self.add(_derived(self.ids(), expr, sum(values) / whole * 100, PERCENT_DIGITS, "%", step.note))
         period = total.reads[0].cell.period_raw
@@ -273,13 +351,14 @@ class _Run:
             ids = _Ids()
             try:
                 if step.totals:
-                    part, whole = _read(self.table, ref), _read(self.table, step.totals[i])
-                    facts, share, score = _share_parts(self.table, [ref], step.totals[i], ids)
-                    semantics.check_share_scope(self.table, [part], whole)
+                    table = self._of(ref)
+                    part, whole = _read(table, ref), _read(table, step.totals[i])
+                    facts, share, score = _share_parts(table, [ref], step.totals[i], ids)
+                    semantics.check_share_scope(table, [part], whole)
                     semantics.check_share_bound(score, part.cell.item)
                     ranked.append((score, [*facts, share], share.id))
                 else:
-                    read = _read(self.table, ref)
+                    read = _read(self._of(ref), ref)
                     ranked.append((_numeric(read), [_cell_fact(ids(), read)], "f1"))
             except CalcRefused as exc:
                 if exc.reason != "missing_value":
@@ -331,7 +410,8 @@ class _Run:
 
     def map(self, step: MapStep) -> Mapped:
         """Run the body once per code, with the mapped axis's '*' set to that code; keep result per code."""
-        axis = semantics.index_of(self.table).axes.get(step.axis)
+        starred = next(b for b in step.body if isinstance(b, SelectStep) and step.axis in b.dims)
+        axis = semantics.index_of(self._for(starred)).axes.get(step.axis)
         if axis is None:
             raise CalcRefused("class_mismatch", messages.refusal_message("class_mismatch", what=f"분류 {step.axis}"))
         values: list[Scalar] = []
@@ -340,10 +420,12 @@ class _Run:
                 raise CalcRefused("class_mismatch", messages.refusal_message("class_mismatch", what=f"{step.axis} {code}"))
             self.star = {step.axis: code}
             for body in step.body:
+                self.origin[body.id] = self.origin_of(body)
                 self.results[body.id] = getattr(self, body.op)(body)
             values.append(self._scalar(step.result))
             for body in step.body:
                 del self.results[body.id]
+                self.origin.pop(body.id, None)
         self.star = {}
         return Mapped(step.axis, list(step.codes), [axis.labels[c] for c in step.codes], values)
 
@@ -359,10 +441,14 @@ class _Run:
         return Found({"first": hits[:1], "last": hits[-1:], "all": hits}[step.which])
 
 
-def run_plan(table: TableInput, plan: PlanV3, lookup: EventLookup | None = None) -> PlanRun:
-    """Facts of plan over table; lookup answers events missing from the calendar (resolve.py)."""
-    run = _Run(table, lookup)
+def run_plan(table: TableInput, plan: PlanV3, lookup: EventLookup | None = None,
+             tables: dict[str, TableInput] | None = None) -> PlanRun:
+    """Facts of plan over table; lookup answers events missing from the calendar (resolve.py).
+
+    tables (T1-30): every table of a question by tbl_id, table among them (the one a select without `table` reads)."""
+    run = _Run(table, lookup, tables)
     for step in plan.steps:
+        run.origin[step.id] = run.origin_of(step)
         run.results[step.id] = getattr(run, step.op)(step)
     out = PlanRun(run.facts, run.results, [], run.cautions)
     out.main = list(dict.fromkeys(i for s in plan.show for i in out.ids_of(s)))
