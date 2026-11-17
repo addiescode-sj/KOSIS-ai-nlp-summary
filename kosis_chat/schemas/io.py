@@ -72,13 +72,23 @@ class ParquetTable(BaseModel):
 
 
 class StatInput(BaseModel):
-    """One question about one loaded table (E1: a list of tables, of length 1 for now)."""
+    """One question about one loaded table, or about two or three tables read together (E1; T1-30, D2).
+
+    With several tables the first is the answer's `source` (StatAnswer.sources names them all) and each table must
+    be another tbl_id. A field was added, none changed: schema_version stays "1"."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     schema_version: Literal["1"] = "1"  # E2: a change that breaks a field raises the version
     question: str = Field(min_length=1)
-    tables: list[ParquetTable] = Field(min_length=1, max_length=1)
+    tables: list[ParquetTable] = Field(min_length=1, max_length=3)
+
+    @model_validator(mode="after")
+    def _distinct_tables(self) -> StatInput:
+        ids = [t.tbl_id() for t in self.tables]
+        if len(set(ids)) != len(ids):
+            raise ValueError(f"a table is given twice: {ids}")
+        return self
 
 
 class StatOptions(BaseModel):

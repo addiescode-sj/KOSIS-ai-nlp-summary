@@ -144,3 +144,60 @@ def test_multi_resources_hold_two_or_three_distinct_tables(tables):
         MultiResources((birth, birth))
     res = MultiResources((birth, load_resources(tables["FAKE_DEATH"])))
     assert res.labels == {"A": "FAKE_BIRTH", "B": "FAKE_DEATH"} and res.table is birth.table
+
+
+# ---------------------------------------------------------------- StatModule / summarize_stats_run (T1-30 S4)
+
+
+def _parquet(tables_dir, tbl_id):
+    import pyarrow.parquet as pq
+
+    from kosis_chat.schemas.io import ParquetTable
+
+    return ParquetTable(frame=pq.read_table(tables_dir / "values" / f"101_{tbl_id}.parquet"))
+
+
+def test_stat_module_answers_two_tables_and_reuses_their_preparation(tables, tmp_path, mock_llm):
+    from kosis_chat import api
+    from kosis_chat.schemas.io import StatInput
+
+    folder = tmp_path / "data"
+    birth, death = _parquet(folder, "FAKE_BIRTH"), _parquet(folder, "FAKE_DEATH")
+    from kosis_chat.schemas.io import StatOptions
+
+    module = api.StatModule(mock_llm, StatOptions(catalog_path=folder / "tables.csv"), client=scripted(NATURAL, NATURAL))
+    out = module.answer(StatInput(question="2024년 서울 출생아에서 사망자를 빼면?", tables=[birth, death]))
+    assert out.answer.outcome == "answered" and [s.tbl_id for s in out.answer.sources] == ["FAKE_BIRTH", "FAKE_DEATH"]
+    assert out.chart is not None and out.spans
+    one = module.pipeline(birth)
+    again = module.multi_pipeline([birth, death])
+    assert again.resources.tables[0] is one.resources  # the table was prepared once
+    assert module.multi_pipeline([birth, death]) is again
+    # one table: the one-table path, no sources
+    single = module.answer(StatInput(question="2024년 서울 출생아 수는?", tables=[birth]))
+    assert single.answer.sources == []
+
+
+def test_stat_input_takes_up_to_three_distinct_tables(tables, tmp_path):
+    from pydantic import ValidationError
+
+    from kosis_chat.schemas.io import StatInput
+
+    folder = tmp_path / "data"
+    birth, death, pop = (_parquet(folder, t) for t in ("FAKE_BIRTH", "FAKE_DEATH", "FAKE_POPK"))
+    assert len(StatInput(question="q", tables=[birth, death, pop]).tables) == 3
+    with pytest.raises(ValidationError, match="given twice"):
+        StatInput(question="q", tables=[birth, birth])
+    with pytest.raises(ValidationError):
+        StatInput(question="q", tables=[birth, death, pop, birth])
+
+
+def test_summarize_stats_run_reads_the_keys(tables, tmp_path, monkeypatch):
+    from kosis_chat import api
+
+    from kosis_ai import paths  # isort: skip
+
+    monkeypatch.setenv(paths.ENV_VAR, str(tmp_path))
+    out = api.summarize_stats_run("2024년 서울 출생아에서 사망자를 빼면?", ["101_FAKE_BIRTH", "101_FAKE_DEATH"],
+                                  client=scripted(NATURAL))
+    assert out.answer.outcome == "answered" and out.answer.sources[1].tbl_id == "FAKE_DEATH"

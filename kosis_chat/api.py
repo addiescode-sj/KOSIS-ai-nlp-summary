@@ -35,7 +35,7 @@ from kosis_chat.config import Settings
 from kosis_chat.llm.model import LLMClient
 from kosis_chat.graph.build import build_graph
 from kosis_chat.graph.legacy import stat_answer_of  # the fallback answer's B0 conversion, through the one legacy door
-from kosis_chat.pipeline import StatPipeline
+from kosis_chat.pipeline import MultiStatPipeline, StatPipeline
 from kosis_chat.prepare.node import _catalog_row, content_hash, table_input
 from kosis_chat.schemas.answer import Answer
 from kosis_chat.render.source import org_id_from_table_path
@@ -150,6 +150,26 @@ def summarize_stat_run(question: str, table_id: str, *, settings: Settings | Non
     return _output(question, bot.ask(question), bot.org_id, table_id)
 
 
+def summarize_stats_run(question: str, table_ids: list[str], *, client: LLMClient | None = None,
+                        retry_interval: float = 0.0, llm: LLMConfig | None = None,
+                        settings: Settings | None = None) -> StatOutput:
+    """summarize_stat_run over two or three tables.csv keys read together (T1-30); one key is summarize_stat_run.
+
+    Not cached (eval/multi_dev.py builds one pipeline per question); the first key is the answer's source."""
+    if len(table_ids) == 1:
+        return summarize_stat_run(question, table_ids[0], settings=settings, client=client,
+                                  retry_interval=retry_interval, llm=llm)
+    tables, org_ids = [], []
+    for table_id in table_ids:
+        path = table_path(table_id)
+        table = load_table(path)
+        tables.append(table)
+        org_ids.append(org_id_from_table_path(path, table.meta.tbl_id))
+    bot = MultiStatPipeline(tables, client=client, settings=settings, org_ids=org_ids, retry_interval=retry_interval,
+                            llm=llm)
+    return _output(question, bot.ask(question), org_ids[0], "+".join(table_ids))
+
+
 def _output(question: str, answer: Answer, org_id: str | None, label: str) -> StatOutput:
     """The StatOutput of one Answer; RuntimeError when the model call failed (summarize_stat's contract)."""
     stat = stat_answer_of(question, answer, org_id=org_id)
@@ -245,6 +265,28 @@ class StatModule:
         """One question about the input's table: the StatAnswer, its chart (ChartSpec or None) and spans.
 
         Errors as summarize_stat: a failed model call raises RuntimeError; a bad table raises SchemaError (ValueError)."""
+        if len(inp.tables) > 1:
+            bot = self.multi_pipeline(inp.tables)
+            label = "+".join(t.tbl_id() for t in inp.tables)
+            return _output(inp.question, bot.ask(inp.question), bot.resources.org_id, label)
         (table,) = inp.tables
         bot = self.pipeline(table)
         return _output(inp.question, bot.ask(inp.question), bot.org_id, table.tbl_id())
+
+    def multi_pipeline(self, tables: list[ParquetTable]) -> MultiStatPipeline:
+        """The pipeline of two or three tables (T1-30), kept by their content hashes in input order. Each table is
+        prepared once, as for one-table questions (self.pipeline), and its resources are shared with that pipeline.
+        options.node_overrides name the one-table graph's nodes and do not apply here."""
+        bots = [self.pipeline(t) for t in tables]
+        key = "multi:" + "+".join(self.prepared_key(t)[0] for t in tables)
+        with self._lock:
+            bot = self._pipelines.get(key)
+            if bot is None:
+                bot = MultiStatPipeline([b.resources for b in bots], client=self.client,
+                                        retry_interval=self.options.retry_interval, llm=self.llm)
+                self._pipelines[key] = bot
+                while len(self._pipelines) > self.cache_size:
+                    self._pipelines.popitem(last=False)
+            else:
+                self._pipelines.move_to_end(key)
+        return bot
