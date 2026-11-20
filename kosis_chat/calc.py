@@ -11,9 +11,11 @@ One table:
   -> the rules' plan (analyze.node.step_plan_rules)
   -> only when the rules leave something open and a model is given: the model fills it (analyze.node.step_plan_fill_llm)
   -> compute (compute.node.step_compute)
+  -> the facts the answer uses (compute.answer_facts.step_answer_facts)
 
 Two or three tables:
   the rules' plan over the tables (analyze.multi_rules.step_plan_multi_rules) -> compute(tables=)
+  -> the facts the answer uses (the same step)
 
 What it does not run: the judge's refusal and ask-back rules (judge.rules.RULES), the plan the model writes
 (plan_write_llm, plan_multi_llm), the fallback chatbot, the sentence (compose, verify, template, render), the chart.
@@ -21,7 +23,10 @@ The chart's values are in CalcResult.computed (Computed.series, Computed.ranking
 
 FIXED FILE. The improvement loop's evaluation calls calculate() and reads CalcResult; a later number tool will wrap
 the same function. Improve the steps it calls (the question parser, the rules' plan, the fill prompt, compute, the
-multi-table rules), not this file: its name, arguments, the order of the steps and CalcResult's fields stay.
+multi-table rules, the choice of the answer's facts), not this file: its name, arguments, the order of the steps and
+CalcResult's fields stay.
+
+CalcResult.answer is what the evaluation grades: the ids step_answer_facts chose among the computed facts.
 
 origin says how the plan was made, and the evaluation weighs an item by it:
   "rules"        the rules alone built the plan
@@ -66,8 +71,9 @@ MULTI_UNSUPPORTED = "multi_unsupported"  # a multi-table plan has a block comput
 class CalcResult(BoundaryModel):
     """What calculate() returns.
 
-    status "ok": computed holds the facts; computed.main are the fact ids the answer is (the facts of plan.show),
-    the rest of computed.result.facts is what they were computed from. status "no_plan": no plan could be made
+    status "ok": computed holds the facts and answer the ids of the ones the answer uses (step_answer_facts; an
+    evaluation grades these). computed.main is what the plan marked to cite (the facts of plan.show), which is
+    where answer starts from. status "no_plan": no plan could be made
     (reason: one of the codes above; detail: what was left open). status "refused": compute refused the plan
     (reason: the RefusalReason, detail: its message)."""
 
@@ -76,6 +82,7 @@ class CalcResult(BoundaryModel):
     status: Status
     origin: Origin | None = None  # how the plan was made; None when there is no plan
     computed: SkipValidation[Computed | None] = None
+    answer: SkipValidation[list[str]] = Field(default_factory=list)  # ids of the facts the answer uses, in order
     reason: str | None = None
     detail: SkipValidation[list[str]] = Field(default_factory=list)
     default_applied: SkipValidation[dict[str, str]] = Field(default_factory=dict)
@@ -99,7 +106,8 @@ class CalcResult(BoundaryModel):
         plan = self.plan
         return {
             "status": self.status, "origin": self.origin, "reason": self.reason, "detail": list(self.detail),
-            "main": self.main, "facts": [f.model_dump(exclude_none=True) for f in self.facts],
+            "answer": list(self.answer), "main": self.main,
+            "facts": [f.model_dump(exclude_none=True) for f in self.facts],
             "default_applied": dict(self.default_applied), "tables": list(self.tables),
             "type": plan.type if plan is not None else None,
             "pattern": self.computed.pattern if self.computed is not None else None,
@@ -112,6 +120,19 @@ def origin_of(rule: Plan, plan: Plan) -> Origin:
     """How a plan the model filled differs from the rules' plan: codes only, or what decides the formula too."""
     same = (plan.type, plan.over, plan.pick) == (rule.type, rule.over, rule.pick)
     return "model_codes" if same else "model_type"
+
+
+def _answer(question: str, computed: Computed, res: StatResources | MultiResources) -> list[str]:
+    """The ids step_answer_facts chose, each once and in its order. An id compute did not make is an error of the
+    step (ValueError), not an answer."""
+    from kosis_chat.compute.answer_facts import AnswerFactsIn, step_answer_facts  # the defender's file
+
+    chosen = list(dict.fromkeys(step_answer_facts(AnswerFactsIn(question=question, computed=computed), res).fact_ids))
+    made = {f.id for f in computed.result.facts}
+    unknown = [i for i in chosen if i not in made]
+    if unknown:
+        raise ValueError(f"step_answer_facts returned ids compute did not make: {unknown[:5]}")
+    return chosen
 
 
 def _access(llm: LLMConfig | None, client: LLMClient | None, retry_interval: float) -> ModelAccess | None:
@@ -162,7 +183,8 @@ def _one(question: str, res: StatResources, llm: ModelAccess | None) -> CalcResu
     if done.route == "refused":
         return CalcResult(status="refused", origin=origin, reason=done.refusal.reason, detail=[done.refusal.message],
                           rule=rule, plan=plan, **common)
-    return CalcResult(status="ok", origin=origin, computed=done.computed, rule=rule, plan=plan, **common)
+    return CalcResult(status="ok", origin=origin, computed=done.computed,
+                      answer=_answer(question, done.computed, res), rule=rule, plan=plan, **common)
 
 
 def _multi(question: str, res: MultiResources) -> CalcResult:
@@ -180,7 +202,7 @@ def _multi(question: str, res: MultiResources) -> CalcResult:
         return CalcResult(status="no_plan", reason=MULTI_AMBIGUOUS, detail=[exc.message], **common)
     except PlanUnsupported as exc:
         return CalcResult(status="no_plan", reason=MULTI_UNSUPPORTED, detail=[str(exc)], **common)
-    return CalcResult(status="ok", origin="rules", computed=computed, **common)
+    return CalcResult(status="ok", origin="rules", computed=computed, answer=_answer(question, computed, res), **common)
 
 
 def calculate(question: str, tables: Sequence[StatResources], *, llm: LLMConfig | None = None,
@@ -191,8 +213,9 @@ def calculate(question: str, tables: Sequence[StatResources], *, llm: LLMConfig 
     llm: the model's settings, given by the caller (never read from .env here); client: a ready client, which wins
     over llm; neither: the rules alone. retry_interval: seconds before a second model call for the question.
 
-    Raises RuntimeError when the fill's model call failed (timeout, API error) and LLMKeyMissing when the model is
-    needed and llm has no key. A question the path cannot answer is not an error: status "no_plan" or "refused"."""
+    Raises RuntimeError when the fill's model call failed (timeout, API error), LLMKeyMissing when the model is
+    needed and llm has no key, and ValueError when step_answer_facts names a fact compute did not make. A question
+    the path cannot answer is not an error: status "no_plan" or "refused"."""
     tables = list(tables)
     if len(tables) == 1:
         return _one(question, tables[0], _access(llm, client, retry_interval))
