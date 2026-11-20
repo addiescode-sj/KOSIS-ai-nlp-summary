@@ -14,6 +14,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from kosis_chat.prepare.schemas import Cell, TableInput
+from kosis_chat.prepare.store import ITEM_AXIS, axis_code
 
 try:
     from kosis_ai import units
@@ -24,8 +25,6 @@ except ImportError:  # same fallback as judge/question.py: src/ is not on the pa
     from kosis_ai import units
 
 from kosis_chat.shared.patterns import UNIT_PAREN  # noqa: E402  (after the block above: it imports kosis_ai)
-
-ITEM_AXIS = "항목"  # the item column, next to the category names
 
 _UNIT_PAREN = UNIT_PAREN  # old name (T1-28 S2b: one trailing '(...)' pattern, kosis_ai.units.UNIT_PAREN)
 _REGION_AXIS = re.compile(r"행정구역|시도|시군구|지역")
@@ -103,7 +102,7 @@ class TableIndex:
     measures: dict[tuple[str, str], set[tuple[str | None, str | None]]]
 
     def axis_of(self, cell: Cell, name: str) -> str:
-        return cell.item_code if name == ITEM_AXIS else cell.dim_codes.get(name, "")
+        return axis_code(cell, name)
 
     def year_ok(self, year: str) -> bool:
         return any(p.startswith(year) for p in self.periods)

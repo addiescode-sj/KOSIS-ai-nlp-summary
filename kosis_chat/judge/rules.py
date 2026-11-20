@@ -12,6 +12,7 @@ import re
 
 from kosis_chat.judge import texts as messages  # T1-28 S3a: was judge/messages.py
 from kosis_chat.prepare.schemas import Cell, TableInput
+from kosis_chat.prepare.store import RangeSummary, store_of
 from kosis_chat.judge.question import (
     ARITH_WORDS,
     AVG_WORDS,
@@ -104,6 +105,18 @@ def targets(index: TableIndex, parsed: Parsed, resolved: Resolved) -> list[Cell]
         if parsed.periods.contains(c.period_raw)
         and all(index.axis_of(c, name) in codes for name, codes in resolved.codes.items())
     ]
+
+
+def target_summary(index: TableIndex, parsed: Parsed, resolved: Resolved) -> RangeSummary:
+    """targets() summarized by the cell store, without listing the cells. index.periods holds every period of the
+    table, so asking for those the question contains picks the same cells as parsed.periods.contains per cell."""
+    periods = [p for p in index.periods if parsed.periods.contains(p)]
+    return store_of(index.table).summary(resolved.codes, periods)
+
+
+def _summary(cells: list[Cell] | RangeSummary) -> RangeSummary:
+    # The rules and defaults() take the target cells as a list (tests, callers before T1-31) or as their summary.
+    return cells if isinstance(cells, RangeSummary) else RangeSummary.of(cells)
 
 
 # ---------------------------------------------------------------- measures
@@ -292,23 +305,23 @@ def _not_aggregatable(p: Parsed, index: TableIndex, resolved: Resolved, **_) -> 
     return None
 
 
-def _no_cell(p: Parsed, index: TableIndex, resolved: Resolved, cells: list[Cell], **_) -> Verdict | None:
+def _no_cell(p: Parsed, index: TableIndex, resolved: Resolved, cells: list[Cell] | RangeSummary, **_) -> Verdict | None:
     """Labels and periods each exist but not together (세종 before 2012), or '전국' in a table without it."""
     if _COUNTRY_WORD in p.question and not any(m.form == _COUNTRY_WORD for m in p.matches):
         if any(axis.regional for axis in index.axes.values()):
             return refuse("no_cell", "class_mismatch", what="전국")
-    if p.periods.explicit and not cells:
+    if p.periods.explicit and not _summary(cells).count:
         return refuse("no_cell", "class_mismatch", what=_named_text(index, resolved, p.periods.singles))
     return None
 
 
-def _symbol(p: Parsed, index: TableIndex, resolved: Resolved, cells: list[Cell], **_) -> Verdict | None:
-    if not p.periods.explicit or not cells or any(c.value_kind == "ok" for c in cells):
+def _symbol(p: Parsed, index: TableIndex, resolved: Resolved, cells: list[Cell] | RangeSummary, **_) -> Verdict | None:
+    found = _summary(cells)
+    if not p.periods.explicit or not found.count or "ok" in found.kinds:
         return None
-    kinds = {c.value_kind for c in cells}
-    if kinds == {"blank"}:  # the cell exists but nothing was collected for that period
+    if found.kinds == {"blank"}:  # the cell exists but nothing was collected for that period
         return refuse("symbol", "class_mismatch", what=_named_text(index, resolved, p.periods.singles))
-    cell = next(c for c in cells if c.value_kind != "blank")
+    cell = found.sample
     meaning = normalize.VALUE_LABELS.get(cell.value_kind) or "수치 아님"
     return refuse("symbol", "missing_value", raw=cell.value_raw.strip(), meaning=meaning)
 
@@ -323,7 +336,7 @@ RULES = (
 # ---------------------------------------------------------------- defaults
 
 
-def defaults(p: Parsed, index: TableIndex, resolved: Resolved, cells: list[Cell]) -> dict[str, str]:
+def defaults(p: Parsed, index: TableIndex, resolved: Resolved, cells: list[Cell] | RangeSummary) -> dict[str, str]:
     """What the answer assumes when the question leaves it open: the period, and the scenario of a projection."""
     out: dict[str, str] = {}
     for name, axis in index.axes.items():
@@ -334,7 +347,7 @@ def defaults(p: Parsed, index: TableIndex, resolved: Resolved, cells: list[Cell]
             out[name] = base.split("(")[0].strip()
     if p.periods.explicit or p.periods.recent_n or _ASKS_PERIOD.search(p.question):
         return out
-    numeric = sorted({c.period_raw for c in cells if c.value_kind == "ok"})
+    numeric = list(_summary(cells).numeric_periods)
     if not numeric:
         return out
     if p.periods.previous:  # "작년 대비": the latest period is this year, the one before it is last year
@@ -359,7 +372,7 @@ def judge(question: str, table: TableInput, index: TableIndex | None = None) -> 
     index = index or build_index(table)
     parsed = parse(index, question)
     resolved = resolve(index, parsed)
-    cells = targets(index, parsed, resolved)
+    cells = target_summary(index, parsed, resolved)
     for rule in RULES:
         verdict = rule(parsed, index=index, resolved=resolved, cells=cells)
         if verdict is not None:

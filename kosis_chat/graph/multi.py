@@ -29,6 +29,7 @@ from kosis_chat.graph import adapters
 from kosis_chat.graph.adapters import StatContext, _ctx
 from kosis_chat.graph.spans import step_span
 from kosis_chat.judge.node import step_judge_multi
+from kosis_chat.prepare.store import MemoryStore
 from kosis_chat.render.node import step_answer_final, step_render
 from kosis_chat.render.schemas import AnswerFinalIn, RenderIn
 from kosis_chat.render.source import to_source
@@ -100,16 +101,15 @@ def compute_node(res: MultiResources) -> Callable:
     return compute
 
 
-class _Cells:
-    """Every table's cells as one `cells` sequence, for caveats_of (it looks up a fact's cell by source_ref)."""
-
-    def __init__(self, res: MultiResources) -> None:
-        self.cells = tuple(c for r in res.tables for c in r.table.cells)
+def _cells(res: MultiResources) -> MemoryStore:
+    """Every table's cells as one store, for caveats_of (it looks up a fact's cell by source_ref; on a ref two
+    tables share, the later table's cell wins). In memory: the multi-table path holds every table's cells today."""
+    return MemoryStore(c for r in res.tables for c in r.table.cells)
 
 
 def caveats_node(res: MultiResources) -> Callable:
     def caveats(state: StatState) -> dict:
-        found = caveats_of(state.computed, _Cells(res), [], [])
+        found = caveats_of(state.computed, _cells(res), [], [])
         shown = [c.text for c in found]
         return {"caveats_out": found, "shown": shown, "context_ids": []}
     return caveats

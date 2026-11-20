@@ -16,6 +16,7 @@ from kosis_chat.analyze.blocks import Built, Pattern
 from kosis_chat.analyze.roles import is_province, pick_of, reference_index
 from kosis_chat.judge.rules import resolve
 from kosis_chat.prepare.schemas import Cell, TableInput
+from kosis_chat.prepare.store import DimKey, store_of
 from kosis_chat.judge.question import (
     AVG_WORDS,
     CHANGE_WORDS,
@@ -311,28 +312,23 @@ def _total(index: TableIndex, name: str) -> str | None:
 
 
 class _Lookup:
+    """The table's cells by `fixed` (one code per axis, ITEM_AXIS included), read through the cell store."""
+
     def __init__(self, table: TableInput) -> None:
-        self.cells: dict[tuple, Cell] = {}
-        self.series: dict[tuple, list[Cell]] = {}
-        for c in table.cells:
-            key = (c.item_code, tuple(sorted(c.dim_codes.items())))
-            self.cells[(*key, c.period_raw)] = c
-            self.series.setdefault(key, []).append(c)
-        for cells in self.series.values():
-            cells.sort(key=lambda c: c.period_raw)
+        self.store = store_of(table)
 
     @staticmethod
-    def key(fixed: dict[str, str]) -> tuple:
+    def key(fixed: dict[str, str]) -> tuple[str, DimKey]:
         return fixed.get(ITEM_AXIS, ""), tuple(sorted((k, v) for k, v in fixed.items() if k != ITEM_AXIS))
 
     def cell(self, fixed: dict[str, str], period: str) -> Cell | None:
-        return self.cells.get((*self.key(fixed), period))
+        return self.store.cell((*self.key(fixed), period))
 
     def numeric_periods(self, fixed: dict[str, str]) -> list[str]:
-        return [c.period_raw for c in self.series.get(self.key(fixed), []) if c.value_kind == "ok"]
+        return [c.period_raw for c in self.store.series(*self.key(fixed)) if c.value_kind == "ok"]
 
     def all_periods(self, fixed: dict[str, str]) -> list[str]:
-        return [c.period_raw for c in self.series.get(self.key(fixed), [])]
+        return [c.period_raw for c in self.store.series(*self.key(fixed))]
 
 
 def _lookup(table: TableInput) -> _Lookup:

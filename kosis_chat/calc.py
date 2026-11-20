@@ -50,7 +50,7 @@ from kosis_chat.compute.node import step_compute
 from kosis_chat.compute.plan_engine import PlanUnsupported
 from kosis_chat.compute.resolve import NeedsClarify
 from kosis_chat.compute.schemas import Computed, ComputeIn
-from kosis_chat.judge.rules import defaults, parse, resolve, targets
+from kosis_chat.judge.rules import defaults, parse, resolve, target_summary
 from kosis_chat.llm.calls import ModelAccess
 from kosis_chat.llm.model import STATUS_API_ERROR, STATUS_TIMEOUT, LLMClient
 from kosis_chat.llm.providers import build_client
@@ -158,7 +158,7 @@ def _one(question: str, res: StatResources, llm: ModelAccess | None) -> CalcResu
     index = res.index
     parsed = parse(index, question)
     resolved = resolve(index, parsed)
-    applied = defaults(parsed, index, resolved, targets(index, parsed, resolved))
+    applied = defaults(parsed, index, resolved, target_summary(index, parsed, resolved))
     common: dict[str, Any] = {"default_applied": applied, "tables": [res.table.meta.tbl_id]}
 
     rules = step_plan_rules(PlanRulesIn(question=question, default_applied=applied), res)

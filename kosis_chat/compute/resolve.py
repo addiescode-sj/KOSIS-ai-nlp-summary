@@ -18,6 +18,7 @@ from kosis_chat.compute import texts
 from kosis_chat.compute.engine import CalcRefused
 from kosis_chat.compute.semantics import _whole_label, index_of
 from kosis_chat.data.schema import Cell, TableInput
+from kosis_chat.prepare.store import CellKey, MemoryStore, store_of
 from kosis_chat.shared import cautions as caution_strings
 from kosis_chat.shared.events import event_key as _key
 from kosis_chat.shared.events import load_events
@@ -181,11 +182,9 @@ def resolve_periods(spec: PeriodSpec, periods: list[str], period_type: str, look
 # ---------------------------------------------------------------- select
 
 
-def _cells_by_key(table: TableInput) -> dict[tuple, Cell]:
-    # One per TableInput (T1-28 S2: TableInput.caches, was a module dict keyed by id(table)).
-    return table.caches.get(
-        "compute.resolve.cells",
-        lambda: {(c.item_code, tuple(sorted(c.dim_codes.items())), c.period_raw): c for c in table.cells})
+def _cells_by_key(table: TableInput) -> dict[CellKey, Cell]:
+    # For in-memory tables only (tests): the whole key dict of the memory store, one per TableInput.
+    return MemoryStore.of(table).key_map
 
 
 def resolve_select(table: TableInput, step: SelectStep, lookup: EventLookup | None = None,
@@ -211,8 +210,10 @@ def resolve_select(table: TableInput, step: SelectStep, lookup: EventLookup | No
         cautions.append(caution_strings.DEFAULT_LATEST)
     periods = resolve_periods(spec, index.periods, table.meta.period_type, lookup, cautions)
     names = [n for n in index.axes if n != ITEM_AXIS]
-    by_key = _cells_by_key(table)
     combos = list(product(codes[ITEM_AXIS], *(codes[n] for n in names)))
+    # Every cell the select may read, in one request to the store (the periods below are a subset of these).
+    by_key = store_of(table).cells_at(
+        (combo[0], tuple(sorted(zip(names, combo[1:]))), p) for combo in combos for p in periods)
     if spec.kind == "recent":
         monthly = any(len(p) == 6 for p in periods)
         usable = [p for p in periods if (len(p) == 6) == monthly and all(

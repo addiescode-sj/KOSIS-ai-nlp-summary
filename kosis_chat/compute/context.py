@@ -12,6 +12,7 @@ from kosis_chat.compute.build import Built
 from kosis_chat.compute.schemas import Alternatives  # re-export: moved in T1-28 S1b
 from kosis_chat.data.schema import TableInput
 from kosis_chat.judge.question import SCENARIO_AXIS, TableIndex
+from kosis_chat.prepare.store import store_of
 
 MAX_ALTERNATIVES = 8
 
@@ -21,21 +22,19 @@ def scenario_alternatives(table: TableInput, index: TableIndex, built: Built, de
     if built.pattern != "value":
         return []
     ref = built.plan.steps[0].cells[0]
-    by_ref = {c.source_ref: c for c in table.cells}
-    cell = by_ref.get(ref)
+    store = store_of(table)
+    cell = store.by_ref(ref)
     if cell is None:
         return []
-    by_key = {(c.item_code, tuple(sorted(c.dim_codes.items())), c.period_raw): c for c in table.cells}
     out = []
     for name in defaulted:
         if not SCENARIO_AXIS.search(name) or name not in cell.dim_codes or name not in index.axes:
             continue
         chosen = cell.dim_codes[name]
-        refs = []
-        for code in index.axes[name].labels:
-            other = by_key.get((cell.item_code, tuple(sorted({**cell.dim_codes, name: code}.items())), cell.period_raw))
-            if code != chosen and other is not None:
-                refs.append(other.source_ref)
+        keys = [(cell.item_code, tuple(sorted({**cell.dim_codes, name: code}.items())), cell.period_raw)
+                for code in index.axes[name].labels if code != chosen]
+        found = store.cells_at(keys)
+        refs = [found[key].source_ref for key in keys if key in found]
         if refs:
             out.append(Alternatives(name, cell.dims.get(name, chosen), refs[:MAX_ALTERNATIVES]))
     return out
