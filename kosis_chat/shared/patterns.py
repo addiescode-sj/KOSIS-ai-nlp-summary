@@ -96,8 +96,22 @@ RATE_OF_CHANGE = re.compile(rf"증가율|감소율|증감률|증감율|변화율
 # verbs of a change with no direction (변했다, 변화, 달라졌다, 바뀌었다).
 CHANGE_ASKED = re.compile(CHANGE_WORDS.pattern + r"|증감(?![률율])|변했|변화(?!율)|달라졌|바뀌었|" + RATE_OF_CHANGE.pattern)
 
-# A range of periods asked period by period (연도별, 해마다, 매년, 월별, 매달, 분기별): the periods are not aggregated.
-EACH_PERIOD = re.compile(r"연도별|년도별|해마다|매년|매해|연도마다|년마다|월별|매월|매달|달마다|분기별|분기마다")
+# Years asked at a regular interval: "2년 간격으로", "5년마다", "3년 주기로", "5년 단위로", "격년으로" (loop 4).
+# Group 1 the number of years (none: 격년, every other year).
+EVERY_N_YEARS = re.compile(r"(?<!\d)(\d{1,2})\s*년\s*(?:간격|마다|주기|단위로|단위\s*로)|격년")
+# A range of periods asked period by period (연도별, 해마다, 매년, 월별, 매달, 분기별, and every n years): the periods
+# are not aggregated.
+EACH_PERIOD = re.compile(r"연도별|년도별|해마다|매년|매해|연도마다|년마다|월별|매월|매달|달마다|분기별|분기마다|"
+                         + EVERY_N_YEARS.pattern)
+
+
+def years_step(question: str) -> int | None:
+    """The interval of years a question asks the periods at ("5년마다" -> 5, "격년" -> 2), None for none or 1."""
+    m = EVERY_N_YEARS.search(question)
+    if m is None:
+        return None
+    n = int(m.group(1)) if m.group(1) else 2
+    return n if n >= 2 else None
 
 # A share of one number in another: 비중, 차지, 구성비, 몇 퍼센트 (not 몇 퍼센트 + a change verb, a rate of change).
 MULTI_SHARE = re.compile(rf"비중|차지|구성비|몇(?:퍼센트|%|프로)(?!(?:씩)?(?:나|가|정도)?{CHANGE_VERB})")
@@ -112,6 +126,9 @@ MULTI_WHOLE_AFTER = re.compile(r"^(?:은|는|이|가)?(?:중|가운데|대비|�
 # 작년 (last year), 크기 (size). One list for one table (ASKS_DIFF) and several (MULTI_DIFF).
 _COMPARATIVE = r"많|적(?!어\s*(?:줘|주|봐|달|둬))|높|낮|크(?!기)|작(?!년)|넘|모자|덜"
 ASKS_GAP = re.compile(r"차이|격차|빼|뺀")  # a difference asked by name, beside a ratio
+# The rest of a whole but one part (loop 4), on the question as written: "서울을 제외한", "서울 빼고", "서울 말고",
+# "나머지", "서울 외 지역", "서울 이외의", "그 밖의". 외 only as a word of its own (not 외국, 해외).
+EXCLUDE = re.compile(r"제외|빼고|빼면|뺀|말고|나머지|그\s*밖|(?<![가-힣])(?:이)?외(?:의|에|에는)?(?![가-힣])")
 MULTI_DIFF = re.compile(rf"{ASKS_GAP.pattern}|{_COMPARATIVE}")
 ASKS_DIFF = re.compile(rf"비교|보다|대비|{MULTI_DIFF.pattern}")
 MULTI_FEWER = re.compile(r"적(?!어\s*(?:줘|주|봐|달|둬))|낮|작(?!년)|모자|덜")

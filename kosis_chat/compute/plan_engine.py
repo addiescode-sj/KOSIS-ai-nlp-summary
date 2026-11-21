@@ -311,7 +311,7 @@ class _Run:
             a, b = self._aligned(step.fn, a, b)
         if (step.orient == "larger_first" and a.value < b.value) or (step.orient == "smaller_first" and a.value > b.value):
             a, b = b, a
-        if step.fn in ("diff", "pp_diff", "pct_change", "cagr", "sum"):
+        if step.fn in ("diff", "pp_diff", "pct_change", "cagr", "sum", "avg_change"):
             semantics.check_same_unit(step.fn, a.unit, b.unit, f"{a.id}·{b.id}")
         unit = b.unit if b.unit is not None else a.unit
         if step.optional and self._meaningless(step.fn, a, b, unit):
@@ -321,6 +321,9 @@ class _Run:
             fact = self._make(f"{a.id} + {b.id}", a.value + b.value, max(a.digits, b.digits), unit, step.note)
         elif fn == "diff":
             fact = self._make(f"{a.id} - {b.id}", a.value - b.value, max(a.digits, b.digits), _diff_unit(unit), step.note)
+        elif fn == "avg_change":  # loop 4: the average change per period, read to two decimals as an average is
+            fact = self._make(f"({a.id} - {b.id}) / {step.years}", (a.value - b.value) / step.years,
+                              max(2, a.digits, b.digits), _diff_unit(unit), step.note)
         elif fn == "pp_diff":
             fact = self._make(f"{a.id} - {b.id}", a.value - b.value, PERCENT_DIGITS, "%p", step.note)
         else:

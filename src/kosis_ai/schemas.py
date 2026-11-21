@@ -221,8 +221,8 @@ AggFn = Literal["sum", "avg", "min", "max", "first", "last"]
 # diff: a - b · ratio: a / b · pct_change: (a / b - 1) * 100 · pp_diff: a - b of two percentages, in %p ·
 # share: a (summed when several cells) / b * 100 · per: a / b * scale ("per 1,000 people") ·
 # cagr: ((a / b) ** (1 / years) - 1) * 100 · index: a / b * 100 (b as 100) · sum: a + b (two values of one unit, e.g.
-# from two tables)
-CombineFn = Literal["diff", "ratio", "pct_change", "pp_diff", "share", "per", "cagr", "index", "sum"]
+# from two tables) · avg_change: (a - b) / years, the average change per period between b and a (loop 4)
+CombineFn = Literal["diff", "ratio", "pct_change", "pp_diff", "share", "per", "cagr", "index", "sum", "avg_change"]
 Compare = Literal[">", ">=", "<", "<=", "=="]
 PeriodKind = Literal["list", "range", "recent", "anchor", "span"]
 SpanPart = Literal["year", "H1", "H2", "Q1", "Q2", "Q3", "Q4"]
@@ -330,15 +330,15 @@ class CombineStep(_Step):
     orient: Literal["fixed", "larger_first", "smaller_first"] = "fixed"
     optional: bool = False  # skip (no fact) when the value would mean nothing: a growth rate of a %, a zero base
     scale: float | None = Field(default=None, gt=0)  # per: e.g. 1000
-    years: int | None = Field(default=None, ge=1)  # cagr: periods between b and a
+    years: int | None = Field(default=None, ge=1)  # cagr, avg_change: periods between b and a
     note: str | None = None
 
     @model_validator(mode="after")
     def _fn_fields(self) -> CombineStep:
         if (self.fn == "per") != (self.scale is not None):
             raise ValueError(f"combine {self.id}: scale goes with per, and per needs it")
-        if (self.fn == "cagr") != (self.years is not None):
-            raise ValueError(f"combine {self.id}: years goes with cagr, and cagr needs it")
+        if (self.fn in ("cagr", "avg_change")) != (self.years is not None):
+            raise ValueError(f"combine {self.id}: years goes with cagr and avg_change, and they need it")
         if self.a == self.b:
             raise ValueError(f"combine {self.id}: a and b are the same step")
         return self

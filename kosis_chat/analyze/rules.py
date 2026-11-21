@@ -42,10 +42,12 @@ from kosis_chat.shared import defaults as default_strings  # isort: skip
 from kosis_chat.shared.patterns import CHANGE_ASKED, PER_UNIT, RATE_OF_CHANGE, RECENT_N, REGION_SUFFIX, asked_comparison, per_scale  # isort: skip
 from kosis_chat.shared.patterns import MOST_RECENT  # isort: skip  # "가장 최근 ~" names a period, not a ranking
 from kosis_chat.shared.patterns import ASKS_GAP, ASKS_PERIOD, ASKS_RATIO, CHANGE_DOWN, EXTREME_MAX, RANK_WORDS, rank_places  # isort: skip
+from kosis_chat.shared.patterns import EACH_PERIOD, EXCLUDE, years_step  # isort: skip  # loop 4
 
 PERIOD_AXIS = "시점"  # Plan.over when an extreme question ranks periods ("가장 낮았던 해")
 RECENT_POINTS = 5
-EXTREME_WORDS = re.compile(r"가장|제일|최고|최저|최대|최소|1위|꼴찌")
+# loop 4: also the nouns 최댓값 / 최솟값 (최댓, 최솟), as the judge's RANKING reads them
+EXTREME_WORDS = re.compile(r"가장|제일|최고|최저|최대|최소|최댓|최솟|1위|꼴찌")
 SHARE_WORDS = re.compile(r"비중|차지|구성비")
 # "서울이 전국의 몇 퍼센트": a share when a label the question names comes right before 의 (not "몇 퍼센트 늘었어",
 # not "평균의 몇 %", where 평균 is no label).
@@ -102,9 +104,13 @@ def _percent_only(question: str, index: TableIndex, codes: dict[str, list[str]])
             codes[name] = percent
 
 
-def _question_type(question: str, periods: Periods, codes: dict[str, list[str]], matches: list[Match]) -> QuestionType:
-    if EXTREME_WORDS.search(MOST_RECENT.sub(" ", question)) or RANK_WORDS.search(question):
-        return "extreme"  # loop 3: a place other than the first ("세 번째로 많은", "2위", "상위 3개") ranks too
+def _question_type(question: str, periods: Periods, codes: dict[str, list[str]], matches: list[Match],
+                   rest: str | None = None) -> QuestionType:
+    # loop 3: a place other than the first ("세 번째로 많은", "2위", "상위 3개") ranks too. Loop 4: the ranking words are
+    # read on the question without the labels it names (rest), so an ordinal in a label ('첫째아', '1순위') ranks nothing.
+    ranking = question if rest is None else rest
+    if EXTREME_WORDS.search(MOST_RECENT.sub(" ", ranking)) or RANK_WORDS.search(ranking):
+        return "extreme"
     if _asks_share(question, matches):
         return "share"
     if periods.ranges or len(periods.singles) >= 2 or (periods.recent and TREND_WORDS.search(question)):
@@ -220,11 +226,19 @@ def _single_periods(index: TableIndex, single: str, months: bool = False) -> lis
     return [x for x in index.periods if x == single or (len(single) == 4 and x[:4] == single)]
 
 
-def _periods(p: Periods, index: TableIndex, default: dict[str, str], months: bool = False) -> tuple[list[str], list[str]]:
+def _every(periods: list[str], start: str, step: int | None) -> list[str]:
+    """The periods of a range at an interval of years from its first year (loop 4: "2010~2020년 5년마다")."""
+    if not step or len(start) != 4:
+        return periods
+    return [x for x in periods if (int(x[:4]) - int(start)) % step == 0]
+
+
+def _periods(p: Periods, index: TableIndex, default: dict[str, str], months: bool = False,
+             step: int | None = None) -> tuple[list[str], list[str]]:
     """(table periods asked, asked years the table lacks)."""
     years = sorted({x[:4] for x in index.periods})
     if p.ranges:
-        found = [x for a, b in p.ranges for x in _range_periods(index, a, b, months)]
+        found = [x for a, b in p.ranges for x in _every(_range_periods(index, a, b, months), a, step)]
         if p.singles:  # "2025년 ... 2020~2024년 평균보다": the single period belongs to the question too
             found += [x for s in p.singles for x in _single_periods(index, s, months)]
         # Only the asked ends: a census table has no 2016~2019 by design, which is not worth a note.
@@ -260,13 +274,19 @@ def _operation(question: str, rest: str, p: Periods, index: TableIndex, kind: Qu
     rest is the question with matched labels removed, so "평균" in a label ('평균 가구원수') does not count."""
     groups = _period_groups(p, index, kind, months)
     average = bool(AVG_WORDS.search(rest))
-    total = bool(SUM_WORDS.search(rest) or (TOTAL_WORDS.search(rest) and p.ranges))
+    # "모두" / "전부" sums a range, but not a range asked period by period ("연도별로 모두 알려줘", loop 4)
+    total = bool(SUM_WORDS.search(rest) or (TOTAL_WORDS.search(rest) and p.ranges and not EACH_PERIOD.search(rest)))
     if kind == "share":
         if _part_of_year([x for g in groups for x in g]):  # "2025년 중 12월 비중": one share, not two compared
             return None, []
         return ("shr", groups) if len(groups) == 2 and not average and not total else (None, [])
     if average and kind != "extreme" and _GROWTH_RATE.search(rest):
         return "cagr", []  # loop 3: the average is of the rate ("연평균 증가율", "해마다 평균 몇 퍼센트씩"), not of the values
+    # loop 4: the same for an amount ("한 해 평균 몇 명씩 줄었어", "연평균 얼마나 늘었어"): the average is of the change
+    # between the two ends (one range, two years, or the last n years), not of the values
+    ends = (len(groups) == 1 and not p.singles) or (not p.ranges and len(p.singles) == 2) or (not groups and p.recent_n)
+    if average and kind != "extreme" and CHANGE_ASKED.search(rest) and ends:
+        return "apc", []
     if average and groups:
         if len(groups) >= 2:
             return "pavg", groups[:2]
@@ -291,6 +311,31 @@ def _operation(question: str, rest: str, p: Periods, index: TableIndex, kind: Qu
     return None, []
 
 
+def _excluded(question: str, index: TableIndex, codes: dict[str, list[str]], periods: list[str]) -> tuple[str, str, str] | None:
+    """(axis, the category's total, the part left out) when the question asks for the rest of a category but one
+    (loop 4, shared EXCLUDE): one code named of a category that has a total, before the word that leaves it out (and
+    after the total when the total is named too: "전국에서 서울을 제외한", "서울 말고 나머지 지역"; not "전국 말고 서울"),
+    one code of every other category, one period."""
+    m = EXCLUDE.search(question)
+    if m is None or len(periods) > 1:
+        return None
+    at = len(squash(question[: m.start()]))
+    found = None
+    for name, named in codes.items():
+        total = _total(index, name)
+        parts = [c for c in named if c != total]
+        if not parts or total is None:
+            continue
+        if len(parts) != 1 or len(named) > 2 or found is not None:
+            return None
+        part = parts[0]
+        where = _position(question, index, name, part)
+        if where >= at or (total in named and _position(question, index, name, total) > where):
+            return None
+        found = (name, total, part)
+    return found
+
+
 def rule_plan(question: str, index: TableIndex, default_applied: dict[str, str] | None = None) -> Plan:
     parsed = parse(index, question)
     resolved = resolve(index, parsed)
@@ -301,14 +346,18 @@ def rule_plan(question: str, index: TableIndex, default_applied: dict[str, str] 
     _drop_children(index, codes)
     _percent_only(question, index, codes)
     default = dict(default_applied or {})
-    kind = _question_type(question, parsed.periods, codes, parsed.matches)
+    kind = _question_type(question, parsed.periods, codes, parsed.matches, parsed.rest)
     p = parsed.periods
     # "2024년 혼인 추이" on a monthly table: the months of the one year asked
     months = bool(BY_MONTH.search(question)) or (kind == "trend" and len(p.singles) == 1 and not p.ranges)
-    periods, missing = _periods(p, index, default, months)
+    periods, missing = _periods(p, index, default, months, years_step(question))
     plan = Plan(question, kind, codes, periods, missing_years=missing, default_applied=default,
                 events=list(parsed.periods.events))
     plan.pattern, plan.groups = _operation(question, parsed.rest, parsed.periods, index, kind, months)
+    if (kind in ("value", "compare") and (plan.pattern is None or (plan.pattern == "sum" and not plan.groups))
+            and _excluded(question, index, codes, periods)):
+        plan.pattern, plan.groups, plan.type = "excl", [], "compare"  # loop 4: the total minus the part left out
+        return plan
     if plan.pattern == "sum" and parsed.periods.spans and not parsed.periods.singles:
         plan.type = "value"  # "2024년 상반기 혼인 건수": one number for one named period
     elif plan.pattern and plan.pattern != "shr" and kind not in ("value", "trend"):
@@ -321,6 +370,8 @@ def rule_plan(question: str, index: TableIndex, default_applied: dict[str, str] 
     if kind == "extreme":
         plan.pick = pick_of(question)
         plan.over = PERIOD_AXIS if ASKS_PERIOD.search(question) else _ranked_axis(index, codes)
+        if plan.over is None and len(plan.periods) >= 2:  # loop 4: nothing open but the asked periods: they are ranked
+            plan.over = PERIOD_AXIS
         if plan.over is None:
             plan.unresolved.append("over")
     return plan
@@ -336,7 +387,12 @@ def _values_only(parsed: Parsed, kind: QuestionType, codes: dict[str, list[str]]
     if kind == "compare":
         if sum(len(v) >= 2 for v in codes.values()) < 2:
             return False  # one pair: the compare plan lists it when no formula is asked (blocks.compare)
-    elif p.ranges or len(p.singles) < 2 or p.recent or p.recent_n or p.previous or p.before or p.events:
+    elif p.recent or p.recent_n or p.previous or p.before or p.events:
+        return False
+    elif p.ranges:  # loop 4: a range asked period by period (shared EACH_PERIOD, as the multi-table rules read it)
+        if not EACH_PERIOD.search(rest):
+            return False
+    elif len(p.singles) < 2:
         return False
     diff, ratio = asked_comparison(rest)
     asks = (diff or ratio or TREND_WORDS.search(rest) or CHANGE_ASKED.search(rest) or ARITH_WORDS.search(rest)
@@ -510,8 +566,10 @@ def build_plan(plan: Plan, index: TableIndex, table: TableInput) -> Built:
         return _two_by_two_plan(plan, index, lookup, note)
     if plan.pattern == "sum" and not plan.groups:
         return _targets_sum(plan, index, lookup, note)
-    if plan.pattern == "cagr":
-        return _cagr_plan(plan, index, lookup, note)
+    if plan.pattern in ("cagr", "apc"):
+        return _cagr_plan(plan, index, lookup, note, amount=plan.pattern == "apc")
+    if plan.pattern == "excl":
+        return _excluded_plan(plan, index, lookup, note)
     if plan.pattern:
         return _period_plan(plan, index, lookup, note)
     if kind == "value" and (len(plan.periods) >= 2 or any(len(v) >= 2 for v in plan.codes.values())):
@@ -644,12 +702,16 @@ def _extreme_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | No
     if plan.over is None or (plan.over != PERIOD_AXIS and plan.over not in index.axes):
         raise Unresolved(["over"])  # the model fill can leave it open too
     rest = parse(index, plan.question).rest
-    places = rank_places(plan.question)
+    places = rank_places(rest)  # loop 4: not the ordinal of a label the question names
     changed = bool(CHANGE_ASKED.search(rest) or _GROWTH_WORDS.search(rest))
     if changed and plan.over != PERIOD_AXIS and not SHARE_WORDS.search(rest) and (ends := _two_ends(plan)):
         return _change_rank_plan(plan, index, lookup, ends, rest, places, note)
-    if not changed and EXTREME_MAX.search(rest) and pick_of(rest) == "min" and (ASKS_GAP.search(rest) or ASKS_RATIO.search(rest)):
-        return _extremes_plan(plan, index, lookup, rest, note)
+    # both ends of a ranking: with their difference or ratio (loop 3), or (loop 4) named each with its own ranking word
+    # ("가장 많은 곳과 가장 적은 곳", "최댓값과 최솟값") for their values alone
+    both_ends = not changed and places is None and EXTREME_MAX.search(rest) and pick_of(rest) == "min"
+    formula = bool(ASKS_GAP.search(rest) or ASKS_RATIO.search(rest))
+    if both_ends and (formula or len(EXTREME_WORDS.findall(MOST_RECENT.sub(" ", rest))) >= 2):
+        return _extremes_plan(plan, index, lookup, rest, note, formula)
     share = bool(SHARE_WORDS.search(plan.question))
     problems: list[str] = []
     item_total = _total(index, ITEM_AXIS) if share else None
@@ -717,7 +779,8 @@ def _change_rank_plan(plan: Plan, index: TableIndex, lookup: _Lookup, ends: tupl
     return build.ranked_change(name, codes, fixed, ITEM_AXIS, ends, rate, pick, places, note)
 
 
-def _extremes_plan(plan: Plan, index: TableIndex, lookup: _Lookup, rest: str, note: str | None) -> Built:
+def _extremes_plan(plan: Plan, index: TableIndex, lookup: _Lookup, rest: str, note: str | None,
+                   formula: bool = True) -> Built:
     """Loop 3: the largest and the smallest of the candidates (periods of one series, or the codes of a category at
     one period) and their difference, or their ratio when one is asked."""
     problems: list[str] = []
@@ -741,6 +804,8 @@ def _extremes_plan(plan: Plan, index: TableIndex, lookup: _Lookup, rest: str, no
     cells = [c.source_ref for c in lookup.cells(wanted) if c is not None and c.value_kind == "ok"]
     if len(cells) < 2:
         raise Unresolved(["비교 대상 부족"])
+    if not formula:
+        return build.extremes_combined(cells, None, note)
     _, ratio = asked_comparison(rest)
     return build.extremes_combined(cells, "ratio" if ratio and not ASKS_GAP.search(rest) else "diff", note)
 
@@ -766,7 +831,7 @@ def _two_by_two_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str |
                         decline=bool(_DECLINE.search(plan.question)), note=note)
 
 
-def _cagr_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | None) -> Built:
+def _cagr_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | None, amount: bool = False) -> Built:
     """Loop 3: the average yearly rate of change from the first to the last asked year (or the last n years of
     "최근 n년"), from those two cells only."""
     problems: list[str] = []
@@ -782,7 +847,25 @@ def _cagr_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | None)
     refs = _refs(lookup, [(fixed, early), (fixed, late)], problems)
     if problems:
         raise Unresolved(problems)
-    return build.average_growth(refs[0], refs[1], int(late) - int(early), note)
+    return build.average_growth(refs[0], refs[1], int(late) - int(early), note, amount=amount)
+
+
+def _excluded_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | None) -> Built:
+    """Loop 4: the category's total minus the code the question leaves out, at one period."""
+    found = _excluded(plan.question, index, plan.codes, plan.periods)
+    if found is None:
+        raise Unresolved(["제외할 대상"])
+    name, total, part = found
+    problems: list[str] = []
+    fixed = _fixed(plan.model_copy(update={"codes": {k: v for k, v in plan.codes.items() if k != name}}), index, {name}, problems)
+    if problems:
+        raise Unresolved(problems)
+    sets = [_with(fixed, name, total), _with(fixed, name, part)]
+    period = _one_period(plan, lookup, sets)
+    whole, piece = _refs(lookup, [(f, period or "") for f in sets], problems)
+    if problems:
+        raise Unresolved(problems)
+    return build.remainder(whole, piece, note)
 
 
 def _targets_sum(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | None) -> Built:

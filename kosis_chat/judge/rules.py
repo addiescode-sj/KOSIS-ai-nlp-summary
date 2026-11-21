@@ -369,7 +369,8 @@ def defaults(p: Parsed, index: TableIndex, resolved: Resolved, cells: Targets) -
             out[name] = base.split("(")[0].strip()
     # loop 3: also a ranking of periods asked with a period word and any particle ("가장 많았던 해와 가장 적었던 해의
     # 차이"), as the rules read it (shared/patterns.py ASKS_PERIOD)
-    ranked_period = bool(RANKING.search(MOST_RECENT.sub(" ", p.question)) and ASKS_PERIOD.search(p.question))
+    # loop 4: the ranking word read on the question without its labels (p.rest), as the rules read it
+    ranked_period = bool(RANKING.search(MOST_RECENT.sub(" ", p.rest)) and ASKS_PERIOD.search(p.question))
     if p.periods.explicit or p.periods.recent_n or _ASKS_PERIOD.search(p.question) or ranked_period:
         return out
     numeric = list(_summary(cells).numeric_periods)

@@ -76,6 +76,13 @@ def compare(cells: list[str], reference: int | None = None, note: str | None = N
     return Built(_plan(steps, ["x", "y", "d", "r"], "compare", note), "compare", reference=reference)
 
 
+def remainder(whole: str, part: str, note: str | None = None) -> Built:
+    """The whole minus one of its parts (loop 4: "전국에서 서울을 제외한 나머지"): the two cells and the difference."""
+    steps = [SelectStep(id="x", cells=[whole]), SelectStep(id="y", cells=[part]),
+             CombineStep(id="d", a="x", b="y", fn="diff", orient="fixed", note="전체에서 뺀 나머지")]
+    return Built(_plan(steps, ["x", "y", "d"], "compare", note), "plan")
+
+
 def share(parts: list[str], total: str, note: str | None = None) -> Built:
     if not parts:
         raise ValueError("share needs one or more part cells")
@@ -118,21 +125,25 @@ def ranked_change(axis: str, codes: list[str], fixed: dict[str, str], item_axis:
     return Built(_plan(steps, ["k"], "extreme", note), "plan")
 
 
-def average_growth(early: str, late: str, years: int, note: str | None = None) -> Built:
-    """The average yearly rate of change from one cell to a later one (loop 3: "연평균 증가율")."""
+def average_growth(early: str, late: str, years: int, note: str | None = None, amount: bool = False) -> Built:
+    """The average yearly rate of change from one cell to a later one (loop 3: "연평균 증가율"); amount (loop 4: "한 해
+    평균 몇 명씩 늘었어"): the average yearly change, (late - early) / years."""
+    fn, word = ("avg_change", "연평균 증감") if amount else ("cagr", "연평균 증감률")
     steps = [SelectStep(id="a", cells=[early]), SelectStep(id="b", cells=[late]),
-             CombineStep(id="g", a="b", b="a", fn="cagr", years=years, note=f"{years}년간 연평균 증감률")]
+             CombineStep(id="g", a="b", b="a", fn=fn, years=years, note=f"{years}년간 {word}")]
     return Built(_plan(steps, ["a", "b", "g"], "trend", note), "plan")
 
 
-def extremes_combined(cells: list[str], fn: Literal["diff", "ratio"], note: str | None = None) -> Built:
+def extremes_combined(cells: list[str], fn: Literal["diff", "ratio"] | None, note: str | None = None) -> Built:
     """The largest and the smallest of the candidates, and their difference or ratio (loop 3: "가장 많은 해와 가장
-    적은 해의 차이")."""
+    적은 해의 차이"); fn None (loop 4: "가장 많은 곳과 가장 적은 곳은?"): the two values alone."""
     if len(cells) < 2:
         raise ValueError(f"extremes need 2+ cells, got {len(cells)}")
     steps = [SelectStep(id="s", cells=cells), AggregateStep(id="hi", of="s", fn="max"),
-             AggregateStep(id="lo", of="s", fn="min"),
-             CombineStep(id="d", a="hi", b="lo", fn=fn, note="최댓값과 최솟값의 " + ("차이" if fn == "diff" else "배율"))]
+             AggregateStep(id="lo", of="s", fn="min")]
+    if fn is None:
+        return Built(_plan(steps, ["hi", "lo"], "value", note), "plan")
+    steps.append(CombineStep(id="d", a="hi", b="lo", fn=fn, note="최댓값과 최솟값의 " + ("차이" if fn == "diff" else "배율")))
     return Built(_plan(steps, ["hi", "lo", "d"], "compare", note), "plan")
 
 
