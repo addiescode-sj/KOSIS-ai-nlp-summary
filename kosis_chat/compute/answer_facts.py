@@ -28,6 +28,7 @@ from kosis_chat.judge.question import parse
 from kosis_chat.compute.schemas import Computed
 from kosis_chat.schemas.resources import MultiResources, StatResources
 from kosis_chat.shared.boundary import BoundaryModel
+from kosis_chat.shared.patterns import ASKS_DIFF, ASKS_GAP, ASKS_RATIO, asked_comparison
 
 
 class AnswerFactsIn(BoundaryModel):
@@ -57,22 +58,19 @@ def step_answer_facts(inp: AnswerFactsIn, res: StatResources | MultiResources) -
 
 
 # Loop 1. A compare plan computes both the difference and the ratio of its two cells; the answer keeps the one the
-# question asks for. Read on the question without the labels it names (a label '국적' holds 적).
-_ASKS_RATIO = re.compile(r"몇배|배수|비율|나누|나눈|나눠|배(?:나|정도|가량|야|인|이|로)")
-_ASKS_DIFF = re.compile(r"비교|차이|격차|보다|대비|빼|뺀|많|적|높|낮|크|작|넘|모자|덜")
-_ASKS_GAP = re.compile(r"차이|격차|빼|뺀")  # a difference asked by name, beside a ratio
+# question asks for. Read on the question without the labels it names (a label '국적' holds 적). Loop 2: the words
+# are the shared ones (shared/patterns.py asked_comparison), which the rules' compare plan reads too.
+_ASKS_RATIO = ASKS_RATIO
+_ASKS_DIFF = ASKS_DIFF
+_ASKS_GAP = ASKS_GAP
 _DIFF = re.compile(r"^f\d+ - f\d+$")
 _RATIO = re.compile(r"^f\d+ / f\d+$")
 
 
 def _compared(question: str, computed: Computed, main: list[str], res: StatResources) -> list[str]:
-    """The two cells and, of their difference and ratio, the ones the question asks for: a ratio only for 몇 배 /
-    비율 / 나누다, a difference for a comparing word (beside a ratio only when named: 차이, 빼다); neither when only
-    the two values were asked ("서울과 부산 인구 알려줘")."""
+    """The two cells and, of their difference and ratio, the ones the question asks for (asked_comparison)."""
     rest = parse(res.index, question).rest
-    ratio, diff = bool(_ASKS_RATIO.search(rest)), bool(_ASKS_DIFF.search(rest))
-    if ratio and not _ASKS_GAP.search(rest):  # "몇 배 많아": the comparative belongs to the ratio
-        diff = False
+    diff, ratio = asked_comparison(rest)
     facts = {f.id: f for f in computed.result.facts}
 
     def kept(fact_id: str) -> bool:

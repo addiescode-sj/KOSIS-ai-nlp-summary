@@ -71,8 +71,8 @@ TREND_WORDS = re.compile(r"추이|변화|변했|흐름|추세")
 AVG_WORDS = re.compile(r"평균")
 # "누적" is not here: it names items ("누적 혼인 비율"), it does not ask for a sum over periods.
 TOTAL_WORDS = re.compile(r"모두|전부")
-# "얼마나 늘었나", "감소했어": a change asked without 추이/변화. Verb forms only, so a label such as 자연증가건수 stays out.
-CHANGE_WORDS = re.compile(r"늘었|줄었|늘어|줄어|증가(?:했|한|하|세)|감소(?:했|한|하|세)")
+# "얼마나 늘었나", "감소했어": a change asked without 추이/변화 (kosis_chat/shared/patterns.py since loop 2).
+from kosis_chat.shared.patterns import CHANGE_WORDS  # noqa: E402
 # Every form of 더하다·합하다·합치다 (더해, 합쳐, 합쳤), and the nouns and adverbs that ask for a total (합계는, 합은,
 # 도합, 통틀어) (loop 1: was a few of the forms only).
 SUM_WORDS = re.compile(r"더하|더한|더해|더했|합하|합한|합해|합했|합치|합친|합쳐|합쳤|합산|총합|도합|통틀어"

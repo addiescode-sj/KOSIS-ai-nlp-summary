@@ -10,6 +10,7 @@ rule_plan and build_plan. The split into rules.py / place.py is left for later.
 from __future__ import annotations
 
 import re
+from itertools import product
 
 from kosis_chat.analyze import blocks as build  # T1-28 S3a: was compute/build.py
 from kosis_chat.analyze.blocks import Built, Pattern
@@ -18,6 +19,7 @@ from kosis_chat.judge.rules import resolve
 from kosis_chat.prepare.schemas import Cell, TableInput
 from kosis_chat.prepare.store import DimKey, store_of
 from kosis_chat.judge.question import (
+    ARITH_WORDS,
     AVG_WORDS,
     CHANGE_WORDS,
     ITEM_AXIS,
@@ -25,6 +27,7 @@ from kosis_chat.judge.question import (
     TOTAL_WORDS,
     TREND_WORDS,
     Match,
+    Parsed,
     Periods,
     TableIndex,
     in_range,
@@ -33,10 +36,10 @@ from kosis_chat.judge.question import (
     squash,
 )
 
-from kosis_ai.schemas import QuestionType, StatQuery  # isort: skip
+from kosis_ai.schemas import PlanV3, QuestionType, SelectStep, StatQuery  # isort: skip
 from kosis_chat.analyze.schemas import Plan  # isort: skip  # re-export: moved in T1-28 S1b
 from kosis_chat.shared import defaults as default_strings  # isort: skip
-from kosis_chat.shared.patterns import RECENT_N, REGION_SUFFIX  # isort: skip
+from kosis_chat.shared.patterns import CHANGE_ASKED, PER_UNIT, RATE_OF_CHANGE, RECENT_N, REGION_SUFFIX, asked_comparison, per_scale  # isort: skip
 
 PERIOD_AXIS = "시점"  # Plan.over when an extreme question ranks periods ("가장 낮았던 해")
 RECENT_POINTS = 5
@@ -66,7 +69,7 @@ _GAP_WORDS = re.compile(r"격차|차이")
 _GAP_CHANGE = re.compile(r"변했|변화|벌어|좁혀|줄어|늘어|커졌|작아|달라|줄었|늘었")
 _GROWTH_WORDS = re.compile(r"증가율|감소율|증감률|증가\s*폭|감소\s*폭|증감\s*폭|더\s*(?:많이\s*)?(?:늘|줄)")
 _DECLINE = re.compile(r"감소율|감소\s*폭|더\s*(?:많이\s*)?줄")
-_GROWTH_RATE = re.compile(r"증가율|감소율|증감률")
+_GROWTH_RATE = RATE_OF_CHANGE  # loop 2: the shared words of a rate of change (shared/patterns.py), as multi_rules reads them
 _AMOUNT = re.compile(r"증가\s*폭|감소\s*폭|증감\s*폭|더\s*(?:많이\s*)?(?:늘|줄)")
 
 
@@ -156,22 +159,56 @@ def _drop_children(index: TableIndex, codes: dict[str, list[str]]) -> None:
             codes[name] = roots
 
 
-def _order_in_question(question: str, index: TableIndex, name: str, named: list[str]) -> list[str]:
+def _position(question: str, index: TableIndex, name: str, code: str) -> int:
+    """Where the squashed question first names a code's label (its length when it does not)."""
     q = squash(question)
-
-    def at(code: str) -> int:
-        label = index.axes[name].labels[code]
-        forms = [squash(label), squash(re.sub(r"\s*\(.*\)\s*$", "", label)), squash(REGION_SUFFIX.sub("", label))]
-        found = [q.find(f) for f in forms if f and q.find(f) >= 0]
-        return min(found) if found else len(q)
-
-    return sorted(named, key=at)
+    label = index.axes[name].labels[code]
+    forms = [squash(label), squash(re.sub(r"\s*\(.*\)\s*$", "", label)), squash(REGION_SUFFIX.sub("", label))]
+    found = [q.find(f) for f in forms if f and q.find(f) >= 0]
+    return min(found) if found else len(q)
 
 
-def _range_periods(index: TableIndex, start: str, end: str) -> list[str]:
+def _order_in_question(question: str, index: TableIndex, name: str, named: list[str]) -> list[str]:
+    return sorted(named, key=lambda code: _position(question, index, name, code))
+
+
+def _per_unit(question: str, index: TableIndex, name: str, named: list[str]) -> tuple[int, float] | None:
+    """(the denominator's index in named, the scale) when the question asks one of two targets per units of the
+    other (loop 2, the words multi_rules reads too: shared/patterns.py PER_UNIT, per_scale): "사망자 1천 명당 출생아
+    수", "인구 1만 명당 의사 수". The denominator is the target named last before 당; a 당 inside a label the question
+    names ('인구 천명당 사망률') is no such word."""
+    m = PER_UNIT.search(question)
+    if m is None or len(named) != 2:
+        return None
+    q = squash(question)
+    at = len(squash(question[: m.end()])) - 1
+    named_at: dict[str, int] = {}  # where the question names each target, by the form it was matched by
+    for match in parse(index, question).matches:
+        start = q.find(match.form)
+        if match.axis == name and start >= 0:
+            named_at[match.code] = min(named_at.get(match.code, start), start)
+        while start >= 0:
+            if start <= at < start + len(match.form):
+                return None
+            start = q.find(match.form, start + 1)
+    before = [(p, n) for n, code in enumerate(named)
+              if (p := named_at.get(code, _position(question, index, name, code))) < at]
+    if not before:
+        return None
+    return max(before)[1], per_scale(m)
+
+
+def _range_periods(index: TableIndex, start: str, end: str, months: bool = False) -> list[str]:
+    """Table periods inside an asked range. A range of years is read year by year as _single_periods reads one
+    year (loop 2): a year the table holds a value of is that value, not that value and its months as well; a year
+    with months only is its months. Months asked (BY_MONTH) or a range of months: every period inside."""
     if end == "9999":
         end = max(x[:4] for x in index.periods)
-    return [x for x in index.periods if in_range(x, start, end)]
+    inside = [x for x in index.periods if in_range(x, start, end)]
+    if months or len(start) != 4 or len(end) != 4:
+        return inside
+    yearly = {x for x in inside if len(x) == 4}
+    return [x for x in inside if x in yearly or x[:4] not in yearly]
 
 
 def _single_periods(index: TableIndex, single: str, months: bool = False) -> list[str]:
@@ -186,7 +223,7 @@ def _periods(p: Periods, index: TableIndex, default: dict[str, str], months: boo
     """(table periods asked, asked years the table lacks)."""
     years = sorted({x[:4] for x in index.periods})
     if p.ranges:
-        found = [x for a, b in p.ranges for x in _range_periods(index, a, b)]
+        found = [x for a, b in p.ranges for x in _range_periods(index, a, b, months)]
         if p.singles:  # "2025년 ... 2020~2024년 평균보다": the single period belongs to the question too
             found += [x for s in p.singles for x in _single_periods(index, s, months)]
         # Only the asked ends: a census table has no 2016~2019 by design, which is not worth a note.
@@ -209,7 +246,7 @@ def _periods(p: Periods, index: TableIndex, default: dict[str, str], months: boo
 def _period_groups(p: Periods, index: TableIndex, kind: QuestionType, months: bool = False) -> list[list[str]]:
     """The period groups an op works on, in question order: one per range (a decade, a half, a quarter), and
     for a share the two single periods compared."""
-    groups = [_range_periods(index, a, b) for a, b in p.ranges]
+    groups = [_range_periods(index, a, b, months) for a, b in p.ranges]
     if kind == "share" and not groups and len(p.singles) >= 2:
         groups = [_single_periods(index, s, months) for s in p.singles[:2]]
     return [g for g in groups if g]
@@ -276,12 +313,48 @@ def rule_plan(question: str, index: TableIndex, default_applied: dict[str, str] 
     if plan.pattern is None and (pair := _two_by_two(question, plan)):
         plan.pattern, plan.groups, plan.type = pair
         return plan
+    if plan.pattern is None and kind in ("trend", "compare") and _values_only(parsed, kind, codes):
+        plan.type = "value"  # "2021년과 2023년 서울과 부산 인구 알려줘": the cells of every named target and period
     if kind == "extreme":
         plan.pick = pick_of(question)
         plan.over = PERIOD_AXIS if ASKS_PERIOD.search(question) else _ranked_axis(index, codes)
         if plan.over is None:
             plan.unresolved.append("over")
     return plan
+
+
+def _values_only(parsed: Parsed, kind: QuestionType, codes: dict[str, list[str]]) -> bool:
+    """No word that asks for a change, a trend, a comparison or a formula, and the question names several periods
+    one by one (a trend by count: two or more, no range, no relative period) or several codes in two categories or
+    more (a compare by count: two regions and two items) (loop 2): the question lists values ("2020년, 2023년 각각
+    얼마야?", "서울과 부산의 혼인건수와 조혼인율"). The type was counted (_question_type), which put a change in the
+    answer nobody asked for, or failed for the second category. Read on the question without its labels."""
+    p, rest = parsed.periods, parsed.rest
+    if kind == "compare":
+        if sum(len(v) >= 2 for v in codes.values()) < 2:
+            return False  # one pair: the compare plan lists it when no formula is asked (blocks.compare)
+    elif p.ranges or len(p.singles) < 2 or p.recent or p.recent_n or p.previous or p.before or p.events:
+        return False
+    diff, ratio = asked_comparison(rest)
+    asks = (diff or ratio or TREND_WORDS.search(rest) or CHANGE_ASKED.search(rest) or ARITH_WORDS.search(rest)
+            or AVG_WORDS.search(rest) or "얼마나" in rest)
+    return not asks
+
+
+def _listing(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | None) -> Built:
+    """The cells of every combination of the named targets at every asked period, one select per cell (two items
+    of different units are listed, not refused), in question order."""
+    several = [n for n, named in plan.codes.items() if len(named) >= 2]
+    problems: list[str] = []
+    fixed = _fixed(plan, index, set(several), problems)
+    if problems:
+        raise Unresolved(problems)
+    combos = [{**fixed, **dict(zip(several, combo))} for combo in product(*(plan.codes[n] for n in several))]
+    refs = _refs(lookup, [(f, p) for f in combos for p in plan.periods], problems)
+    if problems:
+        raise Unresolved(problems)
+    steps = [SelectStep(id=f"c{n}", cells=[r]) for n, r in enumerate(refs)]
+    return build.written(PlanV3(steps=steps, show=[s.id for s in steps], present="value", note=note))
 
 
 def _two_by_two(question: str, plan: Plan) -> tuple[Pattern, list[list[str]], QuestionType] | None:
@@ -436,6 +509,8 @@ def build_plan(plan: Plan, index: TableIndex, table: TableInput) -> Built:
         return _targets_sum(plan, index, lookup, note)
     if plan.pattern:
         return _period_plan(plan, index, lookup, note)
+    if kind == "value" and (len(plan.periods) >= 2 or any(len(v) >= 2 for v in plan.codes.values())):
+        return _listing(plan, index, lookup, note)
     if kind in ("value", "trend"):
         fixed = _fixed(plan, index, set(), problems)
         if problems:
@@ -468,8 +543,11 @@ def build_plan(plan: Plan, index: TableIndex, table: TableInput) -> Built:
         refs = _refs(lookup, [(f, period or "") for f in pair], problems)
         if problems:
             raise Unresolved(problems)
+        if per := _per_unit(plan.question, index, side, plan.codes[side]):
+            return build.compare(refs, note=note, per=per)
         labels = [index.axes[side].labels[c] for c in plan.codes[side]]
-        return build.compare(refs, reference_index(plan.question, labels), note)
+        diff, ratio = asked_comparison(parse(index, plan.question).rest)
+        return build.compare(refs, reference_index(plan.question, labels), note, asked=diff or ratio)
     if kind == "share":
         return _share_plan(plan, index, lookup, note)
     if kind == "extreme":

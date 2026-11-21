@@ -47,17 +47,30 @@ def trend(cells: list[str], note: str | None = None) -> Built:
     return Built(_plan(steps, ["a", "b", "d", "g"], "trend", note), "trend")
 
 
-def compare(cells: list[str], reference: int | None = None, note: str | None = None) -> Built:
-    """Two cells: the subject minus the named reference (reference = its index), else larger minus smaller."""
+def compare(cells: list[str], reference: int | None = None, note: str | None = None, asked: bool = True,
+            per: tuple[int, float] | None = None) -> Built:
+    """Two cells: the subject minus the named reference (reference = its index), else larger minus smaller.
+
+    Loop 2: asked False (the question asks for no difference and no ratio): the two values side by side, so two
+    values of different units are not refused for a formula nobody asked; the answer step keeps the asked one of
+    the difference and the ratio otherwise. Or per = (the denominator's index,
+    the scale): one cell per scale units of the other ("혼인 1천 건당 이혼 건수")."""
     if len(cells) != 2:
         raise ValueError(f"compare needs 2 cells, got {len(cells)}")
     if reference not in (None, 0, 1):
         raise ValueError("reference is an index (0 or 1) into the two compare cells")
     steps: list = [SelectStep(id="x", cells=[cells[0]]), SelectStep(id="y", cells=[cells[1]])]
+    if per is not None:
+        den, scale = per
+        a, b = ("y", "x") if den == 0 else ("x", "y")
+        steps.append(CombineStep(id="p", a=a, b=b, fn="per", scale=scale, note=f"{scale:g}당"))
+        return Built(_plan(steps, ["x", "y", "p"], "compare", note), "plan", reference=den)
     if reference is None:
         a, b, orient = "x", "y", "larger_first"
     else:
         a, b, orient = ("y", "x", "fixed") if reference == 0 else ("x", "y", "fixed")
+    if not asked:  # the two values only (pattern "plan": the listed sentence, no formula to choose from)
+        return Built(_plan(steps, ["x", "y"], "compare", note), "plan", reference=reference)
     steps += [CombineStep(id="d", a=a, b=b, fn="diff", orient=orient),
               CombineStep(id="r", a=a, b=b, fn="ratio", orient=orient, optional=True)]
     return Built(_plan(steps, ["x", "y", "d", "r"], "compare", note), "compare", reference=reference)
