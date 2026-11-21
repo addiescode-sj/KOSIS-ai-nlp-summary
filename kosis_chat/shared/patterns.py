@@ -62,3 +62,34 @@ COHORT = re.compile(r"(?:19|20)\d{2}\s*년생")
 FACT_ID = re.compile(r"f\d+")
 # A KOSIS agency id, ASCII digits (kosis_chat/contract.py: re.fullmatch(r"[0-9]{3}", ...) twice).
 ORG_ID = re.compile(r"[0-9]{3}")
+
+# ---------------------------------------------------------------- what a question computes between two numbers
+# (loop 1). The texts are read on the question with its spaces removed (labels.squash) unless said otherwise.
+
+# "혼인 1건당", "인구 1천 명당", "10만 명당", "가구당", "1인당": a value per unit of another (on the question as
+# written). Group 1 the number, group 2 its 십/백/천/만 word. Not 해당, 상당, 담당, 정당, 적당, 부당, 배당, and not a 당
+# that starts a word (당시, 당해).
+PER_UNIT = re.compile(r"(\d[\d,.]*)?\s*(십만|백만|천만|십|백|천|만)?\s*(?:[가-힣]{1,2}\s*)?(?<![해상담정적부배])당"
+                      r"(?=$|[\s?.!,]|(?:은|는|의|으로|로)(?:$|[\s?.!,]))")
+_SCALE_WORDS = {"십": 10, "백": 100, "천": 1000, "만": 10_000, "십만": 100_000, "백만": 1_000_000, "천만": 10_000_000}
+
+
+def per_scale(m: re.Match) -> float:
+    """The number a PER_UNIT match counts by: '1천 명당' -> 1000, '10만 명당' -> 100000, '1건당' / '가구당' -> 1."""
+    number = float(m.group(1).replace(",", "")) if m.group(1) else 1.0
+    return number * _SCALE_WORDS.get(m.group(2) or "", 1)
+
+
+# A share of one number in another: 비중, 차지, 구성비, 몇 퍼센트 (not 몇 퍼센트 늘었/줄었, a growth rate).
+MULTI_SHARE = re.compile(r"비중|차지|구성비|몇(?:퍼센트|%|프로)(?!(?:나|가|정도)?(?:늘|줄|증가|감소|올|내|올랐|떨어))")
+# One number over another: 몇 배, 배수, 나누다, 비율.
+MULTI_RATIO = re.compile(r"몇배|배수|나누|나눈|나눠|비율")
+# What follows the name of the whole (the denominator): "A 중", "A 가운데", "A 대비", "A에서", "A의 몇 배".
+MULTI_WHOLE_AFTER = re.compile(r"^(?:은|는|이|가)?(?:중|가운데|대비|에서|에비해|의몇|기준)")
+# A difference of two numbers, and the words that ask how much fewer (the reference minus the subject).
+MULTI_DIFF = re.compile(r"차이|격차|빼|뺀|많|적|높|낮|크|작|넘|모자|덜")
+MULTI_FEWER = re.compile(r"적|낮|작|모자|덜")
+# A count item's name without its count word: '혼인건수' -> '혼인', '출생아수' -> '출생', '사망자수' -> '사망'.
+COUNT_STEM_SUFFIX = re.compile(r"(?:건수|아수|자수|수)$")
+# The word that makes an item name the whole of its kind: '총인구수' is asked as '인구수'.
+TOTAL_PREFIX = re.compile(r"^(?:총|전체)")

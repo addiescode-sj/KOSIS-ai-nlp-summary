@@ -73,7 +73,10 @@ AVG_WORDS = re.compile(r"평균")
 TOTAL_WORDS = re.compile(r"모두|전부")
 # "얼마나 늘었나", "감소했어": a change asked without 추이/변화. Verb forms only, so a label such as 자연증가건수 stays out.
 CHANGE_WORDS = re.compile(r"늘었|줄었|늘어|줄어|증가(?:했|한|하|세)|감소(?:했|한|하|세)")
-SUM_WORDS = re.compile(r"더하|더한|합하|합한|합치|합친|합산|총합")
+# Every form of 더하다·합하다·합치다 (더해, 합쳐, 합쳤), and the nouns and adverbs that ask for a total (합계는, 합은,
+# 도합, 통틀어) (loop 1: was a few of the forms only).
+SUM_WORDS = re.compile(r"더하|더한|더해|더했|합하|합한|합해|합했|합치|합친|합쳐|합쳤|합산|총합|도합|통틀어"
+                       r"|합계(?:는|가|를|로|은)|합(?:은|이)(?![가-힣])")
 ARITH_WORDS = re.compile(SUM_WORDS.pattern + r"|나누|나눈|몇\s*배|차이|빼면|뺀")
 CAUSAL_WORDS = re.compile(r"왜|이유|원인|때문|효과|영향")
 # A causal question that also asks for numbers ("추이와 원인") is answered; the LLM declines the cause part.
@@ -87,7 +90,11 @@ _REGION_SUFFIX = REGION_SUFFIX
 # 2,364 tables of data/table_metadata on 10/28).
 _COUNT_SUFFIX = "건수"
 _COUNTED_FORMS = ("수", "아수", "자수", "아", "자")
+_PERSON_ENDS = ("자", "아", "인")
 _TOKEN = re.compile(r"[0-9A-Za-z가-힣~\-]+")
+# A particle that joins two words of a label: '고령자의 비율', '부모와 동거', '가구주 및 배우자' (the word before it
+# has two syllables or more, so '이와' or '과' alone is no particle).
+_INNER_PARTICLE = re.compile(r"(?<=[가-힣]{2})(?:의|와|과|및|에서|에)\s+")
 _PARTICLE = re.compile(r"(?<=[가-힣]{2})(?:은|는|이|가|을|를|의|에|도|만|와|과)$")
 
 
@@ -215,19 +222,29 @@ def label_forms(label: str, regional_total: bool = False) -> tuple[set[str], set
     m = _UNIT_PAREN.search(text)
     core = text[: m.start()].strip() if m and _known_unit(m.group(1).strip()) else text
     exact = {squash(core), *(squash(a) for a in LABEL_ALIASES.get(core, ()))}
+    # '부모와 동거하는 자녀', '고령자의 비율' are also asked without the particle between the words (loop 1)
+    plain = _INNER_PARTICLE.sub(" ", core)
+    if plain != core:
+        exact.add(squash(plain))
     short = _REGION_SUFFIX.sub("", core)
     if short != core and len(short) >= 2:
         exact.add(squash(short))
     stem = squash(core)[: -len(_COUNT_SUFFIX)]
     if squash(core).endswith(_COUNT_SUFFIX) and len(stem) >= 2:
         exact.update(stem + form for form in _COUNTED_FORMS)
+    # A count of people 'X자수' / 'X아수' / 'X인수' is also asked by the people: '사망자수' as '사망자', '출생아수' as
+    # '출생아' (loop 1).
+    person = squash(core)[:-1]
+    if squash(core).endswith("수") and len(person) >= 3 and person[-1] in _PERSON_ENDS:
+        exact.add(person)
     if regional_total and core in TOTAL_LABELS:
         exact.add("전국")
     bare = PAREN.sub(" ", core)
     head = squash(bare.split(" - ")[0])
     # '기대수명(출생시 기대여명)' is also asked as '기대수명'; not '인구(명): 0-14세', where '인구' is only a prefix.
     partial = {head} - exact if head and "(" in core and ":" not in core else set()
-    tokens = tuple(t for t in _TOKEN.findall(bare) if len(t) >= 2 and t != "-")
+    tokens = tuple(t for t in (_INNER_PARTICLE.sub("", w + " ").strip() for w in _TOKEN.findall(bare))
+                   if len(t) >= 2 and t != "-")
     return exact, partial, tokens
 
 

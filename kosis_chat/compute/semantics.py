@@ -25,9 +25,11 @@ def _items(reads: list[_Read]) -> str:
 
 def check_sum(reads: list[_Read]) -> None:
     """R1: a sum over periods needs a flow (births); a stock counts the same people again, a rate is meaningless,
-    and an unknown measure is refused rather than guessed."""
+    and an unknown measure is refused rather than guessed. Cells of one period (several regions or items: 서울과 부산
+    인구) are counted once each, so a stock adds up there too (loop 1)."""
     kinds = {r.kind for r in reads}
-    if kinds != {"count_flow"}:
+    allowed = {"count_flow"} if len({r.cell.period_raw for r in reads}) > 1 else set(COUNT_KINDS)
+    if not kinds or not kinds <= allowed:
         raise CalcRefused("not_aggregatable", messages.refusal_message("not_aggregatable", what=_items(reads)))
 
 

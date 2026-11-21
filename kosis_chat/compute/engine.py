@@ -30,7 +30,7 @@ from kosis_chat.compute.schemas import Computed, TermResult  # isort: skip  # re
 if TYPE_CHECKING:  # resolve.py imports this module
     from kosis_chat.compute.resolve import EventLookup
 
-PERCENT_DIGITS = 1  # growth rate, share and multiple
+PERCENT_DIGITS = 2  # growth rate, share and multiple (loop 1: was 1; a computed value is read to two decimals)
 _DECIMALS = re.compile(r"\.(\d+)")
 
 

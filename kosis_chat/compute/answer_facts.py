@@ -19,7 +19,11 @@ by position); what this step returns is a list of its own.
 
 from __future__ import annotations
 
+import re
+
 from pydantic import Field, SkipValidation
+
+from kosis_chat.judge.question import parse
 
 from kosis_chat.compute.schemas import Computed
 from kosis_chat.schemas.resources import MultiResources, StatResources
@@ -46,4 +50,37 @@ def step_answer_facts(inp: AnswerFactsIn, res: StatResources | MultiResources) -
     Out: AnswerFactsOut(fact_ids: ids of computed.result.facts)
     Side effects: none (res is the question's table, or its two or three tables: MultiResources)
     """
-    return AnswerFactsOut(fact_ids=list(dict.fromkeys(inp.computed.main)))
+    main = list(dict.fromkeys(inp.computed.main))
+    if inp.computed.pattern == "compare" and isinstance(res, StatResources):
+        main = _compared(inp.question, inp.computed, main, res)
+    return AnswerFactsOut(fact_ids=main)
+
+
+# Loop 1. A compare plan computes both the difference and the ratio of its two cells; the answer keeps the one the
+# question asks for. Read on the question without the labels it names (a label '국적' holds 적).
+_ASKS_RATIO = re.compile(r"몇배|배수|비율|나누|나눈|나눠|배(?:나|정도|가량|야|인|이|로)")
+_ASKS_DIFF = re.compile(r"비교|차이|격차|보다|대비|빼|뺀|많|적|높|낮|크|작|넘|모자|덜")
+_ASKS_GAP = re.compile(r"차이|격차|빼|뺀")  # a difference asked by name, beside a ratio
+_DIFF = re.compile(r"^f\d+ - f\d+$")
+_RATIO = re.compile(r"^f\d+ / f\d+$")
+
+
+def _compared(question: str, computed: Computed, main: list[str], res: StatResources) -> list[str]:
+    """The two cells and, of their difference and ratio, the ones the question asks for: a ratio only for 몇 배 /
+    비율 / 나누다, a difference for a comparing word (beside a ratio only when named: 차이, 빼다); neither when only
+    the two values were asked ("서울과 부산 인구 알려줘")."""
+    rest = parse(res.index, question).rest
+    ratio, diff = bool(_ASKS_RATIO.search(rest)), bool(_ASKS_DIFF.search(rest))
+    if ratio and not _ASKS_GAP.search(rest):  # "몇 배 많아": the comparative belongs to the ratio
+        diff = False
+    facts = {f.id: f for f in computed.result.facts}
+
+    def kept(fact_id: str) -> bool:
+        expr = (facts[fact_id].derivation or "") if fact_id in facts else ""
+        if _DIFF.match(expr):
+            return diff
+        if _RATIO.match(expr):
+            return ratio
+        return True
+
+    return [i for i in main if kept(i)]

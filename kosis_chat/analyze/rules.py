@@ -243,6 +243,11 @@ def _operation(question: str, rest: str, p: Periods, index: TableIndex, kind: Qu
             return "sum", groups
     if total and groups:
         return ("psum", groups[:2]) if len(groups) >= 2 else ("sum", groups)
+    if total and kind != "extreme" and not p.ranges and len(p.singles) >= 2:  # "2021년과 2023년 출생아 수를 합치면": periods named one by one
+        named = [x for s in p.singles for x in _single_periods(index, s, months)]
+        return ("sum", [named]) if len(named) >= 2 else (None, [])
+    if total and kind != "extreme":  # "서울과 부산 인구를 합치면", "출생아와 사망자를 더하면": the named targets at one period (build_plan)
+        return "sum", []
     return None, []
 
 
@@ -427,6 +432,8 @@ def build_plan(plan: Plan, index: TableIndex, table: TableInput) -> Built:
     kind = plan.type
     if plan.pattern in ("gap", "grw"):
         return _two_by_two_plan(plan, index, lookup, note)
+    if plan.pattern == "sum" and not plan.groups:
+        return _targets_sum(plan, index, lookup, note)
     if plan.pattern:
         return _period_plan(plan, index, lookup, note)
     if kind in ("value", "trend"):
@@ -602,6 +609,24 @@ def _two_by_two_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str |
         return build.gap((x1, y1), (x2, y2), note)
     return build.growth((x1, x2), (y1, y2), amount=bool(_AMOUNT.search(plan.question)) and not _GROWTH_RATE.search(plan.question),
                         decline=bool(_DECLINE.search(plan.question)), note=note)
+
+
+def _targets_sum(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | None) -> Built:
+    """The sum of the targets one category names (two regions, two items, three age groups) at one period."""
+    sides = [n for n, named in plan.codes.items() if len(named) >= 2]
+    if len(sides) != 1:
+        raise Unresolved(["더할 대상"])
+    side = sides[0]
+    problems: list[str] = []
+    fixed = _fixed(plan, index, {side}, problems)
+    if problems:
+        raise Unresolved(problems)
+    sets = [_with(fixed, side, c) for c in plan.codes[side]]
+    period = _one_period(plan, lookup, sets)
+    refs = _refs(lookup, [(f, period or "") for f in sets], problems)
+    if problems:
+        raise Unresolved(problems)
+    return build.over_periods(refs, "sum", "value", note)
 
 
 def _period_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | None) -> Built:

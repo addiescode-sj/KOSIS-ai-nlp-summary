@@ -272,7 +272,7 @@ class _Run:
         span = span_text(*periods)
         note = f"{span} {len(values)}개 시점 {AGG_NOTES[step.fn]}"
         if step.fn == "avg":
-            digits = max(1, digits)
+            digits = max(2, digits)  # loop 1: an average is read to two decimals (was 1)
             fact = _derived(self.ids(), f"({' + '.join(ids)}) / {len(ids)}", sum(values) / len(values), digits, reads[0].unit, note=note)
         else:
             fact = _derived(self.ids(), " + ".join(ids), sum(values), digits, reads[0].unit, note=note)
@@ -310,13 +310,15 @@ class _Run:
             a, b = self._aligned(step.fn, a, b)
         if (step.orient == "larger_first" and a.value < b.value) or (step.orient == "smaller_first" and a.value > b.value):
             a, b = b, a
-        if step.fn in ("diff", "pp_diff", "pct_change", "cagr"):
+        if step.fn in ("diff", "pp_diff", "pct_change", "cagr", "sum"):
             semantics.check_same_unit(step.fn, a.unit, b.unit, f"{a.id}·{b.id}")
         unit = b.unit if b.unit is not None else a.unit
         if step.optional and self._meaningless(step.fn, a, b, unit):
             return None
         fn = step.fn
-        if fn == "diff":
+        if fn == "sum":
+            fact = self._make(f"{a.id} + {b.id}", a.value + b.value, max(a.digits, b.digits), unit, step.note)
+        elif fn == "diff":
             fact = self._make(f"{a.id} - {b.id}", a.value - b.value, max(a.digits, b.digits), _diff_unit(unit), step.note)
         elif fn == "pp_diff":
             fact = self._make(f"{a.id} - {b.id}", a.value - b.value, PERCENT_DIGITS, "%p", step.note)

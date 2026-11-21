@@ -220,8 +220,9 @@ class Cell(Contract):
 AggFn = Literal["sum", "avg", "min", "max", "first", "last"]
 # diff: a - b · ratio: a / b · pct_change: (a / b - 1) * 100 · pp_diff: a - b of two percentages, in %p ·
 # share: a (summed when several cells) / b * 100 · per: a / b * scale ("per 1,000 people") ·
-# cagr: ((a / b) ** (1 / years) - 1) * 100 · index: a / b * 100 (b as 100)
-CombineFn = Literal["diff", "ratio", "pct_change", "pp_diff", "share", "per", "cagr", "index"]
+# cagr: ((a / b) ** (1 / years) - 1) * 100 · index: a / b * 100 (b as 100) · sum: a + b (two values of one unit, e.g.
+# from two tables)
+CombineFn = Literal["diff", "ratio", "pct_change", "pp_diff", "share", "per", "cagr", "index", "sum"]
 Compare = Literal[">", ">=", "<", "<=", "=="]
 PeriodKind = Literal["list", "range", "recent", "anchor", "span"]
 SpanPart = Literal["year", "H1", "H2", "Q1", "Q2", "Q3", "Q4"]
