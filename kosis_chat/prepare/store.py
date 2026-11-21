@@ -1,27 +1,37 @@
-"""The cell store: every read of a table's cells after loading goes through one object (T1-31 S1).
+"""The cell store: every read of a table's cells after loading goes through one object (T1-31 S1, S2).
 
 Today a table holds all its cells in memory (TableInput.cells), and each stage built its own dicts over them. A table
 of tens of millions of rows cannot be held like that, so the stages ask a CellStore for the cells they need instead:
-by key, by source_ref, one series, or a summary of a range. MemoryStore answers from TableInput.cells, with the same
+by key, by source_ref, series, or a summary of a range. MemoryStore answers from TableInput.cells, with the same
 dict semantics the stages had (on a duplicate key or ref the last cell wins; a series keeps table order within one
-period). A later stage adds a store that reads only the needed rows from the Parquet file.
+period). A table too big to hold (T1-31 S3) is file-backed: its TableInput.store answers each request by reading only
+the matching rows of the Parquet file (kosis_chat/adapters/parquet_store.py), and store_of returns it.
+
+Facts about the whole table (the periods, the item codes, whether the item is named, the units) are not asked of the
+store: the table index (prepare.index) gathers them once when the table is loaded.
 
 prepare is the first stage: this module imports only prepare.schemas, so every stage (and prepare.index) may use it.
 """
 
 from __future__ import annotations
 
-from collections.abc import Collection, Iterable, Mapping, Sequence
+import hashlib
+import logging
+from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from functools import cached_property
+from pathlib import Path
 from typing import Protocol
 
 from kosis_chat.prepare.schemas import Cell, TableInput
+
+log = logging.getLogger(__name__)
 
 ITEM_AXIS = "항목"  # the item column, next to the category names (prepare.index re-exports it)
 
 DimKey = tuple[tuple[str, str], ...]  # sorted (category name, code) pairs of one cell
 CellKey = tuple[str, DimKey, str]  # (item_code, DimKey, period_raw)
+SeriesKey = tuple[str, DimKey]  # (item_code, DimKey): one cell per period
 
 _STORE_CACHE = "prepare.store"  # LookupCaches name of the store
 
@@ -60,7 +70,23 @@ class RangeSummary:
 
 
 class CellStore(Protocol):
-    """The cells of one table (or of several tables seen as one), asked for by what a stage needs."""
+    """The cells of one table, asked for by what a stage needs.
+
+    A store serves a table that passed prepare.schemas.validate(), so no two cells share a source_ref. Unique refs do
+    not make unique keys, even through the real loader: period "2020" next to " 2020", item_id null next to "", or
+    the same two categories on swapped levels give two refs whose cells share one CellKey. MemoryStore then answers
+    as the stages' dicts did: cell and cells_at give the last of those cells in table order, series and series_at
+    give all of them, summary counts all of them, and by_ref and by_refs give each ref its own cell. Such a table is
+    outside what a store must reproduce: a file store checks that keys are unique when it builds its index and is not
+    used for a table that fails (kosis_chat/adapters/parquet_store.py lists the conditions).
+
+    It returns the cleaned cells (value and value_flag set, as prepare.clean.clean_cell gives); MemoryStore returns
+    the cells it was given, so callers still clean a cell whose value_flag is None (tests hand in raw tables).
+
+    Every call is one request: a file store answers it with one filtered read, and a read costs about the same for one
+    cell as for a few hundred. So a caller asks for every cell a step needs at once (cells_at, by_refs, series_at),
+    never one call per cell in a loop. A batch method given no keys or refs returns {} without reading; callers
+    still skip such a call where that is cheap."""
 
     def cell(self, key: CellKey) -> Cell | None: ...
 
@@ -78,19 +104,19 @@ class CellStore(Protocol):
         """Every cell of one (item, dims), sorted by period_raw; table order within one period."""
         ...
 
+    def series_at(self, keys: Iterable[SeriesKey]) -> dict[SeriesKey, Sequence[Cell]]:
+        """series() of many (item, dims) in one request; a key with no cell is absent."""
+        ...
+
     def summary(self, codes: Mapping[str, Collection[str]], periods: Collection[str]) -> RangeSummary:
         """The cells in `periods` whose code on each named axis (ITEM_AXIS or a category) is one of its codes."""
         ...
 
-    def item_codes(self) -> frozenset[str]: ...
 
-    def first(self) -> Cell | None:
-        """The first cell in table order."""
-        ...
+class RefReader(Protocol):
+    """The one CellStore method compose.caveats needs: graph/multi.py hands in several tables' stores as one."""
 
-    def units(self) -> list[str]:
-        """Sorted distinct non-empty units."""
-        ...
+    def by_refs(self, refs: Iterable[str]) -> dict[str, Cell]: ...
 
 
 class MemoryStore:
@@ -120,14 +146,6 @@ class MemoryStore:
             groups.setdefault((c.item_code, dim_key(c)), []).append(c)
         return {key: tuple(sorted(cells, key=lambda c: c.period_raw)) for key, cells in groups.items()}
 
-    @cached_property
-    def _item_codes(self) -> frozenset[str]:
-        return frozenset(c.item_code for c in self.cells)
-
-    @cached_property
-    def _units(self) -> list[str]:
-        return sorted({c.unit for c in self.cells if c.unit})
-
     def cell(self, key: CellKey) -> Cell | None:
         return self.key_map.get(key)
 
@@ -145,6 +163,10 @@ class MemoryStore:
     def series(self, item_code: str, dims: DimKey) -> Sequence[Cell]:
         return self._series.get((item_code, dims), ())
 
+    def series_at(self, keys: Iterable[SeriesKey]) -> dict[SeriesKey, Sequence[Cell]]:
+        found = self._series
+        return {k: found[k] for k in keys if k in found}
+
     def summary(self, codes: Mapping[str, Collection[str]], periods: Collection[str]) -> RangeSummary:
         periods = set(periods)
         return RangeSummary.of(
@@ -152,16 +174,67 @@ class MemoryStore:
             if c.period_raw in periods and all(axis_code(c, name) in named for name, named in codes.items())
         )
 
-    def item_codes(self) -> frozenset[str]:
-        return self._item_codes
 
-    def first(self) -> Cell | None:
-        return self.cells[0] if self.cells else None
+class FileTable(CellStore, Protocol):
+    """The store of a file-backed table (TableInput.store), with what prepare.index reads instead of the cells: the
+    sorted periods of the table and one cell per distinct "descriptor" (everything a cell has but its period and
+    value), in the order the table first shows each, made by the same conversion as the cells."""
 
-    def units(self) -> list[str]:
-        return list(self._units)
+    periods: Sequence[str]
+
+    def index_cells(self) -> Iterator[Cell]: ...
+
+    def load_index(self, code: str | None) -> object | None:
+        """The payload save_index saved for this file's bytes and this code (prepare.index.INDEX_CODE), else None.
+        The store adds its own code to the key (the scan and the descriptor cells are its part); it never raises.
+        None when either code is None (source_hash: no trustworthy code key)."""
+        ...
+
+    def save_index(self, code: str | None, payload: object) -> None:
+        """Keep a JSON-able payload (prepare.index decides it: the built index) for load_index; nothing when the
+        store has nowhere to save it, or when either code is None. It never raises (a folder that cannot be written
+        is logged once)."""
+        ...
 
 
 def store_of(table: TableInput) -> CellStore:
-    """The cell store of this TableInput object, one per object (TableInput.caches)."""
-    return MemoryStore.of(table)
+    """The cell store of this TableInput object: the file store of a file-backed table, else its MemoryStore (one per
+    object, TableInput.caches)."""
+    return table.store if table.file_backed else MemoryStore.of(table)
+
+
+_untrusted_warned = False  # source_hash has logged its warning in this process
+
+
+def source_hash(sources: Iterable[tuple[str, Path]], *, required: int = 1) -> str | None:
+    """The code key of saved data: the sha256 over the name and text (CRLF read as LF: one hash on every OS) of each
+    (name, path) of `sources`, in the order given. Paths that are not files are skipped (a folder named like a module).
+
+    None, the key that cannot be trusted, when a source cannot be read (a file locked by a scanner, a cloud-only
+    placeholder, a folder that cannot be listed: any OSError) or fewer than `required` files were hashed (an install
+    without .py files, or a zipped one: the hash would be the same for every version). Saved data is then neither
+    used nor saved. Never raises: computed at import, a failure here must not stop the package from loading. One
+    warning per process."""
+    digest = hashlib.sha256()
+    hashed = 0
+    try:
+        for name, path in sources:
+            if not path.is_file():
+                continue
+            text = hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+            digest.update(f"{name}\0{text}\n".encode("utf-8"))
+            hashed += 1
+    except OSError as exc:
+        return _untrusted(f"{type(exc).__name__}: {exc}")
+    if hashed < required:
+        return _untrusted(f"{hashed} source files found, {required} needed")
+    return digest.hexdigest()
+
+
+def _untrusted(why: str) -> None:
+    global _untrusted_warned
+    if not _untrusted_warned:
+        _untrusted_warned = True
+        log.warning("cannot hash the package's source files (%s): saved scans and table indexes of big tables are "
+                    "neither used nor saved, so each load scans them again", why)
+    return None
