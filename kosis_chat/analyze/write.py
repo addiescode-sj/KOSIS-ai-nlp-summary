@@ -20,7 +20,7 @@ from kosis_chat.analyze.blocks import Built
 from kosis_chat.analyze.fill import MENU_LIMIT, resolve_code
 from kosis_chat.analyze.rules import PERIOD_AXIS, Plan
 from kosis_chat.compute import CalcRefused, Computed, compute
-from kosis_chat.compute.engine import _read
+from kosis_chat.compute.engine import _cells, _read
 from kosis_chat.compute.plan_engine import PlanUnsupported
 from kosis_chat.compute.resolve import EventLookup, NeedsClarify
 from kosis_chat.judge.question import ITEM_AXIS, TableIndex, asked_periods
@@ -150,10 +150,11 @@ def query_plan(question: str, plan: PlanV3, computed: Computed, table: TableInpu
     """The cells the plan read, as the rules' Plan (codes per category in reading order), for StatQuery."""
     codes: dict[str, list[str]] = {}
     periods: list[str] = []
+    found = _cells(table, [f.source_ref for f in computed.result.facts if f.source_ref])  # one store request
     for fact in computed.result.facts:
         if not fact.source_ref:
             continue
-        cell = _read(table, fact.source_ref).cell
+        cell = _read(table, fact.source_ref, found).cell
         for name in index.axes:
             code = index.axis_of(cell, name)
             if code and code not in codes.setdefault(name, []):

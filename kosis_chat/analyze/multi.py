@@ -18,7 +18,6 @@ from kosis_chat.analyze.schemas import Placed
 from kosis_chat.compute import CalcRefused, compute
 from kosis_chat.compute.plan_engine import PlanUnsupported
 from kosis_chat.compute.resolve import EventLookup, NeedsClarify
-from kosis_chat.prepare.store import store_of
 from kosis_chat.schemas.resources import MultiResources
 
 from kosis_ai.schemas import CombineStep, MapStep, PlanV3, RankStep, SelectStep  # isort: skip
@@ -34,7 +33,7 @@ def user_prompt(question: str, res: MultiResources) -> str:
     blocks = []
     for label, r in zip(res.labels, res.tables):
         rule = rule_plan(question, r.index)  # what the rules matched shows up in a long menu
-        units = store_of(r.table).units()
+        units = r.index.units
         blocks.append(
             f"[표 {label}] {r.table.meta.tbl_nm} (table: \"{label}\")"
             + (f"\n[단위] {', '.join(units[:6])}" if units else "")

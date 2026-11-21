@@ -5,6 +5,7 @@
                                         -(unresolved)-> plan_fill_llm -(built)-> compute
                                                                       -(unplaced)-> plan_write_llm
              plan_write_llm -(placed)-> compute  -(clarify)-> answer_final  -(failed)-> fallback_chatbot -> END
+                            -(refused: failed on a file-backed table, which the fallback cannot read)-> answer_final
              compute -(ok)-> caveats  -(refused)-> answer_final -> END
              caveats -> compose_llm -(verify)-> verify -(ok)-> compose_done
                                                        -(retry)-> compose_llm   (the one loop, D3: COMPOSE_MAX_ATTEMPTS)
@@ -95,7 +96,8 @@ def build_graph(resources: StatResources, node_overrides: Mapping[str, Callable[
     g.add_conditional_edges("plan_rules", _route, {"built": "compute", "unresolved": "plan_fill_llm"})
     g.add_conditional_edges("plan_fill_llm", _route, {"built": "compute", "unplaced": "plan_write_llm"})
     g.add_conditional_edges("plan_write_llm", _route,
-                            {"placed": "compute", "clarify": "answer_final", "failed": "fallback_chatbot"})
+                            {"placed": "compute", "clarify": "answer_final", "failed": "fallback_chatbot",
+                             "refused": "answer_final"})  # refused: a failed plan on a file-backed table
     g.add_edge("fallback_chatbot", END)
     g.add_conditional_edges("compute", _route, {"ok": "caveats", "refused": "answer_final"})
     g.add_edge("caveats", "compose_llm")

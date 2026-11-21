@@ -125,12 +125,21 @@ class StatPipeline:
         return self._graph
 
     def ask(self, question: str, golden_scope: dict | None = None) -> Answer:
-        """One question through the stat graph (T1-28 S4; the steps and their order are graph/build.py's)."""
+        """One question through the stat graph (T1-28 S4; the steps and their order are graph/build.py's).
+
+        On a file-backed table (T1-31 S3) a plan the model could not write is refused, not sent to the fallback
+        chatbot; a plan call that failed (timeout, API error, input too long) raises RuntimeError there, as
+        MultiStatPipeline.ask does (on a table in memory the fallback's failed call ends the same way at api)."""
         llm = self._model_access()
         started = time.perf_counter()
         context = StatContext(llm=llm, chatbot=lambda: self.fallback, build=build_plan)  # this module's: tests swap it
         state = run(self.graph, question, context=context, meta={**self.decision_metadata, "route": "rules"},
                     started=started, golden_scope=golden_scope)
+        if self.table.file_backed:
+            failed = [state.meta.get(k) for k in ("plan_status", "plan_retry_status")
+                      if state.meta.get(k) in (STATUS_TIMEOUT, STATUS_API_ERROR, STATUS_INPUT_TOO_LONG)]
+            if failed and state.meta.get("route") == "llm_plan+failed":
+                raise RuntimeError(f"the plan's model call failed: {failed[-1]}")
         return answer_of(state, table_meta=self.table.meta, prompt_version=self.prompt_version,
                          fallback_prompt=FALLBACK_PROMPT)
 

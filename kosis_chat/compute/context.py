@@ -26,14 +26,19 @@ def scenario_alternatives(table: TableInput, index: TableIndex, built: Built, de
     cell = store.by_ref(ref)
     if cell is None:
         return []
-    out = []
+    wanted = []
     for name in defaulted:
         if not SCENARIO_AXIS.search(name) or name not in cell.dim_codes or name not in index.axes:
             continue
         chosen = cell.dim_codes[name]
         keys = [(cell.item_code, tuple(sorted({**cell.dim_codes, name: code}.items())), cell.period_raw)
                 for code in index.axes[name].labels if code != chosen]
-        found = store.cells_at(keys)
+        wanted.append((name, chosen, keys))
+    if not any(keys for _, _, keys in wanted):  # no other scenario to show: no request
+        return []
+    found = store.cells_at(key for _, _, keys in wanted for key in keys)  # every scenario category in one request
+    out = []
+    for name, chosen, keys in wanted:
         refs = [found[key].source_ref for key in keys if key in found]
         if refs:
             out.append(Alternatives(name, cell.dims.get(name, chosen), refs[:MAX_ALTERNATIVES]))

@@ -12,14 +12,17 @@ from __future__ import annotations
 
 import operator
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
+from functools import partial
 
 from kosis_chat.compute import scale, semantics
-from kosis_chat.compute.resolve import EventLookup, resolve_select
+from kosis_chat.compute.resolve import EventLookup, resolve_select_cells
 from kosis_chat.compute.engine import (
     PERCENT_DIGITS,
     CalcRefused,
     _cell_fact,
+    _cells,
     _check_units,
     _derived,
     _diff_unit,
@@ -29,8 +32,9 @@ from kosis_chat.compute.engine import (
     _Read,
     _share_parts,
 )
-from kosis_chat.data.schema import TableInput
+from kosis_chat.data.schema import Cell, TableInput
 from kosis_chat.judge import messages
+from kosis_chat.prepare.store import ITEM_AXIS, CellKey, store_of
 from kosis_chat.shared.patterns import FACT_ID
 from kosis_chat.shared.periods import span_text  # T1-28 S2b: was answer.render (compute must not import the answer)
 
@@ -109,6 +113,47 @@ class PlanRun:
         return list(out.ids)
 
 
+class _MapCache:
+    """The cells a map's bodies read, kept for the whole map, so that a map makes the same store requests for any
+    number of codes. A key not seen yet is asked for under every code of the map at once (the key with the map's
+    axis set to each code: what the same select asks for at the other codes); refs are kept as read (a body's refs
+    do not change with the code). A key or ref the store did not have is remembered too. Only what the store
+    returned is given back, so the bodies read the cells they read without the cache."""
+
+    def __init__(self, axis: str, codes: list[str]) -> None:
+        self.axis = axis
+        self.codes = codes
+        self.keys: dict[int, dict[CellKey, Cell | None]] = {}  # id(table) -> key -> its cell
+        self.refs: dict[int, dict[str, Cell | None]] = {}  # id(table) -> ref -> its cell
+
+    def _at_codes(self, key: CellKey, code: str) -> list[CellKey]:
+        """key at every code of the map, when key is at `code` on the map's axis; else none."""
+        item, dims, period = key
+        if self.axis == ITEM_AXIS:
+            return [(c, dims, period) for c in self.codes] if item == code else []
+        if (self.axis, code) not in dims:
+            return []
+        return [(item, tuple((n, c if n == self.axis else v) for n, v in dims), period) for c in self.codes]
+
+    def cells_at(self, table: TableInput, keys: Iterable[CellKey], code: str) -> dict[CellKey, Cell]:
+        keys = list(keys)
+        known = self.keys.setdefault(id(table), {})
+        new = [k for k in keys if k not in known]
+        if new:
+            wanted = list(dict.fromkeys([*new, *(k2 for k in new for k2 in self._at_codes(k, code))]))
+            found = store_of(table).cells_at(wanted)
+            known.update((k, found.get(k)) for k in wanted)
+        return {k: cell for k in keys if (cell := known[k]) is not None}
+
+    def by_refs(self, table: TableInput, refs: list[str]) -> dict[str, Cell]:
+        known = self.refs.setdefault(id(table), {})
+        new = list(dict.fromkeys(r for r in refs if r not in known))
+        if new:
+            found = _cells(table, new)
+            known.update((r, found.get(r)) for r in new)
+        return {r: cell for r in refs if (cell := known[r]) is not None}
+
+
 class _Run:
     def __init__(self, table: TableInput, lookup: EventLookup | None = None,
                  tables: dict[str, TableInput] | None = None) -> None:
@@ -117,6 +162,7 @@ class _Run:
         self.tables = dict(tables) if tables else {table.meta.tbl_id: table}
         self.lookup = lookup
         self.star: dict[str, str] = {}
+        self.cache: _MapCache | None = None  # inside a map: the cells its bodies read (one request for all codes)
         self.facts: list[Fact] = []
         self.ids = _Ids()
         self.results: dict[str, object] = {}
@@ -154,6 +200,22 @@ class _Run:
             return out
         return frozenset().union(*(self.origin.get(i, frozenset()) for i in step.inputs()))
 
+    def _fetched(self, wanted: list[tuple[TableInput, str]]) -> list[dict[str, Cell]]:
+        """For each (table, ref), the cells found in that table, for _read(found=): one store request per table (a
+        question has one to three), however many refs."""
+        tables: list[TableInput] = []
+        refs: list[list[str]] = []
+        at: list[int] = []
+        for table, ref in wanted:
+            n = next((n for n, t in enumerate(tables) if t is table), len(tables))
+            if n == len(tables):
+                tables.append(table)
+                refs.append([])
+            refs[n].append(ref)
+            at.append(n)
+        found = [self.cache.by_refs(t, r) if self.cache is not None else _cells(t, r) for t, r in zip(tables, refs)]
+        return [found[n] for n in at]
+
     def _cross(self, *step_ids: str) -> bool:
         """The steps' numbers come from different tables (T1-30); never true for one table."""
         return self.multi and len({self.origin.get(i, frozenset()) for i in step_ids}) > 1
@@ -162,11 +224,22 @@ class _Run:
 
     def select(self, step: SelectStep) -> Cells:
         cells = step.cells
-        if not cells:
-            resolved = resolve_select(self._for(step), step, self.lookup, self.star)
+        if cells:
+            wanted = [(self._of(ref), ref) for ref in cells]
+            found = self._fetched(wanted)
+        else:
+            table = self._for(step)
+            # in a map: the keys of this select at every code of the map are asked for at once
+            cache = self.cache
+            cells_at = None if cache is None else partial(cache.cells_at, table, code=self.star[cache.axis])
+            resolved, known = resolve_select_cells(table, step, self.lookup, self.star, cells_at)
             cells = resolved.cells
             self.cautions += [c for c in resolved.cautions if c not in self.cautions]
-        reads = [_read(self._of(ref), ref) for ref in cells]
+            # the cells resolve found are read as they are; a ref whose tbl_id names another table is read there
+            wanted = [(self._of(ref), ref) for ref in cells]
+            other = iter(self._fetched([(t, ref) for t, ref in wanted if t is not table]))
+            found = [known if t is table else next(other) for t, _ in wanted]
+        reads = [_read(t, ref, f) for (t, ref), f in zip(wanted, found)]
         _check_units(reads)
         return Cells([self.add(_cell_fact(self.ids(), r)).id for r in reads], reads)
 
@@ -348,18 +421,22 @@ class _Run:
             return self._rank_mapped(step)
         word = "가장 높음" if step.pick == "max" else "가장 낮음"
         ranked: list[tuple[float, list[Fact], str]] = []
+        # every candidate and its total (read in the candidate's table) in one request per table, not one per cell
+        fetched = self._fetched([(self._of(ref), ref) for ref in step.candidates]
+                                + [(self._of(ref), total) for ref, total in zip(step.candidates, step.totals)])
         for i, ref in enumerate(step.candidates):
             ids = _Ids()
+            found = fetched[i]
             try:
                 if step.totals:
                     table = self._of(ref)
-                    part, whole = _read(table, ref), _read(table, step.totals[i])
-                    facts, share, score = _share_parts(table, [ref], step.totals[i], ids)
+                    part, whole = _read(table, ref, found), _read(table, step.totals[i], found)
+                    facts, share, score = _share_parts(table, [ref], step.totals[i], ids, found)
                     semantics.check_share_scope(table, [part], whole)
                     semantics.check_share_bound(score, part.cell.item)
                     ranked.append((score, [*facts, share], share.id))
                 else:
-                    read = _read(self._of(ref), ref)
+                    read = _read(self._of(ref), ref, found)
                     ranked.append((_numeric(read), [_cell_fact(ids(), read)], "f1"))
             except CalcRefused as exc:
                 if exc.reason != "missing_value":
@@ -416,18 +493,23 @@ class _Run:
         if axis is None:
             raise CalcRefused("class_mismatch", messages.refusal_message("class_mismatch", what=f"분류 {step.axis}"))
         values: list[Scalar] = []
-        for code in step.codes:
-            if code not in axis.labels:
-                raise CalcRefused("class_mismatch", messages.refusal_message("class_mismatch", what=f"{step.axis} {code}"))
-            self.star = {step.axis: code}
-            for body in step.body:
-                self.origin[body.id] = self.origin_of(body)
-                self.results[body.id] = getattr(self, body.op)(body)
-            values.append(self._scalar(step.result))
-            for body in step.body:
-                del self.results[body.id]
-                self.origin.pop(body.id, None)
-        self.star = {}
+        self.cache = _MapCache(step.axis, list(step.codes))
+        try:  # the cache and '*' are the map's only: a select after the map (or after a refused map) reads the store
+            for code in step.codes:
+                if code not in axis.labels:
+                    raise CalcRefused("class_mismatch",
+                                      messages.refusal_message("class_mismatch", what=f"{step.axis} {code}"))
+                self.star = {step.axis: code}
+                for body in step.body:
+                    self.origin[body.id] = self.origin_of(body)
+                    self.results[body.id] = getattr(self, body.op)(body)
+                values.append(self._scalar(step.result))
+                for body in step.body:
+                    del self.results[body.id]
+                    self.origin.pop(body.id, None)
+        finally:
+            self.cache = None
+            self.star = {}
         return Mapped(step.axis, list(step.codes), [axis.labels[c] for c in step.codes], values)
 
     def find(self, step: FindStep) -> Found:

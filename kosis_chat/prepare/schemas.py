@@ -112,6 +112,26 @@ class Cell:
     unit_source: str = "given"
 
 
+class FileBackedError(TypeError):
+    """Code asked a file-backed table for its cells as a sequence; it must ask store_of(table) instead."""
+
+
+class FileBackedCells:
+    """TableInput.cells of a file-backed table (T1-31 S3): the cells stay in the Parquet file. Any use as a sequence
+    raises FileBackedError, so that no code silently sees an empty table."""
+
+    def _refuse(self, *args) -> None:
+        raise FileBackedError("this table is file-backed: ask store_of(table) (kosis_chat.prepare.store) for its cells")
+
+    __iter__ = __len__ = __bool__ = __getitem__ = __contains__ = __reversed__ = _refuse
+
+    def __repr__(self) -> str:
+        return "<file-backed cells>"
+
+
+FILE_BACKED = FileBackedCells()
+
+
 @dataclass(frozen=True)
 class TableInput:
     meta: TableMeta
@@ -119,6 +139,13 @@ class TableInput:
     # Not a field callers pass or compare: lookups derived from this object (LookupCaches). init=False, so
     # dataclasses.replace gives the new table its own empty caches.
     caches: LookupCaches = field(default_factory=LookupCaches, init=False, repr=False, compare=False)
+    # A table too big to hold (T1-31 S3) keeps its cells in the file: cells is FILE_BACKED and this is its cell store
+    # (a prepare.store.FileTable, made by kosis_chat/adapters/parquet_store.py). None for a table held in memory.
+    store: Any = field(default=None, repr=False, compare=False, kw_only=True)
+
+    @property
+    def file_backed(self) -> bool:
+        return self.store is not None
 
     @property
     def period_range(self) -> tuple[str, str] | None:
@@ -161,6 +188,8 @@ def validate(table: TableInput, *, allow_empty: tuple[str, ...] = ()) -> list[Pr
         problems.append(Problem("meta.input_format", f"must be one of {INPUT_FORMATS}"))
     if not table.meta.file_sha256:
         problems.append(Problem("meta.file_sha256", "required field is missing"))
+    if table.file_backed:  # the file store took the table only after its scan found none of the cell problems below
+        return problems
     if not table.cells:
         problems.append(Problem("cells", "table has no cells"))
     seen: dict[str, int] = {}

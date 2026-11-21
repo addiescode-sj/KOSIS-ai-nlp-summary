@@ -34,7 +34,11 @@ from kosis_chat.render.source import to_source
 from kosis_chat.schemas.resources import StatResources
 from kosis_chat.schemas.state import StatState, called_before
 
+from kosis_ai.schemas import Refusal  # isort: skip
+
 Step = Callable[..., Any]
+# The refusal of a question whose plan failed on a file-backed table (no fallback chatbot there; plan_write_llm_node).
+FAILED_MESSAGE = "이 표를 읽어 이 질문을 계산하는 방법을 정하지 못했습니다."
 
 
 @dataclass(frozen=True)
@@ -106,6 +110,14 @@ def plan_write_llm_node(step: Step, res: StatResources) -> Callable:
         if written.route == "placed":  # computed by code already (D12 a): compute only adds the query and checks
             placed = written.placed
             out |= {"plan": placed.query_plan, "built": placed.built, "computed": placed.computed}
+        if written.route == "failed" and res.table.file_backed:
+            # the fallback chatbot reads every cell of the table, which a file-backed table never holds (T1-31 S3):
+            # the question is refused as the multi-table graph refuses a plan that failed (graph/multi.py). A plan call
+            # that failed (timeout, API error, input too long) is not a refusal: StatPipeline.ask raises RuntimeError
+            problems = written.meta.get("plan_retry_problems") or written.meta.get("plan_problems") or []
+            out |= {"refusal": Refusal(reason="class_mismatch", message=FAILED_MESSAGE, available="; ".join(problems) or None),
+                    "source": to_source(res.table.meta, org_id=res.org_id), "meta": written.meta | {"route": "llm_plan+failed"},
+                    "step_route": "refused"}
         return out
     return plan_write_llm
 

@@ -1,6 +1,7 @@
-"""The cell store (T1-31 S1, kosis_chat/prepare/store.py): MemoryStore answers what a plain loop over table.cells
+"""The cell store (T1-31 S1, S2, kosis_chat/prepare/store.py): MemoryStore answers what a plain loop over table.cells
 answers, with the dict semantics the stages had (last cell wins on a shared key or ref, series in table order within
-one period), and summary() gives what judge.rules.targets() gives, summarized."""
+one period), and summary() gives what judge.rules.targets() gives, summarized. The facts of the whole table that S1
+asked of the store (item codes, first cell, units) are in the table index since S2."""
 
 from __future__ import annotations
 
@@ -14,7 +15,7 @@ from kosis_chat.judge.rules import _symbol, defaults, parse, resolve, target_sum
 from kosis_chat.judge.schemas import Periods, Resolved
 from kosis_chat.prepare.index import build_index, index_of
 from kosis_chat.prepare.schemas import Cell, TableInput, TableMeta
-from kosis_chat.prepare.store import ITEM_AXIS, MemoryStore, RangeSummary, cell_key, dim_key, store_of
+from kosis_chat.prepare.store import ITEM_AXIS, CellStore, MemoryStore, RangeSummary, cell_key, dim_key, store_of
 from kosis_chat.schemas.resources import load_resources
 
 META = TableMeta(tbl_id="FAKE_STORE", tbl_nm="가상 표", survey_nm="가상 조사", org_nm="가상 기관", period_type="Y",
@@ -81,13 +82,45 @@ def test_series_are_sorted_by_period_and_keep_table_order_within_a_period(table)
     assert list(store.series("T9", ())) == []
 
 
-def test_items_first_and_units(table):
+def test_series_at_is_series_of_many_keys(table):
     store = store_of(table)
-    assert store.item_codes() == frozenset(c.item_code for c in table.cells) == {"T1", "T2"}
-    assert store.first() is table.cells[0]
-    assert store.units() == sorted({c.unit for c in table.cells if c.unit}) == ["%", "명"]
-    empty = store_of(replace(table, cells=()))
-    assert empty.first() is None and empty.item_codes() == frozenset() and empty.units() == []
+    keys = [("T1", (("성별", "1"),)), ("T2", ()), ("T9", ()), ("T1", (("성별", "0"),))]
+    assert store.series_at(keys) == {k: store.series(*k) for k in keys if store.series(*k)}
+    assert set(store.series_at(keys)) == {keys[0], keys[1], keys[3]}  # a key with no cell is absent (any order)
+    assert store.series_at([]) == {}
+
+
+def _item_named_before(cells) -> bool:
+    """compute.engine._item_named as S1 asked it of the store (item_codes(), first())."""
+    if len({c.item_code for c in cells}) > 1 or not cells:
+        return True
+    return not any("항목" in name for name in cells[0].dims)
+
+
+def test_index_holds_item_named_and_units(table):
+    index = build_index(table)
+    assert index.units == sorted({c.unit for c in table.cells if c.unit}) == ["%", "명"]
+    assert index.item_named is True  # two items
+    one = replace(table, cells=tuple(c for c in table.cells if c.item_code == "T1"))
+    assert build_index(one).item_named is True  # one item, no '항목' category
+    wrapped = replace(one, cells=tuple(replace(c, dims={"기본항목별": "가상", **c.dims}) for c in one.cells))
+    assert build_index(wrapped).item_named is False  # one item that wraps a '기본항목별' category (DT_1B8000F)
+    later = replace(one, cells=(one.cells[0], *wrapped.cells[1:]))  # only the first cell's categories count
+    assert build_index(later).item_named is True
+    empty = build_index(replace(table, cells=()))
+    assert empty.item_named is True and empty.units == []
+    # A category named exactly '항목' shares the item axis of the index: its codes are not items.
+    named = replace(one, cells=tuple(replace(one.cells[0], dims={ITEM_AXIS: label}, dim_codes={ITEM_AXIS: code},
+                                             source_ref=f"named|{code}")
+                                     for code, label in (("A", "가상 출생"), ("B", "가상 사망"))))
+    assert build_index(named).item_named is False
+    for t in (table, one, wrapped, later, replace(table, cells=()), named):
+        assert build_index(t).item_named is _item_named_before(t.cells)
+
+
+def test_protocol_has_only_the_methods_with_callers():
+    names = {n for n in vars(CellStore) if not n.startswith("_")}
+    assert names == {"cell", "cells_at", "by_ref", "by_refs", "series", "series_at", "summary"}
 
 
 def test_one_store_per_table_object(table):
@@ -125,7 +158,7 @@ def test_summary_is_targets_summarized(table, codes, periods):
         sample=next((c for c in cells if c.value_kind != "blank"), None),
     )
     assert RangeSummary.of(cells) == expected
-    assert target_summary(index, parsed, resolved) == expected
+    assert target_summary(index, parsed, resolved).found == expected
     chosen = [p for p in index.periods if periods.contains(p)]
     assert store_of(table).summary(codes, chosen) == expected
 
@@ -146,6 +179,6 @@ def test_rules_take_the_cells_or_their_summary(pop_path, question):
     parsed = parse(index, question)
     resolved = resolve(index, parsed)
     cells, found = targets(index, parsed, resolved), target_summary(index, parsed, resolved)
-    assert found == RangeSummary.of(cells)
+    assert found.found == RangeSummary.of(cells)
     assert defaults(parsed, index, resolved, cells) == defaults(parsed, index, resolved, found)
     assert _symbol(parsed, index, resolved, cells) == _symbol(parsed, index, resolved, found)

@@ -14,7 +14,7 @@ computed facts only). The answer names every table: StatAnswer.sources (source =
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 from langgraph.graph import END, START, StateGraph
@@ -29,7 +29,8 @@ from kosis_chat.graph import adapters
 from kosis_chat.graph.adapters import StatContext, _ctx
 from kosis_chat.graph.spans import step_span
 from kosis_chat.judge.node import step_judge_multi
-from kosis_chat.prepare.store import MemoryStore
+from kosis_chat.prepare.schemas import Cell
+from kosis_chat.prepare.store import store_of
 from kosis_chat.render.node import step_answer_final, step_render
 from kosis_chat.render.schemas import AnswerFinalIn, RenderIn
 from kosis_chat.render.source import to_source
@@ -101,15 +102,24 @@ def compute_node(res: MultiResources) -> Callable:
     return compute
 
 
-def _cells(res: MultiResources) -> MemoryStore:
-    """Every table's cells as one store, for caveats_of (it looks up a fact's cell by source_ref; on a ref two
-    tables share, the later table's cell wins). In memory: the multi-table path holds every table's cells today."""
-    return MemoryStore(c for r in res.tables for c in r.table.cells)
+class _Cells:
+    """Every table's cells seen as one, for caveats_of, which only looks up the cited cells by source_ref: each table's
+    own store is asked once, and on a ref two tables share the later table's cell wins."""
+
+    def __init__(self, res: MultiResources) -> None:
+        self.stores = [store_of(r.table) for r in res.tables]
+
+    def by_refs(self, refs: Iterable[str]) -> dict[str, Cell]:
+        refs = list(refs)
+        found: dict[str, Cell] = {}
+        for store in self.stores:
+            found.update(store.by_refs(refs))
+        return found
 
 
 def caveats_node(res: MultiResources) -> Callable:
     def caveats(state: StatState) -> dict:
-        found = caveats_of(state.computed, _cells(res), [], [])
+        found = caveats_of(state.computed, _Cells(res), [], [])
         shown = [c.text for c in found]
         return {"caveats_out": found, "shown": shown, "context_ids": []}
     return caveats

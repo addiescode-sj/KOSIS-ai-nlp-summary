@@ -64,7 +64,8 @@ def main(argv: list[str] | None = None) -> int:
         serialization=args.serialization,
     )
     try:
-        table = load_table(resolve_path(args.table))
+        # the legacy chatbot reads table.cells: always the whole-table load (no file-backed table, T1-31 S3)
+        table = load_table(resolve_path(args.table), big_rows=sys.maxsize)
     except SchemaError as exc:
         print("입력 표를 읽을 수 없습니다:", file=sys.stderr)
         for problem in exc.problems:

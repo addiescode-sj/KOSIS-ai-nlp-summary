@@ -57,5 +57,9 @@ def clean_cell(cell: Cell) -> Cell:
 
 
 def clean(table: TableInput) -> TableInput:
-    """Fill derived fields for every cell. B1 adds the PREPROCESSING.md rules here."""
+    """Fill derived fields for every cell. B1 adds the PREPROCESSING.md rules here.
+
+    A file-backed table is returned as it is: its store cleans each cell it reads (clean_cell)."""
+    if table.file_backed:
+        return table
     return replace(table, cells=tuple(clean_cell(c) for c in table.cells))

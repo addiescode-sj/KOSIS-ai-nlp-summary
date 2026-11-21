@@ -9,6 +9,7 @@ T1-28 S3a: moved here from judge/answerability.py (a re-export shim now); judge/
 from __future__ import annotations
 
 import re
+from functools import cached_property
 
 from kosis_chat.judge import texts as messages  # T1-28 S3a: was judge/messages.py
 from kosis_chat.prepare.schemas import Cell, TableInput
@@ -107,15 +108,34 @@ def targets(index: TableIndex, parsed: Parsed, resolved: Resolved) -> list[Cell]
     ]
 
 
-def target_summary(index: TableIndex, parsed: Parsed, resolved: Resolved) -> RangeSummary:
-    """targets() summarized by the cell store, without listing the cells. index.periods holds every period of the
-    table, so asking for those the question contains picks the same cells as parsed.periods.contains per cell."""
-    periods = [p for p in index.periods if parsed.periods.contains(p)]
-    return store_of(index.table).summary(resolved.codes, periods)
+class TargetSummary:
+    """targets() summarized by the cell store, without listing the cells, asked on first use and then kept: a question
+    asks the store at most once, and not at all when no rule needs it (no period named, and defaults() returns before
+    the periods). With no period named the summary spans every period, the costliest request of a file store."""
+
+    def __init__(self, index: TableIndex, parsed: Parsed, resolved: Resolved) -> None:
+        self.index, self.parsed, self.resolved = index, parsed, resolved
+
+    @cached_property
+    def found(self) -> RangeSummary:
+        # index.periods holds every period of the table, so asking for those the question contains picks the same
+        # cells as parsed.periods.contains per cell
+        periods = [p for p in self.index.periods if self.parsed.periods.contains(p)]
+        return store_of(self.index.table).summary(self.resolved.codes, periods)
 
 
-def _summary(cells: list[Cell] | RangeSummary) -> RangeSummary:
-    # The rules and defaults() take the target cells as a list (tests, callers before T1-31) or as their summary.
+def target_summary(index: TableIndex, parsed: Parsed, resolved: Resolved) -> TargetSummary:
+    """The lazy summary of targets() (TargetSummary) that judge() and calc hand to the rules and defaults()."""
+    return TargetSummary(index, parsed, resolved)
+
+
+Targets = list[Cell] | RangeSummary | TargetSummary  # the target cells as the rules and defaults() take them
+
+
+def _summary(cells: Targets) -> RangeSummary:
+    # A list (tests, callers before T1-31), a summary, or the lazy summary (asked of the store here, once).
+    if isinstance(cells, TargetSummary):
+        return cells.found
     return cells if isinstance(cells, RangeSummary) else RangeSummary.of(cells)
 
 
@@ -305,7 +325,7 @@ def _not_aggregatable(p: Parsed, index: TableIndex, resolved: Resolved, **_) -> 
     return None
 
 
-def _no_cell(p: Parsed, index: TableIndex, resolved: Resolved, cells: list[Cell] | RangeSummary, **_) -> Verdict | None:
+def _no_cell(p: Parsed, index: TableIndex, resolved: Resolved, cells: Targets, **_) -> Verdict | None:
     """Labels and periods each exist but not together (세종 before 2012), or '전국' in a table without it."""
     if _COUNTRY_WORD in p.question and not any(m.form == _COUNTRY_WORD for m in p.matches):
         if any(axis.regional for axis in index.axes.values()):
@@ -315,9 +335,11 @@ def _no_cell(p: Parsed, index: TableIndex, resolved: Resolved, cells: list[Cell]
     return None
 
 
-def _symbol(p: Parsed, index: TableIndex, resolved: Resolved, cells: list[Cell] | RangeSummary, **_) -> Verdict | None:
+def _symbol(p: Parsed, index: TableIndex, resolved: Resolved, cells: Targets, **_) -> Verdict | None:
+    if not p.periods.explicit:  # before the summary: without a named period it is not needed
+        return None
     found = _summary(cells)
-    if not p.periods.explicit or not found.count or "ok" in found.kinds:
+    if not found.count or "ok" in found.kinds:
         return None
     if found.kinds == {"blank"}:  # the cell exists but nothing was collected for that period
         return refuse("symbol", "class_mismatch", what=_named_text(index, resolved, p.periods.singles))
@@ -336,7 +358,7 @@ RULES = (
 # ---------------------------------------------------------------- defaults
 
 
-def defaults(p: Parsed, index: TableIndex, resolved: Resolved, cells: list[Cell] | RangeSummary) -> dict[str, str]:
+def defaults(p: Parsed, index: TableIndex, resolved: Resolved, cells: Targets) -> dict[str, str]:
     """What the answer assumes when the question leaves it open: the period, and the scenario of a projection."""
     out: dict[str, str] = {}
     for name, axis in index.axes.items():

@@ -312,7 +312,8 @@ def _total(index: TableIndex, name: str) -> str | None:
 
 
 class _Lookup:
-    """The table's cells by `fixed` (one code per axis, ITEM_AXIS included), read through the cell store."""
+    """The table's cells by `fixed` (one code per axis, ITEM_AXIS included), read through the cell store. The plural
+    methods make one store request for many cells or series (a loop over regions or periods asks once)."""
 
     def __init__(self, table: TableInput) -> None:
         self.store = store_of(table)
@@ -324,8 +325,20 @@ class _Lookup:
     def cell(self, fixed: dict[str, str], period: str) -> Cell | None:
         return self.store.cell((*self.key(fixed), period))
 
+    def cells(self, wanted: list[tuple[dict[str, str], str]]) -> list[Cell | None]:
+        """cell() of many (fixed, period) pairs, in order."""
+        keys = [(*self.key(fixed), period) for fixed, period in wanted]
+        found = self.store.cells_at(keys) if keys else {}  # nothing asked: no request
+        return [found.get(key) for key in keys]
+
     def numeric_periods(self, fixed: dict[str, str]) -> list[str]:
         return [c.period_raw for c in self.store.series(*self.key(fixed)) if c.value_kind == "ok"]
+
+    def numeric_periods_of(self, fixed_sets: list[dict[str, str]]) -> list[list[str]]:
+        """numeric_periods() of many fixed sets, in order."""
+        keys = [self.key(fixed) for fixed in fixed_sets]
+        found = self.store.series_at(keys) if keys else {}  # nothing asked: no request
+        return [[c.period_raw for c in found.get(key, ()) if c.value_kind == "ok"] for key in keys]
 
     def all_periods(self, fixed: dict[str, str]) -> list[str]:
         return [c.period_raw for c in self.store.series(*self.key(fixed))]
@@ -369,8 +382,8 @@ def _one_period(plan: Plan, lookup: _Lookup, fixed_sets: list[dict[str, str]]) -
     if plan.periods:
         return plan.periods[-1]
     shared = None
-    for fixed in fixed_sets:
-        found = set(lookup.numeric_periods(fixed))
+    for periods in lookup.numeric_periods_of(fixed_sets):
+        found = set(periods)
         shared = found if shared is None else shared & found
     return max(shared) if shared else None
 
@@ -379,12 +392,20 @@ def _with(fixed: dict[str, str], name: str, code: str) -> dict[str, str]:
     return {**fixed, name: code}
 
 
-def _ref(lookup: _Lookup, fixed: dict[str, str], period: str, problems: list[str]) -> str:
-    cell = lookup.cell(fixed, period)
+def _ref_of(cell: Cell | None, fixed: dict[str, str], period: str, problems: list[str]) -> str:
     if cell is None:
         problems.append(f"칸 없음 {fixed} {period}")
         return ""
     return cell.source_ref
+
+
+def _ref(lookup: _Lookup, fixed: dict[str, str], period: str, problems: list[str]) -> str:
+    return _ref_of(lookup.cell(fixed, period), fixed, period, problems)
+
+
+def _refs(lookup: _Lookup, wanted: list[tuple[dict[str, str], str]], problems: list[str]) -> list[str]:
+    """_ref() of many (fixed, period) pairs in one store request: the same refs and problems, in the same order."""
+    return [_ref_of(cell, fixed, period, problems) for (fixed, period), cell in zip(wanted, lookup.cells(wanted))]
 
 
 def _note(plan: Plan) -> str | None:
@@ -416,7 +437,7 @@ def build_plan(plan: Plan, index: TableIndex, table: TableInput) -> Built:
             # One asked period ("2023년 얼마나 늘었나"): the recent points that end there.
             numeric = [p for p in lookup.numeric_periods(fixed) if not plan.periods or p <= plan.periods[-1]]
             periods = plan.periods if len(plan.periods) >= 2 else numeric[-RECENT_POINTS:]
-            refs = [r for p in periods if (r := _ref(lookup, fixed, p, []))]
+            refs = [r for r in _refs(lookup, [(fixed, p) for p in periods], []) if r]
             if len(refs) < 2:
                 raise Unresolved([f"추이 시점 부족 {periods}"])
             return build.trend(refs, note)
@@ -425,7 +446,7 @@ def build_plan(plan: Plan, index: TableIndex, table: TableInput) -> Built:
         if problems:
             raise Unresolved(problems)
         newer = [p for p in lookup.all_periods(fixed) if period and p > period] if plan.default_applied.get("period") else []
-        return build.value(ref, [_ref(lookup, fixed, p, []) for p in newer], note)
+        return build.value(ref, _refs(lookup, [(fixed, p) for p in newer], []), note)
     if kind == "compare":
         side = next((n for n, named in plan.codes.items() if len(named) == 2), None)
         if side is None:
@@ -437,7 +458,7 @@ def build_plan(plan: Plan, index: TableIndex, table: TableInput) -> Built:
         if len(plan.periods) >= 2 and all(len(v) <= 1 for n, v in plan.codes.items() if n != side):
             pass  # two places and two years: compare at the later one
         period = _one_period(plan, lookup, pair)
-        refs = [_ref(lookup, f, period or "", problems) for f in pair]
+        refs = _refs(lookup, [(f, period or "") for f in pair], problems)
         if problems:
             raise Unresolved(problems)
         labels = [index.axes[side].labels[c] for c in plan.codes[side]]
@@ -492,7 +513,7 @@ def _share_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | None
         raise Unresolved(problems)
     sets = [_with(fixed, name, c) for c in [*parts, total]]
     period = _one_period(plan, lookup, sets)
-    refs = [_ref(lookup, f, period or "", problems) for f in sets]
+    refs = _refs(lookup, [(f, period or "") for f in sets], problems)
     if problems:
         raise Unresolved(problems)
     return build.share(refs[:-1], refs[-1], note)
@@ -505,8 +526,7 @@ def _period_share(plan: Plan, index: TableIndex, lookup: _Lookup, span: tuple[li
     if problems:
         raise Unresolved(problems)
     months, year = span
-    parts = [_ref(lookup, fixed, m, problems) for m in months]
-    whole = _ref(lookup, fixed, year, problems)
+    *parts, whole = _refs(lookup, [(fixed, m) for m in [*months, year]], problems)
     if problems:
         raise Unresolved(problems)
     return build.share(parts, whole, note)
@@ -542,20 +562,24 @@ def _extreme_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | No
         groups = [(f, period or "") for f in sets]
         total = _total(index, name)
         context_sets = [(_with(fixed, name, total), period or "")] if total else []
+    # every candidate, denominator and context cell in one store request (a denominator is asked even when its
+    # candidate has no cell: it is then not used, as before)
+    with_total = bool(share and item_total)
+    denominator_sets = [(_with(f, ITEM_AXIS, item_total), p) for f, p in groups] if with_total else []
+    found = _refs(lookup, [*groups, *denominator_sets, *context_sets], [])
+    split = len(groups) + len(denominator_sets)
+    refs, denominators, context = found[:len(groups)], found[len(groups):split], [r for r in found[split:] if r]
     candidates, totals = [], []
-    for f, p in groups:
-        ref = _ref(lookup, f, p, [])
+    for n, ref in enumerate(refs):
         if not ref:
             continue
-        if share and item_total:
-            denominator = _ref(lookup, _with(f, ITEM_AXIS, item_total), p, [])
-            if not denominator:
+        if with_total:
+            if not denominators[n]:
                 continue
-            totals.append(denominator)
+            totals.append(denominators[n])
         candidates.append(ref)
     if len(candidates) < 2:
         raise Unresolved(["비교 대상 부족"])
-    context = [r for f, p in context_sets if (r := _ref(lookup, f, p, []))]
     return build.extreme(candidates, plan.pick, totals, context, note)
 
 
@@ -569,7 +593,8 @@ def _two_by_two_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str |
     if problems:
         raise Unresolved(problems)
     early, late = plan.groups[0][0], plan.groups[-1][-1]
-    cells = [[_ref(lookup, _with(fixed, side, c), p, problems) for p in (early, late)] for c in plan.codes[side]]
+    flat = _refs(lookup, [(_with(fixed, side, c), p) for c in plan.codes[side] for p in (early, late)], problems)
+    cells = [flat[n:n + 2] for n in range(0, len(flat), 2)]
     if problems:
         raise Unresolved(problems)
     (x1, x2), (y1, y2) = cells
@@ -592,10 +617,15 @@ def _period_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | Non
         if problems:
             raise Unresolved(problems)
         shares = []
+        # every group's parts and total in one store request, up to the first empty group; the groups are then read
+        # in order as before: the first group with a problem stops it, and an empty group fails at its turn
+        # (IndexError on group[-1], as the group-by-group reads did)
+        empty = next((n for n, group in enumerate(plan.groups) if not group), len(plan.groups))
+        cells = iter(lookup.cells([(_with(fixed, name, c), group[-1]) for group in plan.groups[:empty]
+                                   for c in [*parts, total]]))
         for group in plan.groups:
             period = group[-1]
-            refs = [_ref(lookup, _with(fixed, name, c), period, problems) for c in parts]
-            whole = _ref(lookup, _with(fixed, name, total), period, problems)
+            *refs, whole = [_ref_of(next(cells), _with(fixed, name, c), period, problems) for c in [*parts, total]]
             if problems:
                 raise Unresolved(problems)
             shares.append((refs, whole))
@@ -611,8 +641,9 @@ def _period_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | Non
         n = int(m.group(1)) if (m := RECENT_N.search(plan.question)) else RECENT_POINTS
         groups = [numeric[-n:]]
     cells = []
+    found = iter(lookup.cells([(fixed, p) for group in groups for p in group]))  # every group in one store request
     for n, group in enumerate(groups):
-        refs = [r for p in group if (r := _ref(lookup, fixed, p, []))]
+        refs = [r for p in group if (r := _ref_of(next(found), fixed, p, []))]
         if not refs:
             raise Unresolved([f"기간 {group[0]}~{group[-1]}에 칸 없음"])
         agg = None if plan.pattern == "vsa" and n == 1 else ("sum" if plan.pattern in ("sum", "psum") else "avg")
