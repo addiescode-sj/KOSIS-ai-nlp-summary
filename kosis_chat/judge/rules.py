@@ -41,7 +41,7 @@ from kosis_chat.judge.question import (
 from kosis_ai.schemas import Outcome, Refusal  # isort: skip  (question.py puts src/ on the path)
 from kosis_chat.judge.schemas import Resolved, Verdict  # isort: skip  # re-export: moved in T1-28 S1b
 from kosis_chat.shared import defaults as default_strings  # isort: skip  # T1-28 S2b: the default_applied strings
-from kosis_chat.shared.patterns import UNIT_PAREN  # isort: skip
+from kosis_chat.shared.patterns import ASKS_PERIOD, MOST_RECENT, RANKING, UNIT_PAREN  # isort: skip
 from kosis_chat.shared.periods import period_text  # isort: skip
 
 _UNIT_SUFFIX = UNIT_PAREN  # old name (T1-28 S2b: one trailing '(...)' pattern)
@@ -367,7 +367,10 @@ def defaults(p: Parsed, index: TableIndex, resolved: Resolved, cells: Targets) -
         base = next((label for label in axis.labels.values() if label.startswith(_DEFAULT_SCENARIO)), None)
         if base:
             out[name] = base.split("(")[0].strip()
-    if p.periods.explicit or p.periods.recent_n or _ASKS_PERIOD.search(p.question):
+    # loop 3: also a ranking of periods asked with a period word and any particle ("가장 많았던 해와 가장 적었던 해의
+    # 차이"), as the rules read it (shared/patterns.py ASKS_PERIOD)
+    ranked_period = bool(RANKING.search(MOST_RECENT.sub(" ", p.question)) and ASKS_PERIOD.search(p.question))
+    if p.periods.explicit or p.periods.recent_n or _ASKS_PERIOD.search(p.question) or ranked_period:
         return out
     numeric = list(_summary(cells).numeric_periods)
     if not numeric:

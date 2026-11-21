@@ -90,7 +90,8 @@ CHANGE_WORDS = re.compile(r"늘었|줄었|늘어|줄어|증가(?:했|한|하|세
 # 달라지다, 바뀌다), as they follow "몇 퍼센트".
 CHANGE_VERB = r"(?:늘|줄|증가|감소|올|오르|내리|내려|떨어|변하|변했|변해|변화|달라|바뀌|바뀐)"
 # A rate of change: the nouns (증가율, 감소율, 증감률, 변화율, 변동률) or "몇 퍼센트(나) + a change verb".
-RATE_OF_CHANGE = re.compile(rf"증가율|감소율|증감률|증감율|변화율|변동률|몇\s*(?:퍼센트|%|프로)\s*(?:나|가|정도)?\s*{CHANGE_VERB}")
+# loop 3: also "몇 퍼센트씩 늘었어" (씩: by so much each period).
+RATE_OF_CHANGE = re.compile(rf"증가율|감소율|증감률|증감율|변화율|변동률|성장률|몇\s*(?:퍼센트|%|프로)\s*(?:씩)?\s*(?:나|가|정도)?\s*{CHANGE_VERB}")
 # A change asked at all (an amount unless RATE_OF_CHANGE says a rate): the verb forms above, the noun 증감 and the
 # verbs of a change with no direction (변했다, 변화, 달라졌다, 바뀌었다).
 CHANGE_ASKED = re.compile(CHANGE_WORDS.pattern + r"|증감(?![률율])|변했|변화(?!율)|달라졌|바뀌었|" + RATE_OF_CHANGE.pattern)
@@ -99,7 +100,7 @@ CHANGE_ASKED = re.compile(CHANGE_WORDS.pattern + r"|증감(?![률율])|변했|�
 EACH_PERIOD = re.compile(r"연도별|년도별|해마다|매년|매해|연도마다|년마다|월별|매월|매달|달마다|분기별|분기마다")
 
 # A share of one number in another: 비중, 차지, 구성비, 몇 퍼센트 (not 몇 퍼센트 + a change verb, a rate of change).
-MULTI_SHARE = re.compile(rf"비중|차지|구성비|몇(?:퍼센트|%|프로)(?!(?:나|가|정도)?{CHANGE_VERB})")
+MULTI_SHARE = re.compile(rf"비중|차지|구성비|몇(?:퍼센트|%|프로)(?!(?:씩)?(?:나|가|정도)?{CHANGE_VERB})")
 # One number over another: 몇 배, 배수, 나누다, 비율, and 배 with an ending (배나, 배야, 배인, 배로). One list for one
 # table (compute/answer_facts.py, analyze/rules.py) and several (loop 2: was two lists, MULTI_RATIO and _ASKS_RATIO).
 ASKS_RATIO = re.compile(r"몇배|배수|비율|나누|나눈|나눠|배(?:나|정도|가량|야|인|이|로)")
@@ -128,3 +129,54 @@ def asked_comparison(rest: str) -> tuple[bool, bool]:
 COUNT_STEM_SUFFIX = re.compile(r"(?:건수|아수|자수|수)$")
 # The word that makes an item name the whole of its kind: '총인구수' is asked as '인구수'.
 TOTAL_PREFIX = re.compile(r"^(?:총|전체)")
+
+# ---------------------------------------------------------------- a ranking (loop 3)
+# Read by the one-table rules (analyze/rules.py): which places of a ranking the question asks for, and whether it
+# ranks periods. On the question as written.
+
+# A count as a digit or a native Korean number word (한·두·세 ... 열), and the ordinal stems (첫째, 둘째, ...).
+_COUNT_WORDS = {"하나": 1, "한": 1, "첫": 1, "두": 2, "둘": 2, "세": 3, "셋": 3, "네": 4, "넷": 4, "다섯": 5, "여섯": 6,
+                "일곱": 7, "여덟": 8, "아홉": 9, "열": 10}
+_COUNT = r"(\d+|" + "|".join(sorted(_COUNT_WORDS, key=len, reverse=True)) + r")"
+# One place: "3번째", "세 번째로", "둘째로", "3위", "2등" (not 3위까지 / 3위 안: several; not 1등급).
+RANK_PLACE = re.compile(rf"{_COUNT}\s*번\s*째|{_COUNT}\s*째|(\d+)\s*(?:위|등)(?!\s*(?:까지|안|이내|권|내|부터)|급|분)")
+# The first n places: "상위 3개", "하위 다섯 곳", "위에서 세 번째까지", "1~3위", "1위부터 3위까지", "3위까지", "3위 안",
+# and a count of places after a ranking word ("가장 많은 세 곳", "높은 순으로 5개 시도"). Not "17개 시도 중" (the pool),
+# not "3개월" (a period).
+RANK_TOP = re.compile(
+    rf"(?:상위|하위|위에서|아래에서|밑에서|뒤에서|톱|top|TOP)\s*{_COUNT}"
+    r"|1\s*(?:위|등)?\s*(?:~|-|부터|에서)\s*(\d+)\s*(?:위|등)"
+    rf"|{_COUNT}\s*(?:위|등|번\s*째)\s*(?:까지|안|이내|권|내)"
+    rf"|{_COUNT}\s*(?:개|곳|군데)(?!월|\s*(?:시도|지역|도시|나라|국가|항목)?\s*(?:중|가운데|에서|의))")
+# The periods of a series ranked: 언제, 몇 년, 어느 해, and a period word (해, 연도, 시기, 시점, 달, 분기, 때) that a
+# describing word ends in ("가장 많았던 해", "높은 연도와", "증가한 달은"), whatever particle follows.
+ASKS_PERIOD = re.compile(
+    r"언제|몇\s*년(?!\s*(?:간|동안|째|치))|어느\s*(?:해|연도|년도|달|시기|시점|분기)|연도|(?<!\d)년도|시점은"
+    r"|(?:(?<=[가-힣][던은는운된한든진])|(?<=큰))\s*(?:해|달|때|분기|시기|시점)(?=[은는이가와과랑의를을에도로]|\s|$|[?,.])")
+# A word that makes a question a ranking without 가장 / 최고 ("세 번째로 많은", "2위 지역", "상위 3개", "순위").
+RANK_WORDS = re.compile(r"상위|하위|순위|번\s*째|(?:첫|둘|셋|넷|다섯)\s*째|\d\s*(?:위|등)(?!급|분)")
+
+
+def count_of(word: str) -> int:
+    return int(word) if word.isdigit() else _COUNT_WORDS[word]
+
+
+def rank_places(question: str) -> tuple[str, int] | None:
+    """("places", n) for the first n places of a ranking, ("place", n) for the n-th one alone, None for the first
+    place only (the plain extreme question)."""
+    if m := RANK_TOP.search(question):
+        n = count_of(next(g for g in m.groups() if g))
+        return ("places", n) if n >= 2 else None
+    if m := RANK_PLACE.search(question):
+        n = count_of(next(g for g in m.groups() if g))
+        return ("place", n) if n >= 2 else None
+    return None
+# The largest end of a ranking, beside the smallest one (analyze/roles.py pick_of reads the smallest): "가장 많은 해와
+# 가장 적은 해의 차이", "최댓값과 최솟값".
+EXTREME_MAX = re.compile(r"많|높|최대|최댓|최고|크|큰|1위")
+# A change downward (줄다, 감소, 떨어지다, 하락, 내려가다, 축소): a ranking of such changes puts the most negative first.
+CHANGE_DOWN = re.compile(r"줄었|줄어|줄은|감소|떨어|하락|내려|내렸|축소")
+# Any ranking word (the judge reads it with ASKS_PERIOD: a ranked period is the answer, not a period to assume).
+RANKING = re.compile(r"가장|제일|최고|최저|최대|최소|최댓|최솟|꼴찌|" + RANK_WORDS.pattern)
+# "가장 최근 ~" names a period, not a ranking (was analyze/rules.py MOST_RECENT).
+MOST_RECENT = re.compile(r"(?:가장|제일)\s*최근")

@@ -91,6 +91,7 @@ class Mapped:
     codes: list[str]
     labels: list[str]
     values: list[Scalar]
+    facts: list[list[str]] = field(default_factory=list)  # loop 3: the facts the body made for each code, in order
 
     @property
     def ids(self) -> list[str]:
@@ -447,8 +448,11 @@ class _Run:
             raise CalcRefused("missing_value", messages.refusal_message("missing_value", raw="-", meaning="비교할 값이 부족함"))
         semantics.check_rank_units([next(f.unit for f in group if f.id == scored) for _, group, scored in ranked])
         ranked.sort(key=lambda x: x[0], reverse=step.pick == "max")
+        if step.report == "place" and len(ranked) < step.keep:
+            raise CalcRefused("missing_value", messages.refusal_message("missing_value", raw="-", meaning=f"{step.keep}번째 값이 없음"))
         picked: dict[str, str] = {}
         first: list[str] = []
+        kept: list[list[str]] = []  # loop 3: each kept place's facts, in rank order (report places / place)
         places = ("winner", "runner_up") + tuple(f"place_{n}" for n in range(3, step.keep + 1))
         for place, (_, group, scored) in zip(places, ranked[: step.keep]):
             offset = len(self.facts)
@@ -460,6 +464,7 @@ class _Run:
                 self.add(f.model_copy(update={"id": renamed[f.id], "derivation": expr, "note": note or f.note}))
             self.ids.n = len(self.facts)
             picked[place] = renamed[scored]
+            kept.append(list(renamed.values()))
             if place == "winner":
                 first = list(renamed.values())
         ranking = []
@@ -467,7 +472,7 @@ class _Run:
             cell = next(f for f in group if f.source_ref)
             unit = next(f.unit for f in group if f.id == scored)
             ranking.append({"dims": dict(cell.dims or {}), "period": cell.period, "value": score, "unit": unit})
-        return Ranking(first, picked, ranking)
+        return Ranking(_reported(step, first, kept), picked, ranking)
 
     def _rank_mapped(self, step: RankStep) -> Ranking:
         """Rank a map's values; their facts are already made, the first keep get their place as a note."""
@@ -486,7 +491,12 @@ class _Run:
             picked[place] = fid
         ranking = [{"dims": {src.axis: src.labels[n]}, "period": None, "value": src.values[n].value, "unit": src.values[n].unit}
                    for n in order]
-        return Ranking([picked[p] for p in places[: min(step.keep, len(order))]], picked, ranking)
+        if step.report == "first":
+            return Ranking([picked[p] for p in places[: min(step.keep, len(order))]], picked, ranking)
+        if step.report == "place" and len(order) < step.keep:
+            raise CalcRefused("missing_value", messages.refusal_message("missing_value", raw="-", meaning=f"{step.keep}번째 값이 없음"))
+        kept = [src.facts[n] if n < len(src.facts) else [src.values[n].id] for n in order[: step.keep]]
+        return Ranking(_reported(step, kept[0] if kept else [], kept), picked, ranking)
 
     def map(self, step: MapStep) -> Mapped:
         """Run the body once per code, with the mapped axis's '*' set to that code; keep result per code."""
@@ -495,6 +505,7 @@ class _Run:
         if axis is None:
             raise CalcRefused("class_mismatch", messages.refusal_message("class_mismatch", what=f"분류 {step.axis}"))
         values: list[Scalar] = []
+        made: list[list[str]] = []
         self.cache = _MapCache(step.axis, list(step.codes))
         try:  # the cache and '*' are the map's only: a select after the map (or after a refused map) reads the store
             for code in step.codes:
@@ -502,17 +513,19 @@ class _Run:
                     raise CalcRefused("class_mismatch",
                                       messages.refusal_message("class_mismatch", what=f"{step.axis} {code}"))
                 self.star = {step.axis: code}
+                start = len(self.facts)
                 for body in step.body:
                     self.origin[body.id] = self.origin_of(body)
                     self.results[body.id] = getattr(self, body.op)(body)
                 values.append(self._scalar(step.result))
+                made.append([f.id for f in self.facts[start:]])
                 for body in step.body:
                     del self.results[body.id]
                     self.origin.pop(body.id, None)
         finally:
             self.cache = None
             self.star = {}
-        return Mapped(step.axis, list(step.codes), [axis.labels[c] for c in step.codes], values)
+        return Mapped(step.axis, list(step.codes), [axis.labels[c] for c in step.codes], values, made)
 
     def find(self, step: FindStep) -> Found:
         src = self.results[step.of]
@@ -524,6 +537,15 @@ class _Run:
         if not hits:
             raise CalcRefused("missing_value", messages.refusal_message("missing_value", raw="-", meaning="조건에 맞는 값이 없음"))
         return Found({"first": hits[:1], "last": hits[-1:], "all": hits}[step.which])
+
+
+def _reported(step: RankStep, first: list[str], kept: list[list[str]]) -> list[str]:
+    """The facts a ranking cites (RankStep.report, loop 3): the winner's, every kept place's, or the keep-th place's."""
+    if step.report == "places":
+        return [i for group in kept for i in group]
+    if step.report == "place":
+        return list(kept[step.keep - 1]) if len(kept) >= step.keep else []
+    return first
 
 
 def run_plan(table: TableInput, plan: PlanV3, lookup: EventLookup | None = None,

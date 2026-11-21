@@ -13,7 +13,7 @@ from typing import Literal
 
 from kosis_chat.shared.periods import span_text  # T1-28 S2b: was answer.render (compute must not import the answer)
 
-from kosis_ai.schemas import AggregateStep, CombineStep, PlanV3, QuestionType, RankStep, SelectStep  # isort: skip
+from kosis_ai.schemas import AggregateStep, CombineStep, MapStep, PeriodSpec, PlanV3, QuestionType, RankStep, SelectStep, TargetSpec  # isort: skip
 from kosis_chat.analyze.schemas import Agg, Built, Pattern, TermSteps  # isort: skip  # re-export: moved in T1-28 S1b
 
 AGG_WORDS = {"avg": "평균", "sum": "합계"}
@@ -84,9 +84,56 @@ def share(parts: list[str], total: str, note: str | None = None) -> Built:
 
 
 def extreme(candidates: list[str], pick: Literal["max", "min"], totals: list[str] | None = None,
-            context: list[str] | None = None, note: str | None = None) -> Built:
-    steps = [RankStep(id="k", candidates=candidates, totals=list(totals or []), pick=pick)]
+            context: list[str] | None = None, note: str | None = None,
+            places: tuple[Literal["places", "place"], int] | None = None) -> Built:
+    """The first place of a ranking; places (loop 3) = ("places", n): the first n places, ("place", n): the n-th."""
+    report, keep = places if places else ("first", 2)
+    steps = [RankStep(id="k", candidates=candidates, totals=list(totals or []), pick=pick, keep=keep, report=report)]
     return Built(_plan(steps, ["k"], "extreme", note), "extreme", context=list(context or []))
+
+
+def ranked_change(axis: str, codes: list[str], fixed: dict[str, str], item_axis: str, periods: tuple[str, str],
+                  rate: bool, pick: Literal["max", "min"], places: tuple[Literal["places", "place"], int] | None = None,
+                  note: str | None = None) -> Built:
+    """Candidates ranked by their change between two periods (loop 3): per code of axis, its cells at the earlier
+    and the later period and the later minus the earlier (or the rate of change); the answer cites the picked
+    candidates' two cells and their change."""
+    def select(step_id: str, period: str) -> SelectStep:
+        dims = {name: TargetSpec(codes=[code]) for name, code in fixed.items() if name not in (item_axis, axis)}
+        star = TargetSpec(codes=["*"])
+        if axis == item_axis:
+            item = star
+        else:
+            dims[axis] = star
+            item = TargetSpec(codes=[fixed[item_axis]]) if item_axis in fixed else None
+        return SelectStep(id=step_id, item=item, dims=dims, periods=PeriodSpec(kind="list", periods=[period]))
+
+    early, late = sorted(periods)
+    word = "증감률" if rate else "증감"
+    body = [select("ma", early), select("mb", late),
+            CombineStep(id="md", a="mb", b="ma", fn="pct_change" if rate else "diff", note=f"{early} 대비 {late} {word}")]
+    report, keep = places if places else ("places", 1)
+    steps = [MapStep(id="m", axis=axis, codes=codes, body=body, result="md"),
+             RankStep(id="k", of="m", pick=pick, keep=keep, report=report)]
+    return Built(_plan(steps, ["k"], "extreme", note), "plan")
+
+
+def average_growth(early: str, late: str, years: int, note: str | None = None) -> Built:
+    """The average yearly rate of change from one cell to a later one (loop 3: "연평균 증가율")."""
+    steps = [SelectStep(id="a", cells=[early]), SelectStep(id="b", cells=[late]),
+             CombineStep(id="g", a="b", b="a", fn="cagr", years=years, note=f"{years}년간 연평균 증감률")]
+    return Built(_plan(steps, ["a", "b", "g"], "trend", note), "plan")
+
+
+def extremes_combined(cells: list[str], fn: Literal["diff", "ratio"], note: str | None = None) -> Built:
+    """The largest and the smallest of the candidates, and their difference or ratio (loop 3: "가장 많은 해와 가장
+    적은 해의 차이")."""
+    if len(cells) < 2:
+        raise ValueError(f"extremes need 2+ cells, got {len(cells)}")
+    steps = [SelectStep(id="s", cells=cells), AggregateStep(id="hi", of="s", fn="max"),
+             AggregateStep(id="lo", of="s", fn="min"),
+             CombineStep(id="d", a="hi", b="lo", fn=fn, note="최댓값과 최솟값의 " + ("차이" if fn == "diff" else "배율"))]
+    return Built(_plan(steps, ["hi", "lo", "d"], "compare", note), "plan")
 
 
 # ---------------------------------------------------------------- numbers over periods

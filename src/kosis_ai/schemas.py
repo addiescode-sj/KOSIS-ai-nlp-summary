@@ -357,6 +357,10 @@ class RankStep(_Step):
     of: str | None = None  # a map step
     pick: Literal["max", "min"]
     keep: int = Field(default=2, ge=1)
+    # What the answer cites (loop 3): first = the winner's facts (a map: the first keep values, as before) ·
+    # places = the facts of each of the first keep candidates, in rank order ("상위 3개 시도") · place = the facts of
+    # the keep-th candidate only ("세 번째로 많은 시도"). A map's candidate facts are what its body made for that code.
+    report: Literal["first", "places", "place"] = "first"
 
     @model_validator(mode="after")
     def _totals_match(self) -> RankStep:

@@ -40,11 +40,12 @@ from kosis_ai.schemas import PlanV3, QuestionType, SelectStep, StatQuery  # isor
 from kosis_chat.analyze.schemas import Plan  # isort: skip  # re-export: moved in T1-28 S1b
 from kosis_chat.shared import defaults as default_strings  # isort: skip
 from kosis_chat.shared.patterns import CHANGE_ASKED, PER_UNIT, RATE_OF_CHANGE, RECENT_N, REGION_SUFFIX, asked_comparison, per_scale  # isort: skip
+from kosis_chat.shared.patterns import MOST_RECENT  # isort: skip  # "가장 최근 ~" names a period, not a ranking
+from kosis_chat.shared.patterns import ASKS_GAP, ASKS_PERIOD, ASKS_RATIO, CHANGE_DOWN, EXTREME_MAX, RANK_WORDS, rank_places  # isort: skip
 
 PERIOD_AXIS = "시점"  # Plan.over when an extreme question ranks periods ("가장 낮았던 해")
 RECENT_POINTS = 5
 EXTREME_WORDS = re.compile(r"가장|제일|최고|최저|최대|최소|1위|꼴찌")
-MOST_RECENT = re.compile(r"(?:가장|제일)\s*최근")  # "가장 최근 ~" names a period, not a ranking
 SHARE_WORDS = re.compile(r"비중|차지|구성비")
 # "서울이 전국의 몇 퍼센트": a share when a label the question names comes right before 의 (not "몇 퍼센트 늘었어",
 # not "평균의 몇 %", where 평균 is no label).
@@ -52,7 +53,7 @@ _OF_PERCENT = re.compile(r"의몇(?:퍼센트|%|프로)")
 # "%p" asks for a difference of percentages: of two codes a question word matched, the ones measured in %.
 _PERCENT_POINT = re.compile(r"%\s*p|퍼센트\s*포인트|%\s*포인트")
 COMPARE_WORDS = re.compile(r"비교|차이|몇\s*배|보다|더\s*(?:높|낮|많|적|크|작)")
-ASKS_PERIOD = re.compile(r"해는|해가|연도|년도|언제|시점은")
+# ASKS_PERIOD (loop 3: shared/patterns.py): a period word a describing word ends in, whatever particle follows.
 # A year on a monthly table that also holds the year's value is that value, unless the question asks for the months.
 BY_MONTH = re.compile(r"월별|매월|매달|달마다|월간")
 # The judge's default period (default_applied["period"]) read as period codes: kosis_chat/shared/defaults.py since
@@ -102,8 +103,8 @@ def _percent_only(question: str, index: TableIndex, codes: dict[str, list[str]])
 
 
 def _question_type(question: str, periods: Periods, codes: dict[str, list[str]], matches: list[Match]) -> QuestionType:
-    if EXTREME_WORDS.search(MOST_RECENT.sub(" ", question)):
-        return "extreme"
+    if EXTREME_WORDS.search(MOST_RECENT.sub(" ", question)) or RANK_WORDS.search(question):
+        return "extreme"  # loop 3: a place other than the first ("세 번째로 많은", "2위", "상위 3개") ranks too
     if _asks_share(question, matches):
         return "share"
     if periods.ranges or len(periods.singles) >= 2 or (periods.recent and TREND_WORDS.search(question)):
@@ -264,6 +265,8 @@ def _operation(question: str, rest: str, p: Periods, index: TableIndex, kind: Qu
         if _part_of_year([x for g in groups for x in g]):  # "2025년 중 12월 비중": one share, not two compared
             return None, []
         return ("shr", groups) if len(groups) == 2 and not average and not total else (None, [])
+    if average and kind != "extreme" and _GROWTH_RATE.search(rest):
+        return "cagr", []  # loop 3: the average is of the rate ("연평균 증가율", "해마다 평균 몇 퍼센트씩"), not of the values
     if average and groups:
         if len(groups) >= 2:
             return "pavg", groups[:2]
@@ -507,6 +510,8 @@ def build_plan(plan: Plan, index: TableIndex, table: TableInput) -> Built:
         return _two_by_two_plan(plan, index, lookup, note)
     if plan.pattern == "sum" and not plan.groups:
         return _targets_sum(plan, index, lookup, note)
+    if plan.pattern == "cagr":
+        return _cagr_plan(plan, index, lookup, note)
     if plan.pattern:
         return _period_plan(plan, index, lookup, note)
     if kind == "value" and (len(plan.periods) >= 2 or any(len(v) >= 2 for v in plan.codes.values())):
@@ -617,9 +622,34 @@ def _period_share(plan: Plan, index: TableIndex, lookup: _Lookup, span: tuple[li
     return build.share(parts, whole, note)
 
 
+def _pool(index: TableIndex, name: str) -> list[str]:
+    """The candidates of a ranking over a category: its top-level codes but the total; the provinces of a regional one."""
+    axis = index.axes[name]
+    pool = [c for c, label in axis.labels.items() if axis.parents.get(c) is None and not is_total(label)]
+    if axis.regional and any(is_province(axis.labels[c]) for c in pool):
+        pool = [c for c in pool if is_province(axis.labels[c])]
+    return pool
+
+
+def _two_ends(plan: Plan) -> tuple[str, str] | None:
+    """The earliest and the latest asked period of one kind (years, or months) when two or more were asked."""
+    asked = sorted(plan.periods)
+    if not asked:
+        return None
+    same = [p for p in asked if len(p) == len(asked[-1])]
+    return (same[0], same[-1]) if len(same) >= 2 and same[0] != same[-1] else None
+
+
 def _extreme_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | None) -> Built:
     if plan.over is None or (plan.over != PERIOD_AXIS and plan.over not in index.axes):
         raise Unresolved(["over"])  # the model fill can leave it open too
+    rest = parse(index, plan.question).rest
+    places = rank_places(plan.question)
+    changed = bool(CHANGE_ASKED.search(rest) or _GROWTH_WORDS.search(rest))
+    if changed and plan.over != PERIOD_AXIS and not SHARE_WORDS.search(rest) and (ends := _two_ends(plan)):
+        return _change_rank_plan(plan, index, lookup, ends, rest, places, note)
+    if not changed and EXTREME_MAX.search(rest) and pick_of(rest) == "min" and (ASKS_GAP.search(rest) or ASKS_RATIO.search(rest)):
+        return _extremes_plan(plan, index, lookup, rest, note)
     share = bool(SHARE_WORDS.search(plan.question))
     problems: list[str] = []
     item_total = _total(index, ITEM_AXIS) if share else None
@@ -638,10 +668,7 @@ def _extreme_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | No
         fixed = _fixed(plan.model_copy(update={"codes": {k: v for k, v in codes.items() if k != name}}), index, {name}, problems)
         if problems:
             raise Unresolved(problems)
-        axis = index.axes[name]
-        pool = [c for c, label in axis.labels.items() if axis.parents.get(c) is None and not is_total(label)]
-        if axis.regional and any(is_province(axis.labels[c]) for c in pool):
-            pool = [c for c in pool if is_province(axis.labels[c])]
+        pool = _pool(index, name)
         sets = [_with(fixed, name, c) for c in pool]
         period = _one_period(plan, lookup, sets[:1])
         groups = [(f, period or "") for f in sets]
@@ -665,7 +692,57 @@ def _extreme_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | No
         candidates.append(ref)
     if len(candidates) < 2:
         raise Unresolved(["비교 대상 부족"])
-    return build.extreme(candidates, plan.pick, totals, context, note)
+    return build.extreme(candidates, plan.pick, totals, context, note, places=places)
+
+
+def _change_rank_plan(plan: Plan, index: TableIndex, lookup: _Lookup, ends: tuple[str, str], rest: str,
+                      places, note: str | None) -> Built:
+    """Loop 3: the candidates ranked by their change between the earliest and the latest asked period (the amount,
+    or the rate when a rate of change is asked); a ranking of declines puts the most negative change first."""
+    name = plan.over
+    problems: list[str] = []
+    fixed = _fixed(plan.model_copy(update={"codes": {k: v for k, v in plan.codes.items() if k != name}}), index, {name}, problems)
+    if problems:
+        raise Unresolved(problems)
+    pool = _pool(index, name)
+    found = lookup.cells([(_with(fixed, name, c), p) for c in pool for p in ends])  # both ends of every candidate at once
+    codes = [c for n, c in enumerate(pool)
+             if all(cell is not None and cell.value_kind == "ok" for cell in found[2 * n:2 * n + 2])]
+    if len(codes) < 2:
+        raise Unresolved(["비교 대상 부족"])
+    pick = plan.pick or pick_of(plan.question)
+    if CHANGE_DOWN.search(rest):  # "가장 많이 줄어든": the largest decline is the smallest change
+        pick = "min" if pick == "max" else "max"
+    rate = bool(_GROWTH_RATE.search(rest))
+    return build.ranked_change(name, codes, fixed, ITEM_AXIS, ends, rate, pick, places, note)
+
+
+def _extremes_plan(plan: Plan, index: TableIndex, lookup: _Lookup, rest: str, note: str | None) -> Built:
+    """Loop 3: the largest and the smallest of the candidates (periods of one series, or the codes of a category at
+    one period) and their difference, or their ratio when one is asked."""
+    problems: list[str] = []
+    if plan.over == PERIOD_AXIS:
+        fixed = _fixed(plan, index, set(), problems)
+        if problems:
+            raise Unresolved(problems)
+        periods = plan.periods or lookup.numeric_periods(fixed)
+        if len({len(p) for p in periods}) > 1:  # a year's value beside its months: the kind asked (months by BY_MONTH)
+            want = 6 if BY_MONTH.search(plan.question) else 4
+            periods = [p for p in periods if len(p) == want]
+        wanted = [(fixed, p) for p in periods]
+    else:
+        name = plan.over
+        fixed = _fixed(plan.model_copy(update={"codes": {k: v for k, v in plan.codes.items() if k != name}}), index, {name}, problems)
+        if problems:
+            raise Unresolved(problems)
+        sets = [_with(fixed, name, c) for c in _pool(index, name)]
+        period = _one_period(plan, lookup, sets[:1])
+        wanted = [(f, period or "") for f in sets]
+    cells = [c.source_ref for c in lookup.cells(wanted) if c is not None and c.value_kind == "ok"]
+    if len(cells) < 2:
+        raise Unresolved(["비교 대상 부족"])
+    _, ratio = asked_comparison(rest)
+    return build.extremes_combined(cells, "ratio" if ratio and not ASKS_GAP.search(rest) else "diff", note)
 
 
 def _two_by_two_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | None) -> Built:
@@ -687,6 +764,25 @@ def _two_by_two_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str |
         return build.gap((x1, y1), (x2, y2), note)
     return build.growth((x1, x2), (y1, y2), amount=bool(_AMOUNT.search(plan.question)) and not _GROWTH_RATE.search(plan.question),
                         decline=bool(_DECLINE.search(plan.question)), note=note)
+
+
+def _cagr_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | None) -> Built:
+    """Loop 3: the average yearly rate of change from the first to the last asked year (or the last n years of
+    "최근 n년"), from those two cells only."""
+    problems: list[str] = []
+    fixed = _fixed(plan, index, set(), problems)
+    if problems:
+        raise Unresolved(problems)
+    years = sorted(p for p in plan.periods if len(p) == 4)
+    if not years and (m := RECENT_N.search(plan.question)):
+        years = [p for p in lookup.numeric_periods(fixed) if len(p) == 4][-int(m.group(1)):]
+    if len(years) < 2 or years[0] == years[-1]:
+        raise Unresolved(["연평균 변화율의 처음·끝 연도"])
+    early, late = years[0], years[-1]
+    refs = _refs(lookup, [(fixed, early), (fixed, late)], problems)
+    if problems:
+        raise Unresolved(problems)
+    return build.average_growth(refs[0], refs[1], int(late) - int(early), note)
 
 
 def _targets_sum(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | None) -> Built:

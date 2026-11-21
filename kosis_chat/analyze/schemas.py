@@ -22,8 +22,10 @@ from kosis_ai.schemas import PlanV3, QuestionType  # isort: skip
 # period groups compared (pavg, psum), a period against an average (vsa), two shares compared (shr), the gap between
 # two targets at two periods (gap), and the change of two targets compared (grw); plan: a plan the model wrote
 # (analyze_plan, S5b), whose shape has no name, so its sentence and chart list the numbers it shows.
+# cagr (loop 3, a Plan's pattern only: its blocks are built as "plan"): the average yearly rate of change between the
+# first and the last asked year.
 Pattern = Literal["value", "trend", "compare", "share", "extreme", "avg", "sum", "pavg", "psum", "vsa", "shr", "gap", "grw",
-                  "plan"]
+                  "plan", "cagr"]
 Agg = Literal["avg", "sum"]
 
 
