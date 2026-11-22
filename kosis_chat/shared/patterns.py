@@ -134,6 +134,14 @@ EACH_PERIOD = re.compile(r"연도별|년도별|해마다|매년|매해|연도마
                          + EVERY_N_YEARS.pattern)
 
 
+# Loop 7: a word that asks for the same thing of each target named ("각각", "각자", "저마다", "제각기", "따로", "각 지역"),
+# on the question without its labels. 각 only as a word of its own (not 각종, 시각).
+EACH_TARGET = re.compile(r"각각|각자|저마다|제각기|제각각|따로|(?<![가-힣])각(?=\s)")
+# Loop 7: words that ask which of two targets is more ("어느 쪽", "어디가", "누가", "더 많이", "더 크게", "비교", "차이"),
+# on the question without its labels: the two targets' changes are compared, not only given.
+WHICH_MORE = re.compile(r"어느|어디가|어디의|누가|누구|비교|차이|격차|더\s*(?:많|적|크|작|높|낮|늘|줄|빠르|느리|가파르)")
+
+
 def years_step(question: str) -> int | None:
     """The interval of years a question asks the periods at ("5년마다" -> 5, "격년" -> 2), None for none or 1."""
     m = EVERY_N_YEARS.search(question)

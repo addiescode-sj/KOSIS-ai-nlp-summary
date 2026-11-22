@@ -34,7 +34,9 @@ from kosis_chat.judge.question import (
     is_total,
     parse,
     squash,
+    total_stem,
 )
+from kosis_chat.judge.question import group_parts_of  # isort: skip  # loop 7
 
 from kosis_ai.schemas import PlanV3, QuestionType, SelectStep, StatQuery  # isort: skip
 from kosis_chat.analyze.schemas import Plan  # isort: skip  # re-export: moved in T1-28 S1b
@@ -45,6 +47,7 @@ from kosis_chat.shared.patterns import ASKS_GAP, ASKS_PERIOD, ASKS_RATIO, CHANGE
 from kosis_chat.shared.patterns import EACH_PERIOD, EXCLUDE, years_step  # isort: skip  # loop 4
 from kosis_chat.shared.patterns import DEST_AFTER, DEST_AXIS, ORIGIN_AFTER, ORIGIN_AXIS, REVERSE  # isort: skip  # loop 5
 from kosis_chat.shared.patterns import WITHIN_AFTER  # isort: skip  # loop 6
+from kosis_chat.shared.patterns import EACH_TARGET, PERCENT, WHICH_MORE  # isort: skip  # loop 7
 
 PERIOD_AXIS = "시점"  # Plan.over when an extreme question ranks periods ("가장 낮았던 해")
 RECENT_POINTS = 5
@@ -349,6 +352,8 @@ def rule_plan(question: str, index: TableIndex, default_applied: dict[str, str] 
     _percent_only(question, index, codes)
     default = dict(default_applied or {})
     kind = _question_type(question, parsed.periods, codes, parsed.matches, parsed.rest)
+    if kind not in ("share", "extreme") and _drop_scopes(question, index, codes):
+        kind = _question_type(question, parsed.periods, codes, parsed.matches, parsed.rest)
     pairs: list[dict[str, str]] = []
     pair_reference = None
     if found := _flows(question, index, parsed, kind):  # loop 5: names in a start and an end category
@@ -376,8 +381,11 @@ def rule_plan(question: str, index: TableIndex, default_applied: dict[str, str] 
         plan.type = "value"  # "2024년 상반기 혼인 건수": one number for one named period
     elif plan.pattern and plan.pattern != "shr" and kind not in ("value", "trend"):
         plan.type = "trend"  # an average or sum over periods is a trend question, whatever its wording suggested
-    if plan.pattern is None and (pair := _two_by_two(question, plan)):
+    if plan.pattern is None and (pair := _two_by_two(question, plan, parsed.rest)):
         plan.pattern, plan.groups, plan.type = pair
+        return plan
+    if plan.pattern is None and kind == "trend" and (ratio := _period_ratio(question, parsed.rest, plan)):
+        plan.pattern, plan.groups, plan.type = "pratio", ratio, "compare"
         return plan
     if plan.pattern is None and kind in ("trend", "compare") and _values_only(parsed, kind, codes):
         plan.type = "value"  # "2021년과 2023년 서울과 부산 인구 알려줘": the cells of every named target and period
@@ -525,22 +533,62 @@ def _listing(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | None) -
     return build.written(PlanV3(steps=steps, show=[s.id for s in steps], present="value", note=note))
 
 
-def _two_by_two(question: str, plan: Plan) -> tuple[Pattern, list[list[str]], QuestionType] | None:
-    """(gap or grw, the two periods, "compare") when the question names two targets of one category and two years
-    (or a range: its ends). A monthly table's yearly value stands for the year; without one the rules do not guess."""
+def _two_by_two(question: str, plan: Plan, rest: str | None = None) -> tuple[Pattern, list[list[str]], QuestionType] | None:
+    """(gap, grw or each, the two periods, "compare") when the question names two targets of one category and two
+    years (or a range: its ends). A monthly table's yearly value stands for the year; without one the rules do not
+    guess. Loop 7: a change asked the way one target's change is asked (shared CHANGE_ASKED: a verb, a rate of change,
+    a percent point; read on rest, the question without its labels) is each target's change (each) unless the
+    question asks which of them is more (shared WHICH_MORE); so is a rate named by its noun with a word of each
+    (shared EACH_TARGET: "각각", "저마다")."""
+    rest = question if rest is None else rest
     pairs = [n for n, named in plan.codes.items() if len(named) == 2]
     years = sorted({p[:4] for p in plan.periods})
     if len(pairs) != 1 or len(years) < 2 or any(len(v) > 2 for v in plan.codes.values()):
         return None
     if _GROWTH_WORDS.search(question):
-        pattern: Pattern = "grw"
+        pattern: Pattern = "each" if EACH_TARGET.search(rest) and not WHICH_MORE.search(rest) else "grw"
     elif _GAP_WORDS.search(question) and _GAP_CHANGE.search(question):
         pattern = "gap"
+    elif CHANGE_ASKED.search(rest) or _PERCENT_POINT.search(rest):
+        pattern = "grw" if WHICH_MORE.search(rest) else "each"
     else:
         return None
     if years[0] not in plan.periods or years[-1] not in plan.periods:
         return None
     return pattern, [[years[0]], [years[-1]]], "compare"
+
+
+def _period_ratio(question: str, rest: str, plan: Plan) -> list[list[str]] | None:
+    """Loop 7: [[subject period], [reference period]] when the question asks how many times one period's value of
+    one series is another's (shared asked_comparison: a ratio, no difference named): two periods of one kind, no
+    category with two codes. The reference is the period named right before a comparing word ("2013년의 몇 배",
+    "2015년 대비", "2014년에 비해", "2023년보다": roles.reference_index, as two targets' reference is read), else the
+    earlier one (an implied period: "전년 대비 몇 배")."""
+    periods = list(plan.periods)
+    if len(periods) != 2 or len({len(p) for p in periods}) != 1 or any(len(v) >= 2 for v in plan.codes.values()):
+        return None
+    diff, ratio = asked_comparison(rest)
+    # 비율 alone names a measure ("고령인구 비율 변화"), not how many times one period is the other
+    if not ratio or diff or all(m.group(0) == "비율" for m in ASKS_RATIO.finditer(rest)):
+        return None
+    names = [f"{p[:4]}년" + (f" {int(p[4:])}월" if len(p) == 6 else "") for p in periods]
+    ref = reference_index(question, names)
+    if ref is None:
+        ref = periods.index(min(periods))
+    return [[periods[1 - ref]], [periods[ref]]]
+
+
+def _period_ratio_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | None) -> Built:
+    """Loop 7: one series at the subject period over the reference period (plan.groups); the answer keeps the ratio."""
+    problems: list[str] = []
+    fixed = _fixed(plan, index, set(), problems)
+    if problems:
+        raise Unresolved(problems)
+    (subject,), (reference,) = plan.groups
+    refs = _refs(lookup, [(fixed, subject), (fixed, reference)], problems)
+    if problems:
+        raise Unresolved(problems)
+    return build.compare(refs, reference=1, note=note)
 
 
 def _spaced_end(question: str, squashed_end: int) -> int:
@@ -582,6 +630,37 @@ def _within(question: str, index: TableIndex, name: str) -> list[str]:
                 break
             at = q.find(m.form, at + 1)
     return [c for _, c in sorted(found)]
+
+
+def _holds(index: TableIndex, name: str, whole: str, code: str) -> bool:
+    """Loop 7: the code `whole` of a category is a group that holds `code`: the category's total (a total name with no
+    parent), an ancestor of it, or the group its name is made of (judge group_parts: '귀농인-계' holds '귀농인-여자')."""
+    axis = index.axes[name]
+    if whole == code:
+        return False
+    if whole in axis.ancestors(code) or (whole == _total(index, name) and axis.parents.get(whole) is None):
+        return True
+    stem = total_stem(axis.labels[whole])
+    group = squash(stem) if stem else squash(axis.labels[whole])
+    pair = group_parts_of(index).get(name, {}).get(code)
+    return pair is not None and pair[0] == group
+
+
+def _drop_scopes(question: str, index: TableIndex, codes: dict[str, list[str]]) -> bool:
+    """Loop 7: a code named right before a word of looking inside a group (shared WITHIN_AFTER: "가구원 중 청년",
+    "전국 가운데 대구") that holds every other code named of its category (_holds) is where the question looks, not a
+    target: it is left out (a value, a trend or a comparison of the others). Not called for a share (the group is the
+    whole) or a ranking (the group is the pool). True when a code was left out."""
+    dropped = False
+    for name, named in codes.items():
+        if len(named) < 2:
+            continue
+        scopes = [w for w in _within(question, index, name) if w in named]
+        inner = [c for c in named if c not in scopes]
+        if inner and scopes and all(_holds(index, name, w, c) for w in scopes for c in inner):
+            codes[name] = inner
+            dropped = True
+    return dropped
 
 
 def _children(index: TableIndex, name: str, code: str) -> list[str]:
@@ -731,8 +810,10 @@ def build_plan(plan: Plan, index: TableIndex, table: TableInput) -> Built:
     problems: list[str] = []
     note = _note(plan)
     kind = plan.type
-    if plan.pattern in ("gap", "grw"):
+    if plan.pattern in ("gap", "grw", "each"):
         return _two_by_two_plan(plan, index, lookup, note)
+    if plan.pattern == "pratio":
+        return _period_ratio_plan(plan, index, lookup, note)
     if plan.pattern == "sum" and not plan.groups:
         return _targets_sum(plan, index, lookup, note)
     if plan.pattern in ("cagr", "apc"):
@@ -1040,15 +1121,30 @@ def _two_by_two_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str |
     if problems:
         raise Unresolved(problems)
     early, late = plan.groups[0][0], plan.groups[-1][-1]
-    flat = _refs(lookup, [(_with(fixed, side, c), p) for c in plan.codes[side] for p in (early, late)], problems)
+    wanted = [(_with(fixed, side, c), p) for c in plan.codes[side] for p in (early, late)]
+    found = lookup.cells(wanted)
+    flat = [_ref_of(cell, f, p, problems) for (f, p), cell in zip(wanted, found)]
     cells = [flat[n:n + 2] for n in range(0, len(flat), 2)]
     if problems:
         raise Unresolved(problems)
+    if plan.pattern == "each":
+        return build.changes_each([tuple(c) for c in cells], _rate_asked(plan, index, found), note)
     (x1, x2), (y1, y2) = cells
     if plan.pattern == "gap":
         return build.gap((x1, y1), (x2, y2), note)
     return build.growth((x1, x2), (y1, y2), amount=bool(_AMOUNT.search(plan.question)) and not _GROWTH_RATE.search(plan.question),
                         decline=bool(_DECLINE.search(plan.question)), note=note)
+
+
+def _rate_asked(plan: Plan, index: TableIndex, cells: list[Cell | None]) -> bool:
+    """Loop 7: whether a change is asked as a rate (as compute/answer_facts.py reads one target's change): a rate of
+    change named, or a percent asked of cells that are not in % (a percent of % cells is a change in points unless
+    the rate is named by its noun, 증가율 or 변화율)."""
+    rest = parse(index, plan.question).rest
+    named_rate = any(w in m.group(0) for m in RATE_OF_CHANGE.finditer(rest) for w in ("률", "율"))
+    if any(c is not None and (c.unit or "").strip() in ("%", "퍼센트") for c in cells):
+        return named_rate
+    return bool(RATE_OF_CHANGE.search(rest) or PERCENT.search(rest))
 
 
 def _cagr_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | None, amount: bool = False) -> Built:

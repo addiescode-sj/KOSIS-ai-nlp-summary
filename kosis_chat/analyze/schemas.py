@@ -25,7 +25,9 @@ from kosis_ai.schemas import PlanV3, QuestionType  # isort: skip
 # cagr (loop 3, a Plan's pattern only: its blocks are built as "plan"): the average yearly rate of change between the
 # first and the last asked year.
 Pattern = Literal["value", "trend", "compare", "share", "extreme", "avg", "sum", "pavg", "psum", "vsa", "shr", "gap", "grw",
-                  "plan", "cagr", "excl", "apc"]
+                  "plan", "cagr", "excl", "apc", "pratio", "each"]
+# loop 7 (Plan patterns, built as "compare" / "plan"): pratio, one period over another of one series ("2013년의 몇
+# 배"); each, each of two targets' change between two periods ("서울과 부산은 각각 얼마나 줄었어").
 Agg = Literal["avg", "sum"]
 
 

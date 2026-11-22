@@ -251,6 +251,20 @@ def growth(first: tuple[str, str], second: tuple[str, str], amount: bool = False
     return Built(_plan(steps, ["a1", "b1", "a2", "b2", "v1", "v2", "d"], "compare", note), "grw")
 
 
+def changes_each(pairs: list[tuple[str, str]], rate: bool, note: str | None = None) -> Built:
+    """Loop 7: each target's change between two periods (its rate of change when rate), and nothing that compares
+    the changes ("서울과 부산은 각각 얼마나 줄었어"). pairs: each target's (earlier, later) cells, in question order."""
+    fn, word = ("pct_change", "증감률") if rate else ("diff", "증감")
+    steps: list = []
+    show: list[str] = []
+    for n, pair in enumerate(pairs, start=1):
+        early, late = by_period(list(pair))
+        steps += [SelectStep(id=f"a{n}", cells=[early]), SelectStep(id=f"b{n}", cells=[late]),
+                  CombineStep(id=f"v{n}", a=f"b{n}", b=f"a{n}", fn=fn, note=word)]
+        show += [f"a{n}", f"b{n}", f"v{n}"]
+    return Built(_plan(steps, show, "trend", note), "plan")
+
+
 # ---------------------------------------------------------------- a plan the model wrote (S5b)
 
 

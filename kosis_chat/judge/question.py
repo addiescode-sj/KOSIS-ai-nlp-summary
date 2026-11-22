@@ -322,11 +322,67 @@ def _outside_names(form: str, q: str, spans: list[tuple[int, int]]) -> bool:
     return False
 
 
+_JOIN_MARK = "-_·"  # a mark that joins a group's name and an attribute ('귀농인-여자', '가구주_남자')
+_HANGUL = re.compile(r"[가-힣]+")
+
+
+def _core(label: str) -> str:
+    text = label.strip().lstrip("-").strip()
+    m = _UNIT_PAREN.search(text)
+    return squash(text[: m.start()] if m and _known_unit(m.group(1).strip()) else text)
+
+
+def group_parts(axis: Axis, elsewhere) -> dict[str, tuple[str, str]]:
+    """Loop 7: code -> (group, attribute) for the names of a category made of the name of a group of the same category
+    and an attribute, joined by a mark or written together: '귀농인-여자' and '귀농인여자' beside '귀농인' or '귀농인-계'
+    (the group: another name of the category, or the stem of its total name, two characters or more). The attribute
+    is a word of two Hangul characters or more that no other category of the table names (elsewhere: their exact
+    forms; there that category holds the attribute). A total name and a name with no such group have none, and so has
+    a regional category ('서울특별시' is no group '서울' with an attribute)."""
+    if axis.regional:
+        return {}
+    cores = {code: _core(label) for code, label in axis.labels.items()}
+    groups = {c for c in cores.values() if len(c) >= 2}
+    groups |= {squash(s) for label in axis.labels.values() if (s := total_stem(label)) and len(squash(s)) >= 2}
+    out: dict[str, tuple[str, str]] = {}
+    for code, core in cores.items():
+        if is_total(axis.labels[code]):
+            continue
+        group = next((core[:k] for k in range(len(core) - 1, 1, -1) if core[:k] in groups), None)  # the longest
+        if group is None:
+            continue
+        attr = core[len(group):].lstrip(_JOIN_MARK)
+        if len(attr) >= 2 and _HANGUL.fullmatch(attr):
+            out[code] = (group, attr)
+    if out:
+        out = {code: pair for code, pair in out.items() if pair[1] not in elsewhere()}
+    return out
+
+
+def group_parts_of(index: TableIndex) -> dict[str, dict[str, tuple[str, str]]]:
+    """group_parts of every category of the table, once per table (TableInput.caches)."""
+    def build() -> dict[str, dict[str, tuple[str, str]]]:
+        exact_of: dict[str, set[str]] = {}
+
+        def forms(name: str) -> set[str]:
+            if name not in exact_of:
+                exact_of[name] = set().union(*(label_forms(label)[0] for label in index.axes[name].labels.values()))
+            return exact_of[name]
+
+        return {name: group_parts(axis, lambda name=name: set().union(*(forms(n) for n in index.axes if n != name)))
+                for name, axis in index.axes.items()}
+
+    caches = getattr(index.table, "caches", None)
+    return build() if caches is None else caches.get("judge.group_parts", build)
+
+
 def match_labels(index: TableIndex, question: str) -> list[Match]:
     q = squash(question)
     spans = name_spans(index, question)
     found: list[Match] = []
+    splits = group_parts_of(index)
     for axis in index.axes.values():
+        split = splits.get(axis.name, {})
         for code, label in axis.labels.items():
             lower = axis.parents.get(code) is not None
             exact, partial, tokens = label_forms(label, regional_total=axis.regional and axis.parents.get(code) is None)
@@ -345,18 +401,29 @@ def match_labels(index: TableIndex, question: str) -> list[Match]:
             hit = hit or next((f for f in partial if seen(f)), None)
             if hit:
                 found.append(Match(axis.name, code, label, hit, False))
+                continue
+            # loop 7: a group and an attribute said apart ("귀농인 중 여자", "귀농인 여성"); an attribute is also said
+            # by its other names (LABEL_ALIASES)
+            if code in split:
+                group, attr = split[code]
+                said = next((f for f in (attr, *(squash(a) for a in LABEL_ALIASES.get(attr, ()))) if seen(f)), None)
+                if seen(group) and said:
+                    found.append(Match(axis.name, code, label, group + attr, False, parts=(group, said)))
     return _dedupe(found, q)
 
 
-def _inside_longer(form: str, longer: list[str], q: str) -> bool:
+def _inside_longer(form: str, longer: list[str] | list[Match], q: str) -> bool:
     """Every place q says form is inside a place it says one of the longer forms ('수도권' in '비수도권'). Loop 6: a
-    form said once on its own too ('수도권과 비수도권') is its own label."""
+    form said once on its own too ('수도권과 비수도권') is its own label. Loop 7: a longer label matched by its parts
+    said apart (Match.parts: '귀농인' and '여자' of '귀농인-여자') covers the places of its parts."""
     covered = set()
     for o in longer:
-        at = q.find(o)
-        while at >= 0:
-            covered.update(range(at, at + len(o)))
-            at = q.find(o, at + 1)
+        texts = (o,) if isinstance(o, str) else (o.form,) if o.form in q or not o.parts else o.parts
+        for text in texts:
+            at = q.find(text)
+            while at >= 0:
+                covered.update(range(at, at + len(text)))
+                at = q.find(text, at + 1)
     at = q.find(form)
     while at >= 0:
         if not set(range(at, at + len(form))) <= covered:
@@ -375,8 +442,8 @@ def _dedupe(found: list[Match], q: str | None = None) -> list[Match]:
         whole = [m for m in group if squash(m.label) == m.form]
         kept += whole if whole and len(whole) < len(group) else group
     # A form inside a longer matched form is not its own label: '0세' in '20세', '합계' in '합계출산율'.
-    def longer(m: Match) -> list[str]:
-        return [o.form for o in kept if m.form != o.form and m.form in o.form]
+    def longer(m: Match) -> list[Match]:
+        return [o for o in kept if m.form != o.form and m.form in o.form]
 
     if q is None:
         return [m for m in kept if not longer(m)]
@@ -389,9 +456,10 @@ def _dedupe(found: list[Match], q: str | None = None) -> list[Match]:
 def parse(index: TableIndex, question: str) -> Parsed:
     matches = match_labels(index, question)
     rest = squash(question)
-    for form in sorted({m.form for m in matches}, key=len, reverse=True):
+    # loop 7: a label matched by its parts said apart leaves those parts out of rest
+    forms = {f for m in matches for f in ((m.form,) if m.form in rest or not m.parts else m.parts)}
+    for form in sorted(forms, key=len, reverse=True):
         rest = rest.replace(form, " ")
-    forms = {m.form for m in matches}
     words = tuple(
         _PARTICLE.sub("", w) for w in re.findall(r"[가-힣]{2,}", question) if not any(f in w for f in forms)
     )

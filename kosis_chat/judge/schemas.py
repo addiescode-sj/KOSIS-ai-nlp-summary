@@ -66,6 +66,9 @@ class Match(BoundaryModel):
     label: str
     form: str  # the squashed text found in the question
     exact: bool  # the whole label (minus a unit suffix) is in the question
+    # loop 7: the squashed texts the question says apart when the label was matched by its parts (a group and an
+    # attribute: '귀농인' and '여자' for '귀농인-여자'); empty when the form itself is in the question
+    parts: tuple[str, ...] = ()
 
 
 class Parsed(BoundaryModel):
