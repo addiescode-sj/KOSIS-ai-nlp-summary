@@ -150,6 +150,11 @@ ASKS_RATIO = re.compile(r"몇배|배수|비율|나누|나눈|나눠|배(?:나|�
 MULTI_RATIO = ASKS_RATIO
 # What follows the name of the whole (the denominator): "A 중", "A 가운데", "A 대비", "A에서", "A의 몇 배".
 MULTI_WHOLE_AFTER = re.compile(r"^(?:은|는|이|가)?(?:중|가운데|대비|에서|에비해|의몇|기준)")
+# Loop 6: what follows the name of a group a question looks inside (on the question as written, right after the
+# name): "A 중", "A 중에서", "A 가운데", "A 안에서", "A 내에서", "A에 속한", "A에 해당하는". 중 and 가운데 only as words of
+# their own (not 중구, 중학교). The group is a share's whole and a ranking's pool (its members are the candidates).
+WITHIN_AFTER = re.compile(r"^\s*(?:은|는|이|가)?\s*(?:(?:중|가운데)(?:에서|에|의)?(?![가-힣])|(?:안|내)(?:에서|의)(?![가-힣])"
+                          r"|에\s*(?:속한|속하는|속해|해당하는|해당한|해당되는))")
 # A difference of two numbers, and the words that ask how much fewer (the reference minus the subject). The
 # one-syllable comparatives are kept out of the words they also start (loop 1 learnings): 적어 줘 (write it down),
 # 작년 (last year), 크기 (size). One list for one table (ASKS_DIFF) and several (MULTI_DIFF).

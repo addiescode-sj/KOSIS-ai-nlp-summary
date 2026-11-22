@@ -54,6 +54,7 @@ from kosis_chat.judge.question import (
 from kosis_chat.schemas.resources import MultiResources, StatResources
 from kosis_chat.shared.boundary import BoundaryModel
 from kosis_chat.shared.patterns import (
+    ASKS_AMOUNT,
     CHANGE_ASKED,
     COUNT_STEM_SUFFIX,
     EACH_PERIOD,
@@ -405,10 +406,58 @@ def _repeated(op: Op, order: list[_Side], fixed: dict, asked: dict, scale: float
     return build.written(PlanV3(steps=steps, show=show, present=present))
 
 
+def _split_periods(sides: list[_Side]) -> dict[int, list[str]] | None:
+    """Loop 6: the asked periods of one metric kept in one table per period (a survey's tables of two survey years):
+    each table's own asked periods, when every table lacks a period the question names that another table holds, no
+    period is in two tables, and the tables hold the same metric (the same item name and the same units). None
+    otherwise (the periods stay as each table reads them: a period a table lacks is left open)."""
+    if len(sides) < 2 or not all(s.plan.missing_years and s.plan.periods for s in sides):
+        return None
+    held = [{p[:4] for p in s.plan.periods} for s in sides]
+    if any(a & b for n, a in enumerate(held) for b in held[n + 1:]):
+        return None
+    for n, side in enumerate(sides):
+        others = set().union(*(h for k, h in enumerate(held) if k != n))
+        if not set(side.plan.missing_years) <= others:
+            return None
+    if any(s.item is None for s in sides) or len({tuple(s.index.units) for s in sides}) != 1:
+        return None
+    forms = [label_forms(s.index.axes[ITEM_AXIS].labels[s.item])[0] for s in sides]
+    if not set.intersection(*forms):  # the item names share no form: two metrics
+        return None
+    return {id(s): list(s.plan.periods) for s in sides}
+
+
+def _split_plan(question: str, sides: list[_Side], fixed: dict, asked: dict) -> Built:
+    """Loop 6: one metric whose periods sit in different tables (_split_periods): the cells in period order, or, when
+    a change is asked (a change or comparing word, the one-table words), the latest cell against the earliest one: its
+    rate of change when a rate is asked (RATE_OF_CHANGE), its amount when an amount is asked or no rate is."""
+    if any(len(fixed[id(s)]) != 1 or len(asked[id(s)]) != 1 for s in sides):
+        raise _Open("표마다 나눈 시점의 대상·시점이 여럿")
+    order = sorted(sides, key=lambda s: asked[id(s)][0])
+    refs = [_cells(s, fixed[id(s)], asked[id(s)])[0] for s in order]
+    steps: list = [SelectStep(id=f"t{n}", cells=[r], table=s.tbl_id) for n, (s, r) in enumerate(zip(order, refs))]
+    show = [f"t{n}" for n in range(len(order))]
+    q = _masked(question, sides)
+    if not (CHANGE_ASKED.search(q) or MULTI_DIFF.search(q)):
+        return build.written(PlanV3(steps=steps, show=show, present="value"))
+    early, late = show[0], show[-1]
+    rate = bool(RATE_OF_CHANGE.search(q))
+    if not rate or ASKS_AMOUNT.search(q):
+        steps.append(CombineStep(id="d", a=late, b=early, fn="diff", note="증감"))
+        show.append("d")
+    if rate:
+        steps.append(CombineStep(id="g", a=late, b=early, fn="pct_change", note="증감률"))
+        show.append("g")
+    return build.written(PlanV3(steps=steps, show=show, present="trend"))
+
+
 def _plan(question: str, res: MultiResources) -> Built:
     sides = [_Side(r, question) for r in res.tables]
     _assign_items(sides)
     fixed = {id(s): _fixed_sets(s) for s in sides}
+    if (split := _split_periods(sides)) is not None:
+        return _split_plan(question, sides, fixed, split)
     asked = {id(s): _asked_periods(s) for s in sides}
     if any(asked.values()) and not all(asked.values()):
         raise _Open("질문한 시점이 없는 표")

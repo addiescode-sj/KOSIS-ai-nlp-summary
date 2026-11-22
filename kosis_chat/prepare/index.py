@@ -36,9 +36,22 @@ TOTAL_LABELS = ("합계", "계", "총계", "전체")
 _INDEX_CACHE = "prepare.index"  # LookupCaches name of the index
 
 
+# Loop 6: a total word joined to the stem of a name by a mark (an underscore, a hyphen or a space): '일반가구_계',
+# '임금근로자-계', '남자 합계', '농가-전체'. Group 1 is the stem (the group the total is of). Was '_계' and ' 계' only.
+TOTAL_MARK = re.compile(r"^(.*[^\s_\-])\s*(?:[_\-]|\s)\s*(?:"
+                        + "|".join(sorted((*TOTAL_LABELS, "소계"), key=len, reverse=True)) + r")$")
+
+
+def total_stem(label: str) -> str | None:
+    """The stem of a name made of a stem and a total mark ('임금근로자-계' -> '임금근로자'), None for any other name."""
+    core = _UNIT_PAREN.sub("", label).strip().lstrip("-").strip()
+    m = TOTAL_MARK.match(core)
+    return m.group(1).strip() if m else None
+
+
 def is_total(label: str) -> bool:
     core = _UNIT_PAREN.sub("", label).strip()
-    return core in TOTAL_LABELS or core == "전국" or core.endswith(("_계", " 계"))
+    return core in TOTAL_LABELS or core == "전국" or core.endswith(("_계", " 계")) or total_stem(label) is not None
 
 
 @dataclass
@@ -75,6 +88,45 @@ def _link_parents(axis: Axis) -> None:
     codes = set(axis.labels)
     for code in axis.labels:
         axis.parents[code] = next((code[:k] for k in range(len(code) - 1, 0, -1) if code[:k] in codes), None)
+    _link_sections(axis)
+
+
+def _link_sections(axis: Axis) -> None:
+    """Loop 6: the parents of a category whose codes do not nest by prefix but whose names do, in table order: the
+    whole first ('취업자-계', or '계'), then subtotals that each carry a total mark ('임금근로자-계') and are followed by
+    their details ('상용근로자', '임시근로자'), up to the next subtotal. A subtotal's parent is the whole; a detail's
+    is the subtotal before it (the whole when it comes before every subtotal). Nothing is linked when a code already
+    has a prefix parent, when the first name is not a total, when the whole is a marked name not followed right away
+    by a subtotal (that is a list of subtotals: '남자_계', '남자_20대', '여자_계'), or when a subtotal has no detail.
+    A code that has a prefix parent keeps it (and counts as a detail of its subtotal: 'B' -> 'B1'); only the codes of
+    the top level are linked so."""
+    codes = list(axis.labels)
+    top = [c for c in codes if axis.parents.get(c) is None]
+    if len(codes) < 3 or not top or top[0] != codes[0]:
+        return
+    marked = {c for c in top if is_total(axis.labels[c])}
+    whole = codes[0]
+    if len(marked) < 2 or whole not in marked:
+        return
+    if total_stem(axis.labels[whole]) is not None and top[1] not in marked:
+        return
+    parents: dict[str, str] = {}
+    current, details = None, 0
+    for code in codes[1:]:
+        if axis.parents.get(code) is not None:  # a prefix child: its parent stays
+            details += current is not None and axis.parents[code] == current
+            continue
+        if code in marked:
+            if current is not None and not details:
+                return
+            current, details = code, 0
+            parents[code] = whole
+        else:
+            parents[code] = current or whole
+            details += current is not None
+    if current is None or not details:
+        return
+    axis.parents.update(parents)
 
 
 # ponytail: S2 keeps this cache: a pure function of its value arguments (not of a table object), bounded, and

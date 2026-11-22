@@ -44,6 +44,7 @@ from kosis_chat.shared.patterns import MOST_RECENT  # isort: skip  # "가장 최
 from kosis_chat.shared.patterns import ASKS_GAP, ASKS_PERIOD, ASKS_RATIO, CHANGE_DOWN, EXTREME_MAX, RANK_WORDS, rank_places  # isort: skip
 from kosis_chat.shared.patterns import EACH_PERIOD, EXCLUDE, years_step  # isort: skip  # loop 4
 from kosis_chat.shared.patterns import DEST_AFTER, DEST_AXIS, ORIGIN_AFTER, ORIGIN_AXIS, REVERSE  # isort: skip  # loop 5
+from kosis_chat.shared.patterns import WITHIN_AFTER  # isort: skip  # loop 6
 
 PERIOD_AXIS = "시점"  # Plan.over when an extreme question ranks periods ("가장 낮았던 해")
 RECENT_POINTS = 5
@@ -382,7 +383,8 @@ def rule_plan(question: str, index: TableIndex, default_applied: dict[str, str] 
         plan.type = "value"  # "2021년과 2023년 서울과 부산 인구 알려줘": the cells of every named target and period
     if kind == "extreme":
         plan.pick = pick_of(question)
-        plan.over = PERIOD_AXIS if ASKS_PERIOD.search(question) else _ranked_axis(index, codes)
+        plan.over = PERIOD_AXIS if ASKS_PERIOD.search(question) else (_scope(question, index, codes)
+                                                                      or _ranked_axis(index, codes))
         if plan.over is None and len(plan.periods) >= 2:  # loop 4: nothing open but the asked periods: they are ranked
             plan.over = PERIOD_AXIS
         if plan.over is None:
@@ -541,6 +543,62 @@ def _two_by_two(question: str, plan: Plan) -> tuple[Pattern, list[list[str]], Qu
     return pattern, [[years[0]], [years[-1]]], "compare"
 
 
+def _spaced_end(question: str, squashed_end: int) -> int:
+    """The position in the question as written right after its first squashed_end characters that are not spaces."""
+    seen = 0
+    for at, ch in enumerate(question):
+        if seen == squashed_end:
+            return at
+        seen += not ch.isspace()
+    return len(question)
+
+
+def _within(question: str, index: TableIndex, name: str) -> list[str]:
+    """Loop 6: the codes of a category the question names right before a word of looking inside a group (shared
+    WITHIN_AFTER: "임금근로자 중", "서울 안에서", "비임금근로자 가운데"), in question order. Other names the question
+    gives may come between the name and that word ("소규모 사업체 중": the group of the small ones among the
+    businesses), with a 의 after each."""
+    q = squash(question)
+    matches = parse(index, question).matches
+    forms = sorted({m.form for m in matches}, key=len, reverse=True)
+
+    def after_names(end: int) -> int:
+        while True:
+            if q.startswith("의", end):
+                end += 1
+            nxt = next((f for f in forms if q.startswith(f, end)), None)
+            if nxt is None:
+                return end
+            end += len(nxt)
+
+    found: list[tuple[int, str]] = []
+    for m in matches:
+        if m.axis != name:
+            continue
+        at = q.find(m.form)
+        while at >= 0:
+            if WITHIN_AFTER.match(question[_spaced_end(question, after_names(at + len(m.form))):]):
+                found.append((at, m.code))
+                break
+            at = q.find(m.form, at + 1)
+    return [c for _, c in sorted(found)]
+
+
+def _children(index: TableIndex, name: str, code: str) -> list[str]:
+    axis = index.axes[name]
+    return [c for c, parent in axis.parents.items() if parent == code]
+
+
+def _scope(question: str, index: TableIndex, codes: dict[str, list[str]]) -> str | None:
+    """Loop 6: the category a ranking looks inside a named group of (one code named right before a word of looking
+    inside, WITHIN_AFTER, that has members in the table: a subtotal and its details, a region and its districts); its
+    members are the candidates (_pool). None when there is no such group."""
+    for name, named in codes.items():
+        if len(named) == 1 and _children(index, name, named[0]) and named[0] in _within(question, index, name):
+            return name
+    return None
+
+
 def _ranked_axis(index: TableIndex, codes: dict[str, list[str]]) -> str | None:
     """The category an extreme question ranks: the regional one it does not pin down, else any other open one."""
     open_axes = [n for n, a in index.axes.items() if n != ITEM_AXIS and len(a.labels) > 1 and len(codes.get(n, [])) != 1]
@@ -552,7 +610,11 @@ def _ranked_axis(index: TableIndex, codes: dict[str, list[str]]) -> str | None:
 
 
 def _total(index: TableIndex, name: str) -> str | None:
-    return next((c for c, label in index.axes[name].labels.items() if is_total(label)), None)
+    """The category's total: the first total name with no parent (loop 6: not a subtotal such as '임금근로자-계' under
+    '취업자-계'), else the first total name."""
+    axis = index.axes[name]
+    totals = [c for c, label in axis.labels.items() if is_total(label)]
+    return next((c for c in totals if axis.parents.get(c) is None), totals[0] if totals else None)
 
 
 class _Lookup:
@@ -768,6 +830,9 @@ def _share_axis(plan: Plan, index: TableIndex) -> tuple[str, list[str], str] | N
     The denominator is the parts' nearest common parent in the code hierarchy ('외국인근로자' -> '한국국적을 가지지 않은
     자'), else the category's total; a parent the question names with the parts is not a part."""
     order = [ITEM_AXIS] + [n for n in plan.codes if n != ITEM_AXIS]
+    # loop 6: first the category of a group the question looks inside that holds the parts named in it
+    order.sort(key=lambda n: not (n in index.axes and any(
+        w in index.axes[n].ancestors(c) for w in _within(plan.question, index, n) for c in plan.codes.get(n, []))))
     for name in order:
         if name not in index.axes:
             continue
@@ -777,6 +842,11 @@ def _share_axis(plan: Plan, index: TableIndex) -> tuple[str, list[str], str] | N
         parent = next(iter(parents)) if len(parents) == 1 else None
         total = _total(index, name)
         whole = parent if parent is not None and all(axis.parents.get(c) == parent or c == parent for c in named) else total
+        # loop 6: a group the question looks inside ("취업자 중 자영업자", "임금근로자 가운데 상용근로자") is the whole
+        # when it holds every part (an ancestor of each), whether it is the total, a subtotal or a parent further up
+        within = _within(plan.question, index, name)
+        inner = [c for c in named if c not in within]
+        whole = next((w for w in within if inner and all(w in axis.ancestors(c) for c in inner)), whole)
         parts = [c for c in named if c not in (total, whole)]
         if whole and parts:
             return name, parts, whole
@@ -824,10 +894,16 @@ def _period_share(plan: Plan, index: TableIndex, lookup: _Lookup, span: tuple[li
     return build.share(parts, whole, note)
 
 
-def _pool(index: TableIndex, name: str) -> list[str]:
-    """The candidates of a ranking over a category: its top-level codes but the total; the provinces of a regional one."""
+def _pool(index: TableIndex, name: str, named: list[str] | None = None) -> list[str]:
+    """The candidates of a ranking over a category: its top-level codes but the total; the provinces of a regional one.
+    Loop 6: the members of the one group the question looks inside (_scope: named is that one code with members);
+    a category whose top level is only its total (a whole, subtotals and their details): the whole's members."""
     axis = index.axes[name]
+    if named and len(named) == 1 and (members := _children(index, name, named[0])):
+        return members
     pool = [c for c, label in axis.labels.items() if axis.parents.get(c) is None and not is_total(label)]
+    if not pool and (whole := _total(index, name)) is not None:
+        return _children(index, name, whole)
     if axis.regional and any(is_province(axis.labels[c]) for c in pool):
         pool = [c for c in pool if is_province(axis.labels[c])]
     return pool
@@ -874,7 +950,7 @@ def _extreme_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | No
         fixed = _fixed(plan.model_copy(update={"codes": {k: v for k, v in codes.items() if k != name}}), index, {name}, problems)
         if problems:
             raise Unresolved(problems)
-        pool = _pool(index, name)
+        pool = _pool(index, name, plan.codes.get(name))
         sets = [_with(fixed, name, c) for c in pool]
         period = _one_period(plan, lookup, sets[:1])
         groups = [(f, period or "") for f in sets]
@@ -910,7 +986,7 @@ def _change_rank_plan(plan: Plan, index: TableIndex, lookup: _Lookup, ends: tupl
     fixed = _fixed(plan.model_copy(update={"codes": {k: v for k, v in plan.codes.items() if k != name}}), index, {name}, problems)
     if problems:
         raise Unresolved(problems)
-    pool = _pool(index, name)
+    pool = _pool(index, name, plan.codes.get(name))
     found = lookup.cells([(_with(fixed, name, c), p) for c in pool for p in ends])  # both ends of every candidate at once
     codes = [c for n, c in enumerate(pool)
              if all(cell is not None and cell.value_kind == "ok" for cell in found[2 * n:2 * n + 2])]
@@ -942,7 +1018,7 @@ def _extremes_plan(plan: Plan, index: TableIndex, lookup: _Lookup, rest: str, no
         fixed = _fixed(plan.model_copy(update={"codes": {k: v for k, v in plan.codes.items() if k != name}}), index, {name}, problems)
         if problems:
             raise Unresolved(problems)
-        sets = [_with(fixed, name, c) for c in _pool(index, name)]
+        sets = [_with(fixed, name, c) for c in _pool(index, name, plan.codes.get(name))]
         period = _one_period(plan, lookup, sets[:1])
         wanted = [(f, period or "") for f in sets]
     cells = [c.source_ref for c in lookup.cells(wanted) if c is not None and c.value_kind == "ok"]

@@ -37,10 +37,11 @@ from kosis_chat.prepare.index import (  # noqa: E402, F401
     cell_measure,
     index_of,
     is_total,
+    total_stem,
 )
 # T1-28 S2b: label helpers and the patterns two stages share moved to kosis_chat/shared/ (old names are aliases).
 # LABEL_ALIASES was read from data/scope.py (the judge importing the B0 scope module).
-from kosis_chat.shared.labels import LABEL_ALIASES, squash  # noqa: E402
+from kosis_chat.shared.labels import LABEL_ALIASES, interval_forms, squash  # noqa: E402
 from kosis_chat.shared.patterns import COHORT, PAREN, RECENT_N, REGION_SUFFIX, YEAR, YEAR_RANGE, YEAR_SINCE  # noqa: E402
 from kosis_chat.shared.patterns import PREVIOUS_MONTH, PREVIOUS_SAME_MONTH, PREVIOUS_YEAR  # noqa: E402  # loop 5
 
@@ -268,6 +269,11 @@ def label_forms(label: str, regional_total: bool = False) -> tuple[set[str], set
         exact.add(person)
     if regional_total and core in TOTAL_LABELS:
         exact.add("전국")
+    # loop 6: a total marked on a stem ('임금근로자-계', '일반가구_계') is asked by its stem ('임금근로자')
+    if (stem := total_stem(core)) and len(squash(stem)) >= 2:
+        exact.add(squash(stem))
+    # loop 6: an interval name joined another way ('20-24세' as '20~24세', '20세부터 24세까지', '20대 초반')
+    exact |= interval_forms(core)
     bare = PAREN.sub(" ", core)
     head = squash(bare.split(" - ")[0])
     # '기대수명(출생시 기대여명)' is also asked as '기대수명'; not '인구(명): 0-14세', where '인구' is only a prefix.
@@ -287,25 +293,79 @@ def _found(form: str, question: str, squashed: str, lower_level: bool) -> bool:
     return True
 
 
+_WORD = re.compile(r"[0-9A-Za-z가-힣]+")
+_NAME_WORD = 3  # the shortest word read as coming from the survey's or the table's name
+
+
+def name_spans(index: TableIndex, question: str) -> list[tuple[int, int]]:
+    """Loop 6: where the question (squashed) says words of the survey's name or the table's title ('가상장애인실태조사
+    에서'): for each word of the question, its longest start of three characters or more that is in one of those names.
+    A label form strictly inside such a span is a part of the name's word, not the label ('장애' in '장애인실태조사')."""
+    meta = index.table.meta
+    names = [squash(n) for n in (getattr(meta, "survey_nm", ""), getattr(meta, "tbl_nm", "")) if n]
+    spans = []
+    for m in _WORD.finditer(question):
+        word, at = m.group(0), len(squash(question[: m.start()]))
+        size = next((k for k in range(len(word), _NAME_WORD - 1, -1) if any(word[:k] in n for n in names)), 0)
+        if size:
+            spans.append((at, at + size))
+    return spans
+
+
+def _outside_names(form: str, q: str, spans: list[tuple[int, int]]) -> bool:
+    """The form occurs in q at least once that is not strictly inside a word of a name (name_spans)."""
+    at = q.find(form)
+    while at >= 0:
+        if not any(a <= at and at + len(form) <= b and b - a > len(form) for a, b in spans):
+            return True
+        at = q.find(form, at + 1)
+    return False
+
+
 def match_labels(index: TableIndex, question: str) -> list[Match]:
     q = squash(question)
+    spans = name_spans(index, question)
     found: list[Match] = []
     for axis in index.axes.values():
         for code, label in axis.labels.items():
             lower = axis.parents.get(code) is not None
             exact, partial, tokens = label_forms(label, regional_total=axis.regional and axis.parents.get(code) is None)
-            hit = next((f for f in sorted(exact, key=len, reverse=True) if _found(f, question, q, lower)), None)
+            # loop 6: a two-character region name is a word's start too ('대구' is not a region inside '연령대구분')
+            short = lower or axis.regional
+
+            def seen(f: str) -> bool:
+                return _found(f, question, q, short) and _outside_names(f, q, spans)
+
+            hit = next((f for f in sorted(exact, key=len, reverse=True) if seen(f)), None)
             if hit:
                 found.append(Match(axis.name, code, label, hit, True))
                 continue
-            hit = "".join(tokens) if len(tokens) >= 2 and all(t in q for t in tokens) else None
-            hit = hit or next((f for f in partial if _found(f, question, q, lower)), None)
+            hit = ("".join(tokens) if len(tokens) >= 2 and all(t in q and _outside_names(t, q, spans) for t in tokens)
+                   else None)
+            hit = hit or next((f for f in partial if seen(f)), None)
             if hit:
                 found.append(Match(axis.name, code, label, hit, False))
-    return _dedupe(found)
+    return _dedupe(found, q)
 
 
-def _dedupe(found: list[Match]) -> list[Match]:
+def _inside_longer(form: str, longer: list[str], q: str) -> bool:
+    """Every place q says form is inside a place it says one of the longer forms ('수도권' in '비수도권'). Loop 6: a
+    form said once on its own too ('수도권과 비수도권') is its own label."""
+    covered = set()
+    for o in longer:
+        at = q.find(o)
+        while at >= 0:
+            covered.update(range(at, at + len(o)))
+            at = q.find(o, at + 1)
+    at = q.find(form)
+    while at >= 0:
+        if not set(range(at, at + len(form))) <= covered:
+            return False
+        at = q.find(form, at + 1)
+    return True
+
+
+def _dedupe(found: list[Match], q: str | None = None) -> list[Match]:
     # One question word, several labels: '중국' matches '중국' and '중국(한국계)'; keep the label that is the word.
     by_form: dict[tuple[str, str], list[Match]] = {}
     for m in found:
@@ -315,7 +375,12 @@ def _dedupe(found: list[Match]) -> list[Match]:
         whole = [m for m in group if squash(m.label) == m.form]
         kept += whole if whole and len(whole) < len(group) else group
     # A form inside a longer matched form is not its own label: '0세' in '20세', '합계' in '합계출산율'.
-    return [m for m in kept if not any(m.form != o.form and m.form in o.form for o in kept)]
+    def longer(m: Match) -> list[str]:
+        return [o.form for o in kept if m.form != o.form and m.form in o.form]
+
+    if q is None:
+        return [m for m in kept if not longer(m)]
+    return [m for m in kept if not longer(m) or not _inside_longer(m.form, longer(m), q)]
 
 
 # ---------------------------------------------------------------- the parsed question
