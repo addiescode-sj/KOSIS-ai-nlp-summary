@@ -43,6 +43,7 @@ from kosis_chat.shared.patterns import CHANGE_ASKED, PER_UNIT, RATE_OF_CHANGE, R
 from kosis_chat.shared.patterns import MOST_RECENT  # isort: skip  # "가장 최근 ~" names a period, not a ranking
 from kosis_chat.shared.patterns import ASKS_GAP, ASKS_PERIOD, ASKS_RATIO, CHANGE_DOWN, EXTREME_MAX, RANK_WORDS, rank_places  # isort: skip
 from kosis_chat.shared.patterns import EACH_PERIOD, EXCLUDE, years_step  # isort: skip  # loop 4
+from kosis_chat.shared.patterns import DEST_AFTER, DEST_AXIS, ORIGIN_AFTER, ORIGIN_AXIS, REVERSE  # isort: skip  # loop 5
 
 PERIOD_AXIS = "시점"  # Plan.over when an extreme question ranks periods ("가장 낮았던 해")
 RECENT_POINTS = 5
@@ -347,12 +348,24 @@ def rule_plan(question: str, index: TableIndex, default_applied: dict[str, str] 
     _percent_only(question, index, codes)
     default = dict(default_applied or {})
     kind = _question_type(question, parsed.periods, codes, parsed.matches, parsed.rest)
+    pairs: list[dict[str, str]] = []
+    pair_reference = None
+    if found := _flows(question, index, parsed, kind):  # loop 5: names in a start and an end category
+        for side, named in found[0].items():
+            if named:
+                codes[side] = named
+            else:
+                codes.pop(side, None)
+        pairs, pair_reference = found[1], found[2]
+        kind = _question_type(question, parsed.periods, codes, parsed.matches, parsed.rest)
+        if pairs and kind not in ("share", "extreme"):
+            kind = "compare"  # two flows: compared (blocks.compare reads the difference or the ratio asked)
     p = parsed.periods
     # "2024년 혼인 추이" on a monthly table: the months of the one year asked
     months = bool(BY_MONTH.search(question)) or (kind == "trend" and len(p.singles) == 1 and not p.ranges)
     periods, missing = _periods(p, index, default, months, years_step(question))
     plan = Plan(question, kind, codes, periods, missing_years=missing, default_applied=default,
-                events=list(parsed.periods.events))
+                events=list(parsed.periods.events), pairs=pairs, pair_reference=pair_reference)
     plan.pattern, plan.groups = _operation(question, parsed.rest, parsed.periods, index, kind, months)
     if (kind in ("value", "compare") and (plan.pattern is None or (plan.pattern == "sum" and not plan.groups))
             and _excluded(question, index, codes, periods)):
@@ -385,8 +398,12 @@ def _values_only(parsed: Parsed, kind: QuestionType, codes: dict[str, list[str]]
     answer nobody asked for, or failed for the second category. Read on the question without its labels."""
     p, rest = parsed.periods, parsed.rest
     if kind == "compare":
-        if sum(len(v) >= 2 for v in codes.values()) < 2:
-            return False  # one pair: the compare plan lists it when no formula is asked (blocks.compare)
+        # one pair: the compare plan lists it when no formula is asked (blocks.compare); loop 5: three targets or more
+        # of one category are listed when the question names each of them (not a range, not an over-wide match)
+        several = [n for n, v in codes.items() if len(v) >= 2]
+        if len(several) < 2 and not (several and len(codes[several[0]]) >= 3
+                                     and _named_one_by_one(parsed, several[0], codes[several[0]])):
+            return False
     elif p.recent or p.recent_n or p.previous or p.before or p.events:
         return False
     elif p.ranges:  # loop 4: a range asked period by period (shared EACH_PERIOD, as the multi-table rules read it)
@@ -398,6 +415,96 @@ def _values_only(parsed: Parsed, kind: QuestionType, codes: dict[str, list[str]]
     asks = (diff or ratio or TREND_WORDS.search(rest) or CHANGE_ASKED.search(rest) or ARITH_WORDS.search(rest)
             or AVG_WORDS.search(rest) or "얼마나" in rest)
     return not asks
+
+
+def _twin_axes(index: TableIndex) -> tuple[str, str] | None:
+    """(the start category, the end category) of a table with two categories that hold the same names (three or
+    more) in two roles, the roles read on the categories' names (shared ORIGIN_AXIS, DEST_AXIS)."""
+    names = [n for n, a in index.axes.items() if n != ITEM_AXIS and len(a.labels) >= 3]
+    for a, b in ((a, b) for i, a in enumerate(names) for b in names[i + 1:]):
+        labels_a = {squash(x) for x in index.axes[a].labels.values()}
+        if labels_a != {squash(x) for x in index.axes[b].labels.values()}:
+            continue
+        if ORIGIN_AXIS.search(a) and DEST_AXIS.search(b) and not DEST_AXIS.search(a):
+            return a, b
+        if ORIGIN_AXIS.search(b) and DEST_AXIS.search(a) and not DEST_AXIS.search(b):
+            return b, a
+    return None
+
+
+def _flows(question: str, index: TableIndex, parsed: Parsed, kind: QuestionType
+           ) -> tuple[dict[str, list[str]], list[dict[str, str]], int | None] | None:
+    """Loop 5. On a table with a start and an end category of the same names (_twin_axes), the names the question
+    gives a role (a particle or word right after the name: shared ORIGIN_AFTER, DEST_AFTER) put in their category:
+    ({start: [code], end: [code]}, the flows) for every name read so. A side no name was given is the category's total
+    ("서울로 전입한": from everywhere). A role named twice starts a second flow ("A에서 B로 ... B에서 A로"), and a word
+    that turns the flow around (REVERSE) names the second flow as the first one swapped. A share keeps the flow and
+    the same flow with the side named last set to its total (the whole). None when the table has no such
+    categories, or a name of them has no role in the question (the codes are left as they were)."""
+    twins = _twin_axes(index)
+    if twins is None:
+        return None
+    start, end = twins
+    totals = {start: _total(index, start), end: _total(index, end)}
+    codes_of: dict[str, dict[str, str]] = {}  # form -> category -> code
+    for m in parsed.matches:
+        if m.axis in twins:
+            codes_of.setdefault(m.form, {})[m.axis] = m.code
+    if not codes_of:
+        return None
+    q = squash(question)
+    found: list[tuple[int, int, str]] = []  # (at, end, form), longer forms first where two overlap
+    for form in sorted(codes_of, key=len, reverse=True):
+        at = q.find(form)
+        while at >= 0:
+            if not any(a < at + len(form) and at < b for a, b, _ in found):
+                found.append((at, at + len(form), form))
+            at = q.find(form, at + 1)
+    found.sort()
+    flows: list[dict[str, str]] = []
+    where: list[int] = []
+    current: dict[str, str] = {}
+    for at, stop, form in found:
+        after = q[stop:]
+        role = start if ORIGIN_AFTER.match(after) else end if DEST_AFTER.match(after) else None
+        if role is None or role not in codes_of[form]:
+            return None
+        if role in current:
+            flows.append(current)
+            current = {}
+        if not current:
+            where.append(at)
+        current[role] = codes_of[form][role]
+    flows.append(current)
+    if any(totals[side] is None for flow in flows for side in twins if side not in flow):
+        return None
+    # the sides the first flow names; a side it does not name is left open (the total, or the axis a ranking ranks)
+    codes = {side: [flows[0][side]] if side in flows[0] else [] for side in twins}
+    flows = [{side: flow.get(side, totals[side]) for side in twins} for flow in flows]
+    if len(flows) == 1 and (rev := REVERSE.search(q)) and rev.start() > where[0]:
+        flows.append({start: flows[0][end], end: flows[0][start]})
+        where.append(rev.start())
+    if len(flows) > 2:
+        return None
+    if kind == "share" and len(flows) == 1:
+        last = max(found)[2]
+        part = next(side for side in twins if codes_of[last].get(side) == flows[0][side])
+        flows.append({**flows[0], part: totals[part]})
+        return codes, flows, None
+    return codes, (flows if len(flows) == 2 else []), _pair_reference(q, where) if len(flows) == 2 else None
+
+
+def _named_one_by_one(parsed: Parsed, name: str, named: list[str]) -> bool:
+    """Every code is matched by a name of its own in the question (loop 5): each code has an exact match, and no
+    question word matched two of them (a range such as '3인 이하' or a word matching several labels is not that)."""
+    forms: dict[str, set[str]] = {}
+    for m in parsed.matches:
+        if m.axis == name and m.code in named and m.exact:
+            forms.setdefault(m.code, set()).add(m.form)
+    if set(forms) != set(named):
+        return False
+    used = [f for fs in forms.values() for f in fs]
+    return len(used) == len(set(used))
 
 
 def _listing(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | None) -> Built:
@@ -592,6 +699,8 @@ def build_plan(plan: Plan, index: TableIndex, table: TableInput) -> Built:
             raise Unresolved(problems)
         newer = [p for p in lookup.all_periods(fixed) if period and p > period] if plan.default_applied.get("period") else []
         return build.value(ref, _refs(lookup, [(fixed, p) for p in newer], []), note)
+    if plan.pairs and kind in ("compare", "share"):
+        return _pairs_plan(plan, index, lookup, note)
     if kind == "compare":
         side = next((n for n, named in plan.codes.items() if len(named) == 2), None)
         if side is None:
@@ -616,6 +725,41 @@ def build_plan(plan: Plan, index: TableIndex, table: TableInput) -> Built:
     if kind == "extreme":
         return _extreme_plan(plan, index, lookup, note)
     raise Unresolved(["질문 유형"])
+
+
+_REFERENCE_WORD = re.compile(r"보다|에비해|대비|와비교|과비교|을기준|를기준")
+
+
+def _pairs_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | None) -> Built:
+    """Loop 5: the two flows of plan.pairs (one code in each of two categories) at one period. A share: the first
+    over the second (the part, then the whole). A compare: the difference or the ratio asked; the flow named just
+    before a comparing word ("보다", "에 비해", "대비") is the reference."""
+    sides = set().union(*plan.pairs)
+    problems: list[str] = []
+    fixed = _fixed(plan.model_copy(update={"codes": {k: v for k, v in plan.codes.items() if k not in sides}}),
+                   index, sides, problems)
+    if problems:
+        raise Unresolved(problems)
+    sets = [{**fixed, **pair} for pair in plan.pairs]
+    period = _one_period(plan, lookup, sets)
+    refs = _refs(lookup, [(f, period or "") for f in sets], problems)
+    if problems:
+        raise Unresolved(problems)
+    if plan.type == "share":
+        return build.share(refs[:1], refs[1], note)
+    rest = parse(index, plan.question).rest
+    diff, ratio = asked_comparison(rest)
+    return build.compare(refs, plan.pair_reference, note, asked=diff or ratio)
+
+
+def _pair_reference(q: str, where: list[int]) -> int | None:
+    """The flow a comparing word follows (on the squashed question, where = each flow's first position): the later
+    of the flows named before the word; None without such a word or with no flow before it."""
+    word = _REFERENCE_WORD.search(q)
+    if word is None:
+        return None
+    before = [n for n, at in enumerate(where) if at < word.start()]
+    return max(before, key=lambda n: where[n]) if before else None
 
 
 def _share_axis(plan: Plan, index: TableIndex) -> tuple[str, list[str], str] | None:

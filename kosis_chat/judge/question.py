@@ -42,6 +42,7 @@ from kosis_chat.prepare.index import (  # noqa: E402, F401
 # LABEL_ALIASES was read from data/scope.py (the judge importing the B0 scope module).
 from kosis_chat.shared.labels import LABEL_ALIASES, squash  # noqa: E402
 from kosis_chat.shared.patterns import COHORT, PAREN, RECENT_N, REGION_SUFFIX, YEAR, YEAR_RANGE, YEAR_SINCE  # noqa: E402
+from kosis_chat.shared.patterns import PREVIOUS_MONTH, PREVIOUS_SAME_MONTH, PREVIOUS_YEAR  # noqa: E402  # loop 5
 
 COUNT_KINDS = ("count_stock", "count_flow")
 
@@ -158,7 +159,32 @@ def _bare_months(text: str) -> list[str]:
     return out
 
 
-def asked_periods(question: str) -> Periods:
+def _earlier(single: str, text: str, words: str, labels: tuple[str, ...] = ()) -> str | None:
+    """The period right before a named one (a year 'YYYY' or a month 'YYYYMM') that the question compares it with:
+    "N년 전" (on text), the same month a year before, the month before ("N개월 전" too), the year before (shared/patterns
+    PREVIOUS_*, on words: the question without its labels). A word inside a label the question names ('전년대비
+    증감률') is the label's. None when there is no such word."""
+    year, month = int(single[:4]), int(single[4:]) if len(single) == 6 else None
+    found = None
+    if m := _YEARS_BEFORE.search(text):
+        found, back = m, (int(m.group(1)), 0)
+    elif m := PREVIOUS_SAME_MONTH.search(words):
+        found, back = m, (1, 0)
+    elif month and (m := PREVIOUS_MONTH.search(words)):
+        found, back = m, (0, int(m.group(1) or 1))
+    elif m := PREVIOUS_YEAR.search(words):
+        found, back = m, (1, 0)
+    if found is None or any(squash(found.group(0)) in label for label in labels):
+        return None
+    if month is None:
+        return str(year - back[0]) if back[1] == 0 else None
+    total = (year - back[0]) * 12 + (month - 1) - back[1]
+    return f"{total // 12}{total % 12 + 1:02d}"
+
+
+def asked_periods(question: str, rest: str | None = None, labels: tuple[str, ...] = ()) -> Periods:
+    """The periods a question names. rest: the question without the labels it names (Parsed.rest), where the words
+    for the period right before a named one are read; labels: the squashed labels it names."""
     text = _COHORT.sub(" ", question)  # "1985년생" is a cohort label, not a period
     text, event_singles, event_ranges, events, event_at = _event_periods(text)
     singles: list[str] = []
@@ -189,8 +215,11 @@ def asked_periods(question: str) -> Periods:
         year_at = next((m.start() for m in _YEAR.finditer(question)), len(question))
         singles = event_singles + singles if event_at < year_at else singles + event_singles
     before = _YEARS_BEFORE.search(text)
-    if before and len(singles) == 1 and len(singles[0]) == 4:  # "10년 전과 비교해서 2025년": the earlier year is implied
-        singles.insert(0, str(int(singles[0]) - int(before.group(1))))
+    # "10년 전과 비교해서 2025년", "2024년 3월 전월 대비", "2023년은 작년보다": the earlier period is implied (loop 5:
+    # was "N년 전" of a year only)
+    if len(singles) == 1 and (not ranges or before) and (earlier := _earlier(singles[0], text, question if rest is None else rest,
+                                                                 labels)):
+        singles.insert(0, earlier)
     recent_n = _RECENT_N.search(question)
     return Periods(
         singles=tuple(dict.fromkeys(singles)),
@@ -301,4 +330,6 @@ def parse(index: TableIndex, question: str) -> Parsed:
     words = tuple(
         _PARTICLE.sub("", w) for w in re.findall(r"[가-힣]{2,}", question) if not any(f in w for f in forms)
     )
-    return Parsed(question=question, periods=asked_periods(question), matches=matches, rest=rest, words=words)
+    labels = tuple(squash(m.label) for m in matches)
+    return Parsed(question=question, periods=asked_periods(question, rest, labels), matches=matches, rest=rest,
+                  words=words)

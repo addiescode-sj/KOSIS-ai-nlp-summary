@@ -53,6 +53,16 @@ YEAR_SINCE = re.compile(r"((?:19|20)\d{2})\s*년?\s*이후")
 RECENT_N = re.compile(r"최근\s*(\d+)\s*년")
 # "1985년생" is a cohort label, not a period (judge/question._COHORT; data/scope.py inline re.sub).
 COHORT = re.compile(r"(?:19|20)\d{2}\s*년생")
+# The period right before the one a question names (loop 5; judge/question.py asked_periods puts it in the periods,
+# as it does for "N년 전"). Read on the question without the labels it names. Three kinds:
+# - the same month (or the same part of the year) a year before: 전년 동월, 작년 같은 달, 지난해 같은 기간, 1년 전 같은 달;
+# - the month before (a named month only): 전월, 전달, 지난달, 앞 달, 직전 달·월, 한 달 전, "N개월 전" (group 1: N);
+#   not 전월세 (a rent), not 전달하다 (to pass on);
+# - the year before: 전년, 전년도, 작년, 지난해, 앞 해, 직전 해·연도, 한 해 전.
+PREVIOUS_SAME_MONTH = re.compile(r"(?:전년|작년|지난\s*해|한\s*해\s*전|1\s*년\s*전)\s*(?:의\s*)?(?:동월|같은\s*달|동기|같은\s*기간)")
+PREVIOUS_MONTH = re.compile(r"전월(?!세)|전\s*달(?![하해했되된받])|지난\s*달|앞\s*달|직전\s*(?:달|월)|한\s*달\s*전"
+                            r"|(?<!\d)(\d{1,2})\s*개월\s*전")
+PREVIOUS_YEAR = re.compile(r"전년|작년|지난\s*해|앞\s*해|직전\s*(?:해|연도|년도)|한\s*해\s*전")
 
 # ---------------------------------------------------------------- numbers and ids
 
@@ -95,6 +105,25 @@ RATE_OF_CHANGE = re.compile(rf"증가율|감소율|증감률|증감율|변화율
 # A change asked at all (an amount unless RATE_OF_CHANGE says a rate): the verb forms above, the noun 증감 and the
 # verbs of a change with no direction (변했다, 변화, 달라졌다, 바뀌었다).
 CHANGE_ASKED = re.compile(CHANGE_WORDS.pattern + r"|증감(?![률율])|변했|변화(?!율)|달라졌|바뀌었|" + RATE_OF_CHANGE.pattern)
+# Loop 5 (compute/answer_facts.py, which of a change and a rate of change a trend answer keeps): a percent asked
+# (퍼센트, %, 프로; not a percent point), and an amount asked: 몇 + a counting word ("몇 명", "몇 건", "몇 가구", "몇 세";
+# not 몇 퍼센트, 몇 배, 몇 년, 몇 월, 몇 위) or a percent point (%p, 퍼센트 포인트).
+PERCENT = re.compile(r"퍼센트(?!\s*포인트)|%(?!\s*(?:p|포인트))|프로(?!그|젝)")
+ASKS_AMOUNT = re.compile(r"몇\s*(?!퍼센트|프로|배|번|위|등|년|개월|월|분기|시)[가-힣]|%\s*p|퍼센트\s*포인트|%\s*포인트")
+
+# Two categories of one table that hold the same names in two roles (loop 5): where a flow starts and where it ends
+# (전출지별 × 전입지별, 출발지 × 도착지, 출신지 × 거주지). The role of a category, read on its name:
+ORIGIN_AXIS = re.compile(r"전출|출발|출신|유출|송출|발송|이전\s*전")
+DEST_AXIS = re.compile(r"전입|도착|목적|유입|수신|행선|거주|이전\s*후")
+# The role of a name the question gives (on the squashed question, right after the name): a particle of a start
+# (에서, 부터, 로부터) or of an end (으로, 로, 에, 까지), or, after a subject or object particle, a word of leaving
+# (떠나다, 나가다, 빠져나가다, 전출, 출발, 출신) or of arriving (들어오다, 들어가다, 옮겨 오다, 전입, 도착, 유입).
+ORIGIN_AFTER = re.compile(r"^(?:에서|으로부터|로부터|부터)"
+                          r"|^(?:을|를|이|가|의|은|는)?(?:떠나|떠난|나간|나가|빠져나|유출|전출|출발|출신)")
+DEST_AFTER = re.compile(r"^(?:으로|로|에|까지)(?!서)"
+                        r"|^(?:을|를|이|가|의|은|는)?(?:들어오|들어온|들어간|들어가|옮겨온|옮겨간|유입|전입|도착)")
+# A second flow named only as the first one turned around: "그 반대", "반대로", "거꾸로", "역방향", "역으로".
+REVERSE = re.compile(r"반대|거꾸로|역방향|역으로")
 
 # Years asked at a regular interval: "2년 간격으로", "5년마다", "3년 주기로", "5년 단위로", "격년으로" (loop 4).
 # Group 1 the number of years (none: 격년, every other year).

@@ -29,6 +29,7 @@ from kosis_chat.compute.schemas import Computed
 from kosis_chat.schemas.resources import MultiResources, StatResources
 from kosis_chat.shared.boundary import BoundaryModel
 from kosis_chat.shared.patterns import ASKS_DIFF, ASKS_GAP, ASKS_RATIO, asked_comparison
+from kosis_chat.shared.patterns import ASKS_AMOUNT, PERCENT, RATE_OF_CHANGE  # loop 5
 
 
 class AnswerFactsIn(BoundaryModel):
@@ -54,7 +55,39 @@ def step_answer_facts(inp: AnswerFactsIn, res: StatResources | MultiResources) -
     main = list(dict.fromkeys(inp.computed.main))
     if inp.computed.pattern == "compare" and isinstance(res, StatResources):
         main = _compared(inp.question, inp.computed, main, res)
+    if inp.computed.pattern == "trend" and isinstance(res, StatResources):
+        main = _changed(inp.question, inp.computed, main, res)
     return AnswerFactsOut(fact_ids=main)
+
+
+# Loop 5. A trend plan computes both the change and the rate of change of its first and last cells; the answer keeps
+# the one the question asks for: the rate when it asks a rate (shared RATE_OF_CHANGE, or a percent) and no amount, the
+# change when it asks an amount ("몇 명", "몇 건": shared ASKS_AMOUNT) and no rate. Neither or both ("어떻게 변했어",
+# "몇 명, 몇 퍼센트"): both, as before. Read on the question without the labels it names.
+_PCT_CHANGE = re.compile(r"^\(f\d+ / f\d+ - 1\) \* 100$")
+
+
+def _changed(question: str, computed: Computed, main: list[str], res: StatResources) -> list[str]:
+    rest = parse(res.index, question).rest
+    facts = {f.id: f for f in computed.result.facts}
+    named_rate = any(w in m.group(0) for m in RATE_OF_CHANGE.finditer(rest) for w in ("률", "율"))
+    # a percent asked of values measured in % ("고용률이 몇 % 올랐어") may be a change in points: only a rate named
+    # by its noun (증가율, 변화율) says which
+    in_percent = any(f.source_ref and (f.unit or "").strip() in ("%", "퍼센트") for f in facts.values())
+    rate = named_rate if in_percent else bool(RATE_OF_CHANGE.search(rest) or PERCENT.search(rest))
+    amount = bool(ASKS_AMOUNT.search(rest))
+    if rate == amount:
+        return main
+
+    def kept(fact_id: str) -> bool:
+        expr = (facts[fact_id].derivation or "") if fact_id in facts else ""
+        if _DIFF.match(expr):
+            return amount
+        if _PCT_CHANGE.match(expr):
+            return rate
+        return True
+
+    return [i for i in main if kept(i)]
 
 
 # Loop 1. A compare plan computes both the difference and the ratio of its two cells; the answer keeps the one the

@@ -48,6 +48,10 @@ class Plan(BoundaryModel):
     groups: SkipValidation[list[list[str]]] = Field(default_factory=list)
     # (phrase, start) of calendar events periods came from
     events: SkipValidation[list[tuple[str, str]]] = Field(default_factory=list)
+    # loop 5: two named flows of a table whose two categories hold the same names in two roles (from, to): one code
+    # per category each, in question order (a compare of the two, or for a share: the part, then the whole)
+    pairs: SkipValidation[list[dict[str, str]]] = Field(default_factory=list)
+    pair_reference: int | None = None  # the index of the flow compared against (blocks.compare reference)
 
 
 # ---------------------------------------------------------------- compute/build.py
