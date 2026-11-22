@@ -263,7 +263,7 @@ def test_months_as_a_part_of_their_year(births):
     assert plan.type == "share" and plan.pattern is None
     assert cells(built, "p") == [birth("11", "202307")] and cells(built, "t") == [birth("11", "2023")]
     share = compute(table, built).result.facts[-1]
-    assert share.unit == "%" and share.value == pytest.approx(round(207 / sum(200 + m for m in range(1, 13)) * 100, 1))
+    assert share.unit == "%" and share.value == pytest.approx(round(207 / sum(200 + m for m in range(1, 13)) * 100, 2))
 
 
 def test_a_label_before_eui_myeot_percent_asks_a_share(births):

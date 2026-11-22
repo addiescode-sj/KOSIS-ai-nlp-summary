@@ -338,27 +338,27 @@ def test_average_question_is_answered_with_a_chart_in_the_contract(households):
     stat = answer.stat_answer
     assert answer.decision_metadata["pattern"] == "avg" and stat.query.periods == ["2015", "2020", "2023", "2024"]
     assert [s.op for s in stat.query.plan.steps] == ["select", "aggregate"]
-    assert stat.result.facts[4].derivation == "(f1 + f2 + f3 + f4) / 4" and stat.text.startswith("2015년부터 2024년까지 서울특별시 1인 가구는 연평균 3,101.5가구입니다.")
+    assert stat.result.facts[4].derivation == "(f1 + f2 + f3 + f4) / 4" and stat.text.startswith("2015년부터 2024년까지 서울특별시 1인 가구는 연평균 3,101.50가구입니다.")
     assert answer.chart.kind == "timeline" and answer.chart.fact_ids == ["f1", "f2", "f3", "f4", "f5"]
     assert [p.fact_id for p in answer.chart.points()] == ["f1", "f2", "f3", "f4"] and "chart" not in stat.model_dump()
     assert stat.numbers_origin == "code" and stat.numbers_verified and answer.decision_metadata["chart"] == "timeline"
     _, user = bot.client.calls[0]
-    assert "{f5} [반드시 인용] 평균 ((f1 + f2 + f3 + f4) / 4) = 3,101.5가구 — 2015년~2024년 4개 시점 평균" in user
+    assert "{f5} [반드시 인용] 평균 ((f1 + f2 + f3 + f4) / 4) = 3,101.50가구 — 2015년~2024년 4개 시점 평균" in user
 
 
 @pytest.mark.parametrize("question, pattern, text", [
-    ("2015년부터 2024년까지 서울특별시 1인 가구의 연평균은?", "avg", "2015년~2024년 서울특별시 1인 가구 평균은 3,101.5가구입니다."),
+    ("2015년부터 2024년까지 서울특별시 1인 가구의 연평균은?", "avg", "2015년~2024년 서울특별시 1인 가구 평균은 3,101.50가구입니다."),
     ("서울특별시 1인 가구는 2015~2020년 평균보다 2023~2024년 평균이 얼마나 많아?", "pavg",
-     "서울특별시 1인 가구는 2015년~2020년 평균 3,100.5가구에서 2023년~2024년 평균 3,102.5가구로 2.0가구 늘었습니다(증가율 0.1%)."),
+     "서울특별시 1인 가구는 2015년~2020년 평균 3,100.50가구에서 2023년~2024년 평균 3,102.50가구로 2.00가구 늘었습니다(증가율 0.06%)."),
     ("2024년 서울특별시 1인 가구는 2015~2023년 평균보다 얼마나 많아?", "vsa",
-     "2024년 서울특별시 1인 가구는 3,103가구로 2015년~2023년 평균 3,101.0가구보다 2.0가구 많습니다(증가율 0.1%)."),
+     "2024년 서울특별시 1인 가구는 3,103가구로 2015년~2023년 평균 3,101.00가구보다 2.00가구 많습니다(증가율 0.06%)."),
     ("전국 일반가구 중 1인 가구 비중은 2015년보다 2024년에 몇 %p 늘었어?", "shr",
-     "전국 일반가구 전체 가운데 1인 가구 비중은 2015년 11.0%에서 2024년 11.0%로 변함이 없습니다(차이 0.0%p)."),  # made-up values: equal shares
+     "전국 일반가구 전체 가운데 1인 가구 비중은 2015년 11.00%에서 2024년 11.03%로 0.03%p 늘었습니다."),  # made-up values: shares apart only at two decimals
     ("서울과 부산의 1인 가구 격차는 2015년보다 2024년에 얼마나 변했어?", "gap",
      ("서울특별시와 부산광역시의 1인 가구 격차는 2015년 1,000가구(서울특별시 3,100가구, 부산광역시 4,100가구)에서 2024년 "
       "1,000가구(서울특별시 3,103가구, 부산광역시 4,103가구)로 변함이 없습니다(차이 0가구).")),  # made-up values: equal gaps
     ("2015년 대비 2024년 1인 가구 증가율은 서울과 부산 중 어디가 더 높아?", "grw",
-     "2015년~2024년 서울특별시는 3,100가구에서 3,103가구로 0.1% 증가했고, 부산광역시는 4,100가구에서 4,103가구로 0.1% 증가했습니다."),
+     "2015년~2024년 서울특별시는 3,100가구에서 3,103가구로 0.10% 증가했고, 부산광역시는 4,100가구에서 4,103가구로 0.07% 증가했습니다."),
 ])
 def test_pattern_templates_pass_verification(households, question, pattern, text):
     bot = pipeline(households, [reply("숫자 없이"), reply("숫자 없이")])  # the model never cites: the template answers

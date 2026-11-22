@@ -69,7 +69,7 @@ def test_r3_r4_differences_and_growth_compare_like_with_like(pop):
 def test_r5_the_denominator_must_hold_the_numerator(pop, households):
     share = {"id": "s", "op": "combine", "a": "p", "b": "t", "fn": "share"}
     ok = run(pop, [sel("p", MEN), sel("t", ALL), share], ["s"], "share")
-    assert ok.facts[-1].value == round(500 / 1050 * 100, 1)
+    assert ok.facts[-1].value == round(500 / 1050 * 100, 2)
     assert "성별 남자⊄여자" in refused(pop, [sel("p", MEN), sel("t", WOMEN), share], ["s"], "class_mismatch", "share")
     # 종로구 is inside 서울 by code prefix but not inside 부산.
     assert "⊄부산광역시" in refused(households, [sel("p", ref("T1", "11010", "2023")), sel("t", ref("T1", "21", "2023")), share],
