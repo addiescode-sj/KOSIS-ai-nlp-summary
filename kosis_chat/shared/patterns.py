@@ -176,6 +176,21 @@ ASKS_DIFF = re.compile(rf"비교|보다|대비|{MULTI_DIFF.pattern}")
 MULTI_FEWER = re.compile(r"적(?!어\s*(?:줘|주|봐|달|둬))|낮|작(?!년)|모자|덜")
 
 
+# Loop 8. A division said with its verb: the target the particle 로 / 으로 follows ("서울 출생아 수로 나누면", "부산으로
+# 나눈") is the denominator. Read on the squashed question, right after the target's name and the counting words
+# that may come between (COUNT_WORD: "부산 출생아 수로", "서울 가구수로").
+DIVIDE = re.compile(r"나누|나눈|나눠|나눴")
+DIVISOR_AFTER = re.compile(r"^(?:으로|로)")
+COUNT_WORD = re.compile(r"^(?:건수|가구수|인구수|수|명|건|가구|개|곳)")
+
+
+def asks_level(rest: str) -> bool:
+    """Loop 8: one value as a percent of another ("부산은 서울의 몇 퍼센트", "서울 대비 대구 비율은 몇 %"), read on the
+    question without its labels: a percent asked with no word of a difference or of more / less (not "몇 퍼센트 많아",
+    a relative difference) and no change ("몇 퍼센트 늘었어")."""
+    return bool(PERCENT.search(rest)) and not MULTI_DIFF.search(rest) and not CHANGE_ASKED.search(rest)
+
+
 def asked_comparison(rest: str) -> tuple[bool, bool]:
     """(a difference asked, a ratio asked) of two values, read on the question without its labels (squashed): a
     ratio for 몇 배 / 비율 / 나누다, a difference for a comparing word, but beside a ratio only when named (차이,

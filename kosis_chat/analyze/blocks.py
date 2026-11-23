@@ -76,6 +76,17 @@ def compare(cells: list[str], reference: int | None = None, note: str | None = N
     return Built(_plan(steps, ["x", "y", "d", "r"], "compare", note), "compare", reference=reference)
 
 
+def level(cells: list[str], reference: int, note: str | None = None) -> Built:
+    """Loop 8: the subject as a percent of the reference ("부산은 서울의 몇 퍼센트"): the two cells and subject /
+    reference * 100 (the index of the reference at 100), nothing else."""
+    if len(cells) != 2 or reference not in (0, 1):
+        raise ValueError("a level needs two cells and the reference's index (0 or 1)")
+    steps = [SelectStep(id="x", cells=[cells[0]]), SelectStep(id="y", cells=[cells[1]])]
+    a, b = ("y", "x") if reference == 0 else ("x", "y")
+    steps.append(CombineStep(id="l", a=a, b=b, fn="index", note="기준을 100으로 본 수준"))
+    return Built(_plan(steps, ["x", "y", "l"], "compare", note), "plan", reference=reference)
+
+
 def remainder(whole: str, part: str, note: str | None = None) -> Built:
     """The whole minus one of its parts (loop 4: "전국에서 서울을 제외한 나머지"): the two cells and the difference."""
     steps = [SelectStep(id="x", cells=[whole]), SelectStep(id="y", cells=[part]),
@@ -88,6 +99,19 @@ def share(parts: list[str], total: str, note: str | None = None) -> Built:
         raise ValueError("share needs one or more part cells")
     steps = [SelectStep(id="p", cells=parts), SelectStep(id="t", cells=[total]), CombineStep(id="s", a="p", b="t", fn="share")]
     return Built(_plan(steps, ["p", "t", "s"], "share", note), "share")
+
+
+def shares_each(parts: list[str], total: str, note: str | None = None) -> Built:
+    """Loop 8: each part's share of the same total ("서울과 부산의 비중은 각각"): one share per part, the parts and the
+    total; no share of the parts together."""
+    if len(parts) < 2:
+        raise ValueError("shares_each needs two or more part cells")
+    steps: list = [SelectStep(id="t", cells=[total])]
+    show: list[str] = []
+    for n, part in enumerate(parts, start=1):
+        steps += [SelectStep(id=f"p{n}", cells=[part]), CombineStep(id=f"s{n}", a=f"p{n}", b="t", fn="share")]
+        show += [f"p{n}", f"s{n}"]
+    return Built(_plan(steps, [*show, "t"], "share", note), "plan")
 
 
 def extreme(candidates: list[str], pick: Literal["max", "min"], totals: list[str] | None = None,
