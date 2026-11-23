@@ -48,7 +48,7 @@ def trend(cells: list[str], note: str | None = None) -> Built:
 
 
 def compare(cells: list[str], reference: int | None = None, note: str | None = None, asked: bool = True,
-            per: tuple[int, float] | None = None) -> Built:
+            per: tuple[int, float] | None = None, diff: bool = True) -> Built:
     """Two cells: the subject minus the named reference (reference = its index), else larger minus smaller.
 
     Loop 2: asked False (the question asks for no difference and no ratio): the two values side by side, so two
@@ -71,9 +71,24 @@ def compare(cells: list[str], reference: int | None = None, note: str | None = N
         a, b, orient = ("y", "x", "fixed") if reference == 0 else ("x", "y", "fixed")
     if not asked:  # the two values only (pattern "plan": the listed sentence, no formula to choose from)
         return Built(_plan(steps, ["x", "y"], "compare", note), "plan", reference=reference)
+    if not diff:  # loop 9: a ratio alone asked (the answer keeps no difference): no difference to refuse two units for
+        steps.append(CombineStep(id="r", a=a, b=b, fn="ratio", orient=orient, optional=True))
+        return Built(_plan(steps, ["x", "y", "r"], "compare", note), "compare", reference=reference)
     steps += [CombineStep(id="d", a=a, b=b, fn="diff", orient=orient),
               CombineStep(id="r", a=a, b=b, fn="ratio", orient=orient, optional=True)]
     return Built(_plan(steps, ["x", "y", "d", "r"], "compare", note), "compare", reference=reference)
+
+
+def relative(cells: list[str], reference: int, note: str | None = None) -> Built:
+    """Loop 9: how much more (or less) the subject is than the reference, as a percent of the reference ("서울은
+    부산보다 몇 퍼센트 많아"): (subject - reference) / reference * 100, the rate-of-change formula; the two cells and
+    that one number."""
+    if len(cells) != 2 or reference not in (0, 1):
+        raise ValueError("a relative difference needs two cells and the reference's index (0 or 1)")
+    steps = [SelectStep(id="x", cells=[cells[0]]), SelectStep(id="y", cells=[cells[1]])]
+    a, b = ("y", "x") if reference == 0 else ("x", "y")
+    steps.append(CombineStep(id="q", a=a, b=b, fn="pct_change", note="기준 대비 상대 차이"))
+    return Built(_plan(steps, ["x", "y", "q"], "compare", note), "plan", reference=reference)
 
 
 def level(cells: list[str], reference: int, note: str | None = None) -> Built:
@@ -112,6 +127,23 @@ def shares_each(parts: list[str], total: str, note: str | None = None) -> Built:
         steps += [SelectStep(id=f"p{n}", cells=[part]), CombineStep(id=f"s{n}", a=f"p{n}", b="t", fn="share")]
         show += [f"p{n}", f"s{n}"]
     return Built(_plan(steps, [*show, "t"], "share", note), "plan")
+
+
+def shares_gap(parts: list[str], total: str, reference: int | None, note: str | None = None) -> Built:
+    """Loop 9: two parts' shares of the same total compared ("1인 가구 비중은 2인 가구보다 몇 %p 높아"): each share
+    over the same whole, then the subject's share minus the reference's (reference = its index; None: the larger
+    first) in percent points."""
+    if len(parts) != 2:
+        raise ValueError("shares_gap needs two part cells")
+    steps: list = [SelectStep(id="t", cells=[total])]
+    for n, part in enumerate(parts, start=1):
+        steps += [SelectStep(id=f"p{n}", cells=[part]), CombineStep(id=f"s{n}", a=f"p{n}", b="t", fn="share")]
+    if reference is None:
+        a, b, orient = "s1", "s2", "larger_first"
+    else:
+        a, b, orient = ("s2", "s1", "fixed") if reference == 0 else ("s1", "s2", "fixed")
+    steps.append(CombineStep(id="d", a=a, b=b, fn="pp_diff", orient=orient, note="두 비중의 차이"))
+    return Built(_plan(steps, ["p1", "p2", "t", "s1", "s2", "d"], "share", note), "plan")
 
 
 def extreme(candidates: list[str], pick: Literal["max", "min"], totals: list[str] | None = None,

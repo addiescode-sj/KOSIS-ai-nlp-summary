@@ -66,6 +66,7 @@ from kosis_chat.shared.patterns import (
     MULTI_WHOLE_AFTER,
     PER_UNIT,
     TOTAL_PREFIX,
+    TOTAL_AMOUNT,
     per_scale,
 )
 
@@ -243,7 +244,10 @@ def _operation(question: str, sides: list[_Side], several_periods: bool = False,
         if MULTI_RATIO.search(q):
             whole = _whole(order, q)
             return "ratio", [next(s for s in sides if s is not whole), whole], None, True
-    if SUM_WORDS.search(q) and not (aggregated and len(sides) == 2 and MULTI_DIFF.search(SUM_WORDS.sub("", q))):
+    # loop 9: a word of the whole right before 몇 + a counting word ("출생아와 사망자는 모두 몇 명") adds the tables'
+    # values as a sum word does (the same words the one-table rules read: shared TOTAL_AMOUNT)
+    summed = SUM_WORDS.search(q) or (not several_periods and TOTAL_AMOUNT.search(q))
+    if summed and not (aggregated and len(sides) == 2 and MULTI_DIFF.search(SUM_WORDS.sub("", q))):
         return "sum", order, None, True
     if len(sides) == 2 and MULTI_DIFF.search(q):
         if (at := q.find("보다")) >= 0 and (reference := _before(sides, at)) is not None:

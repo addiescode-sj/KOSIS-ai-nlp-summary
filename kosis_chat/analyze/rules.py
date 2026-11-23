@@ -49,6 +49,7 @@ from kosis_chat.shared.patterns import DEST_AFTER, DEST_AXIS, ORIGIN_AFTER, ORIG
 from kosis_chat.shared.patterns import WITHIN_AFTER  # isort: skip  # loop 6
 from kosis_chat.shared.patterns import EACH_TARGET, PERCENT, WHICH_MORE  # isort: skip  # loop 7
 from kosis_chat.shared.patterns import asks_level  # isort: skip  # loop 8
+from kosis_chat.shared.patterns import COUNT_STEM_SUFFIX, TOTAL_AMOUNT, asks_gap_of, asks_relative  # isort: skip  # loop 9
 
 PERIOD_AXIS = "시점"  # Plan.over when an extreme question ranks periods ("가장 낮았던 해")
 RECENT_POINTS = 5
@@ -133,11 +134,13 @@ def _question_type(question: str, periods: Periods, codes: dict[str, list[str]],
         return "extreme"
     if _asks_share(question, matches):
         return "share"
-    if periods.ranges or len(periods.singles) >= 2 or (periods.recent and TREND_WORDS.search(question)):
+    # loop 9: the words of a trend, a change and a comparison are read on rest too, as the ranking words are (loop 4):
+    # a label that holds one ('출생성비 차이', '인구변화율') names a measure and asks for no comparison of two targets
+    if periods.ranges or len(periods.singles) >= 2 or (periods.recent and TREND_WORDS.search(ranking)):
         return "trend"
-    if TREND_WORDS.search(question) or CHANGE_WORDS.search(question):
+    if TREND_WORDS.search(ranking) or CHANGE_WORDS.search(ranking):
         return "trend"
-    if COMPARE_WORDS.search(question) or any(len(v) >= 2 for v in codes.values()):
+    if COMPARE_WORDS.search(ranking) or any(len(v) >= 2 for v in codes.values()):
         return "compare"
     return "value"
 
@@ -292,14 +295,17 @@ def _period_groups(p: Periods, index: TableIndex, kind: QuestionType, months: bo
 
 
 def _operation(question: str, rest: str, p: Periods, index: TableIndex, kind: QuestionType,
-               months: bool = False) -> tuple[Pattern | None, list[list[str]]]:
+               months: bool = False, targets: bool = False) -> tuple[Pattern | None, list[list[str]]]:
     """(pattern, period groups) when the question aggregates periods; (None, []) for the five plain types.
 
-    rest is the question with matched labels removed, so "평균" in a label ('평균 가구원수') does not count."""
+    rest is the question with matched labels removed, so "평균" in a label ('평균 가구원수') does not count.
+    targets (loop 9): the question names two targets or more of one category to add (_adds_targets)."""
     groups = _period_groups(p, index, kind, months)
     average = bool(AVG_WORDS.search(rest))
-    # "모두" / "전부" sums a range, but not a range asked period by period ("연도별로 모두 알려줘", loop 4)
-    total = bool(SUM_WORDS.search(rest) or (TOTAL_WORDS.search(rest) and p.ranges and not EACH_PERIOD.search(rest)))
+    # "모두" / "전부" sums a range, but not a range asked period by period ("연도별로 모두 알려줘", loop 4); loop 9: and
+    # the targets named at one period when it comes right before 몇 + a counting word ("서울과 부산은 모두 몇 명")
+    total = bool(SUM_WORDS.search(rest) or (TOTAL_WORDS.search(rest) and p.ranges and not EACH_PERIOD.search(rest))
+                 or (targets and not p.ranges and len(p.singles) <= 1 and TOTAL_AMOUNT.search(rest)))
     if kind == "share":
         if _part_of_year([x for g in groups for x in g]):  # "2025년 중 12월 비중": one share, not two compared
             return None, []
@@ -364,8 +370,10 @@ def rule_plan(question: str, index: TableIndex, default_applied: dict[str, str] 
     parsed = parse(index, question)
     resolved = resolve(index, parsed)
     codes = {name: _order_in_question(question, index, name, sorted(cs)) for name, cs in resolved.codes.items()}
+    ranged = None
     if found := _number_range(question, index):
         codes[found[0]] = found[1]
+        ranged = found[0]
     _both_sexes(question, index, codes)
     _drop_children(index, codes)
     _percent_only(question, index, codes)
@@ -393,7 +401,8 @@ def rule_plan(question: str, index: TableIndex, default_applied: dict[str, str] 
     periods, missing = _periods(p, index, default, months, years_step(question))
     plan = Plan(question, kind, codes, periods, missing_years=missing, default_applied=default,
                 events=list(parsed.periods.events), pairs=pairs, pair_reference=pair_reference)
-    plan.pattern, plan.groups = _operation(question, parsed.rest, parsed.periods, index, kind, months)
+    plan.pattern, plan.groups = _operation(question, parsed.rest, parsed.periods, index, kind, months,
+                                           _adds_targets(parsed, codes, ranged))
     if (kind in ("value", "compare") and (plan.pattern is None or (plan.pattern == "sum" and not plan.groups))
             and _excluded(question, index, codes, periods)):
         plan.pattern, plan.groups, plan.type = "excl", [], "compare"  # loop 4: the total minus the part left out
@@ -556,6 +565,16 @@ def _flows(question: str, index: TableIndex, parsed: Parsed, kind: QuestionType
         flows.append({**flows[0], part: totals[part]})
         return codes, flows, None
     return codes, (flows if len(flows) == 2 else []), _pair_reference(q, where) if len(flows) == 2 else None
+
+
+def _adds_targets(parsed: Parsed, codes: dict[str, list[str]], ranged: str | None) -> bool:
+    """Loop 9: the question names two targets or more of one category that a word of the whole may add: each named by
+    its own name (_named_one_by_one), or picked by a range of numbered labels ('3인 이하'). Not an over-wide match of
+    one name (one target asked: its value, not a sum)."""
+    several = [n for n, named in codes.items() if len(named) >= 2]
+    if len(several) != 1:
+        return False
+    return several[0] == ranged or _named_one_by_one(parsed, several[0], codes[several[0]])
 
 
 def _named_one_by_one(parsed: Parsed, name: str, named: list[str]) -> bool:
@@ -925,13 +944,17 @@ def build_plan(plan: Plan, index: TableIndex, table: TableInput) -> Built:
         labels = [index.axes[side].labels[c] for c in plan.codes[side]]
         parsed = parse(index, plan.question)
         diff, ratio = asked_comparison(parsed.rest)
-        reference = reference_index(plan.question, labels, [m.form for m in parsed.matches])
+        reference = reference_index(plan.question, labels, [m.form for m in parsed.matches] + _table_words(index))
         # loop 8: "부산은 서울의 몇 퍼센트". Of cells already in % a percent names their unit, unless a ratio is asked.
         in_percent = any((index.measure_of(ITEM_AXIS, f[ITEM_AXIS]) or (None,))[0] in ("%", "퍼센트")
                          for f in pair if ITEM_AXIS in f)
         if reference is not None and asks_level(parsed.rest) and (ratio or not in_percent):
             return build.level(refs, reference, note)
-        return build.compare(refs, reference, note, asked=diff or ratio)
+        # loop 9: "서울은 부산보다 몇 퍼센트 많아": the difference as a percent of the reference (not of cells in %,
+        # where a percent may be a difference in points)
+        if reference is not None and asks_relative(parsed.rest) and not in_percent:
+            return build.relative(refs, reference, note)
+        return build.compare(refs, reference, note, asked=diff or ratio, diff=diff or not ratio)
     if kind == "share":
         return _share_plan(plan, index, lookup, note)
     if kind == "extreme":
@@ -940,6 +963,26 @@ def build_plan(plan: Plan, index: TableIndex, table: TableInput) -> Built:
 
 
 _REFERENCE_WORD = re.compile(r"보다|에비해|대비|와비교|과비교|을기준|를기준")
+_BY_SUFFIX = re.compile(r"(?:별|단위)$")
+
+
+def _table_words(index: TableIndex) -> list[str]:
+    """Loop 9: the words the table's own information gives (squashed): its title's words, its categories' names and
+    its items' names without a counting word ('사업체수' -> '사업체'), each without 별 ('시도별' -> '시도'). A question
+    may put such a word of the kind of its targets between a target's name and the word that makes it the reference
+    ("부산 지역보다", "제조업 사업체보다"); roles.reference_index reads past them as it reads past the other names."""
+    title = getattr(index.table.meta, "tbl_nm", "") or ""
+    items = index.axes[ITEM_AXIS].labels.values() if ITEM_AXIS in index.axes else ()
+    words: set[str] = set()
+    for text in (*re.split(r"[\s,·()/]+", title), *(n for n in index.axes if n != ITEM_AXIS)):
+        word = _BY_SUFFIX.sub("", squash(text))
+        if len(word) >= 2 and not any(ch.isdigit() for ch in word):
+            words.add(word)
+    for label in items:
+        stem = COUNT_STEM_SUFFIX.sub("", squash(re.sub(r"\s*\(.*\)\s*$", "", label)))
+        if len(stem) >= 2:
+            words.add(stem)
+    return sorted(words)
 
 
 def _pairs_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | None) -> Built:
@@ -980,6 +1023,9 @@ def _share_axis(plan: Plan, index: TableIndex) -> tuple[str, list[str], str] | N
     The denominator is the parts' nearest common parent in the code hierarchy ('외국인근로자' -> '한국국적을 가지지 않은
     자'), else the category's total; a parent the question names with the parts is not a part."""
     order = [ITEM_AXIS] + [n for n in plan.codes if n != ITEM_AXIS]
+    # loop 9: a category with two parts or more named comes before one with a single code: the single code is then
+    # fixed (the region the shares are of), where taking it as the part left the other category two codes to fix
+    order.sort(key=lambda n: len([c for c in plan.codes.get(n, []) if n in index.axes and c != _total(index, n)]) < 2)
     # loop 6: first the category of a group the question looks inside that holds the parts named in it
     order.sort(key=lambda n: not (n in index.axes and any(
         w in index.axes[n].ancestors(c) for w in _within(plan.question, index, n) for c in plan.codes.get(n, []))))
@@ -1032,6 +1078,14 @@ def _share_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | None
     # loop 8: each part's share over the same whole when a word of each is asked and nothing joins the parts
     if len(parts) >= 2 and EACH_TARGET.search(rest) and not SUM_WORDS.search(rest):
         return build.shares_each(refs[:-1], refs[-1], note)
+    # loop 9: two parts' shares compared (a difference, a percent point, or "A 비중은 B보다 높아"): each share over the
+    # same whole and their difference; the part named right before the comparing word is the reference
+    if len(parts) == 2 and asks_gap_of(squash(rest)) and not SUM_WORDS.search(rest):
+        labels = [index.axes[name].labels[c] for c in parts]
+        # read past the other names, the table's words and the share nouns the question says ("2인 가구 비중보다")
+        forms = ([m.form for m in parse(index, plan.question).matches] + _table_words(index)
+                 + [m.group(0) for m in SHARE_WORDS.finditer(squash(plan.question))])
+        return build.shares_gap(refs[:-1], refs[-1], reference_index(plan.question, labels, forms), note)
     return build.share(refs[:-1], refs[-1], note)
 
 

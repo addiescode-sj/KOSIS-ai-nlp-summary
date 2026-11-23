@@ -109,7 +109,12 @@ CHANGE_ASKED = re.compile(CHANGE_WORDS.pattern + r"|증감(?![률율])|변했|�
 # (퍼센트, %, 프로; not a percent point), and an amount asked: 몇 + a counting word ("몇 명", "몇 건", "몇 가구", "몇 세";
 # not 몇 퍼센트, 몇 배, 몇 년, 몇 월, 몇 위) or a percent point (%p, 퍼센트 포인트).
 PERCENT = re.compile(r"퍼센트(?!\s*포인트)|%(?!\s*(?:p|포인트))|프로(?!그|젝)")
-ASKS_AMOUNT = re.compile(r"몇\s*(?!퍼센트|프로|배|번|위|등|년|개월|월|분기|시)[가-힣]|%\s*p|퍼센트\s*포인트|%\s*포인트")
+_HOW_MANY = r"몇\s*(?!퍼센트|프로|배|번|위|등|년|개월|월|분기|시)[가-힣]"  # 몇 + a counting word (몇 명, 몇 건, 몇 가구)
+ASKS_AMOUNT = re.compile(_HOW_MANY + r"|%\s*p|퍼센트\s*포인트|%\s*포인트")
+# Loop 9: a word of the whole (모두, 전부, 총, 통틀어, 도합; the adverbs judge TOTAL_WORDS reads and their kin) right
+# before 몇 + a counting word ("모두 몇 명", "전부 합해서 몇 건", "총 몇 가구"): the amount of the targets together. A
+# word of the whole before a request ("모두 알려줘") lists the values and is not this.
+TOTAL_AMOUNT = re.compile(r"(?:모두|전부|통틀어|도합|총)\s*(?:해서|합해서|합쳐서|더해서)?\s*" + _HOW_MANY)
 
 # Two categories of one table that hold the same names in two roles (loop 5): where a flow starts and where it ends
 # (전출지별 × 전입지별, 출발지 × 도착지, 출신지 × 거주지). The role of a category, read on its name:
@@ -189,6 +194,30 @@ def asks_level(rest: str) -> bool:
     question without its labels: a percent asked with no word of a difference or of more / less (not "몇 퍼센트 많아",
     a relative difference) and no change ("몇 퍼센트 늘었어")."""
     return bool(PERCENT.search(rest)) and not MULTI_DIFF.search(rest) and not CHANGE_ASKED.search(rest)
+
+
+# Loop 9: words that compare two values by more / less (the comparatives of MULTI_DIFF: 많, 적, 높, 낮, 크, 작, 넘, 모자,
+# 덜), apart from the nouns of a difference (차이, 격차, 빼다).
+_MORE_LESS = re.compile(_COMPARATIVE)
+# Loop 9: a word naming the reference of a comparison ("보다", "에 비해", "대비", "와 비교해"), on the squashed rest.
+_AGAINST = re.compile(r"보다|에비해|대비|와비교|과비교")
+
+
+def asks_relative(rest: str) -> bool:
+    """Loop 9: one value's difference from another as a percent of the other ("서울은 부산보다 몇 퍼센트 많아", "몇 %
+    적어"): a percent and a word of more / less asked, read on the question without its labels; no difference named
+    (차이, 격차: "차이가 몇 퍼센트" is left as it was), no ratio, no change. The other side of asks_level, which reads
+    the same percent without a word of more / less."""
+    return (bool(PERCENT.search(rest)) and bool(_MORE_LESS.search(rest)) and not ASKS_GAP.search(rest)
+            and not ASKS_RATIO.search(rest) and not CHANGE_ASKED.search(rest))
+
+
+def asks_gap_of(rest: str) -> bool:
+    """Loop 9: two numbers of one kind compared as a difference (two parts' shares): a difference named (차이, 격차,
+    빼다), a percent point, or a word naming the reference with a word of more / less ("A 비중은 B보다 얼마나 높아").
+    Read on the question without its labels (squashed)."""
+    return bool(ASKS_GAP.search(rest) or re.search(r"%\s*p|퍼센트\s*포인트|%\s*포인트", rest)
+                or (_AGAINST.search(rest) and _MORE_LESS.search(rest)))
 
 
 def asked_comparison(rest: str) -> tuple[bool, bool]:
