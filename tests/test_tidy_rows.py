@@ -74,7 +74,22 @@ def test_a_clean_table_is_unchanged(pop_path):
 
 
 def test_a_table_over_the_row_limit_is_refused_before_it_is_read(pop_path, monkeypatch):
+    """The whole-table load (load_parquet, or load_table on the memory route) refuses it from the footer's row count."""
     monkeypatch.setattr(parquet, "ROW_LIMIT", 5)
     monkeypatch.setattr(parquet, "read_parquet", lambda path: pytest.fail("the file was read"))
     with pytest.raises(SchemaError, match="over the 5-row limit"):
-        load_table(pop_path)
+        parquet.load_parquet(pop_path)
+    with pytest.raises(SchemaError, match="over the 5-row limit"):
+        load_table(pop_path, big_rows=10**9)
+
+
+def test_a_table_over_the_row_limit_is_file_backed_not_refused(pop_path, monkeypatch, tmp_path):
+    """T1-31 S3: a table over the threshold is read from its file (adapters/parquet_store.py), never whole; ROW_LIMIT
+    only caps the whole-table load a table that cannot be file-backed falls back to (tests/test_parquet_store.py)."""
+    whole = load_table(pop_path)
+    monkeypatch.setattr(parquet, "ROW_LIMIT", 5)
+    monkeypatch.setattr(parquet, "BIG_TABLE_ROWS", 5)
+    monkeypatch.setattr(parquet.parquet_store, "INDEX_DIR", tmp_path / "index")
+    monkeypatch.setattr(parquet, "read_parquet", lambda path: pytest.fail("the file was read whole"))
+    table = load_table(pop_path)
+    assert table.file_backed and table.meta == whole.meta

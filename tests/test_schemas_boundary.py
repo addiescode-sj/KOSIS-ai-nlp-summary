@@ -25,6 +25,8 @@ _REQUIRED = object()
 # (new module, name, old module, fields in the dataclass order: name -> default (_REQUIRED: no default), frozen)
 # Read from the dataclasses as they were before S1b (judge/answerability.py, judge/question.py, compute/analyze.py,
 # compute/build.py, llm/analyze_plan.py, compute/engine.py, compute/context.py, compute/resolve.py).
+# Fields added after S1b go at the end with a default (Phase 1 loop: Plan.pairs and Plan.pair_reference in loop 5,
+# Match.parts in loop 7).
 MODELS = (
     (judge_schemas, "Verdict", "kosis_chat.judge.answerability",
      {"outcome": _REQUIRED, "rule": None, "refusal": None, "clarify_question": "", "clarify_options": (),
@@ -34,12 +36,13 @@ MODELS = (
      {"singles": (), "ranges": (), "recent_n": None, "recent": False, "spans": (), "previous": False, "before": None,
       "events": ()}, True),
     (judge_schemas, "Match", "kosis_chat.judge.question",
-     {"axis": _REQUIRED, "code": _REQUIRED, "label": _REQUIRED, "form": _REQUIRED, "exact": _REQUIRED}, True),
+     {"axis": _REQUIRED, "code": _REQUIRED, "label": _REQUIRED, "form": _REQUIRED, "exact": _REQUIRED, "parts": ()}, True),
     (judge_schemas, "Parsed", "kosis_chat.judge.question",
      {"question": _REQUIRED, "periods": _REQUIRED, "matches": _REQUIRED, "rest": _REQUIRED, "words": ()}, False),
     (analyze_schemas, "Plan", "kosis_chat.compute.analyze",
      {"question": _REQUIRED, "type": _REQUIRED, "codes": _REQUIRED, "periods": _REQUIRED, "over": None, "pick": None,
-      "missing_years": [], "default_applied": {}, "unresolved": [], "pattern": None, "groups": [], "events": []}, False),
+      "missing_years": [], "default_applied": {}, "unresolved": [], "pattern": None, "groups": [], "events": [],
+      "pairs": [], "pair_reference": None}, False),
     (analyze_schemas, "TermSteps", "kosis_chat.compute.build",
      {"cells": _REQUIRED, "value": _REQUIRED, "total": None, "agg": None, "periods": ("", "")}, True),
     (analyze_schemas, "Built", "kosis_chat.compute.build",
@@ -150,7 +153,7 @@ def test_positional_arguments_follow_the_field_order():
     j = judge_schemas
     assert j.Match("a", "b", "c", "d", False) == j.Match(axis="a", code="b", label="c", form="d", exact=False)
     with pytest.raises(TypeError):
-        j.Match("a", "b", "c", "d", False, "extra")
+        j.Match("a", "b", "c", "d", False, (), "extra")
     with pytest.raises(TypeError):
         j.Match("a", "b", "c", "d", False, axis="a")
 

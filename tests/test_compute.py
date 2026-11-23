@@ -63,7 +63,7 @@ def test_trend_keeps_every_point_and_derives_difference_and_growth(households):
     assert [by_id[f"f{n}"].period for n in range(1, 5)] == ["2015", "2020", "2023", "2024"]
     diff, growth = by_id["f5"], by_id["f6"]
     assert diff.derivation == "f4 - f1" and diff.value == 3 and diff.round == 0 and diff.unit == "가구"
-    assert growth.derivation == "(f4 / f1 - 1) * 100" and growth.round == 1 and growth.unit == "%"
+    assert growth.derivation == "(f4 / f1 - 1) * 100" and growth.round == 2 and growth.unit == "%"
     assert computed.main == ["f1", "f4", "f5", "f6"] and recomputes(computed)
 
 
@@ -92,7 +92,7 @@ def test_compare_signs(households):
 def test_share_uses_the_total_cell_and_sums_parts(households):
     computed = compute(households, build.share([ref("T1", "21", "2023"), ref("T2", "21", "2023")], ref("T0", "21", "2023")))
     share = facts_by_id(computed)["f4"]
-    assert share.derivation == "(f1 + f2) / f3 * 100" and share.unit == "%" and share.round == 1
+    assert share.derivation == "(f1 + f2) / f3 * 100" and share.unit == "%" and share.round == 2
     assert recomputes(computed)
 
 
@@ -233,7 +233,7 @@ def test_avg_and_sum_over_periods(households, flow):
     avg = compute(households, build.over_periods(seoul("2015", "2020", "2023", "2024"), "avg"))
     by_id = facts_by_id(avg)
     assert avg.pattern == "avg" and avg.main == ["f5"] and by_id["f5"].derivation == "(f1 + f2 + f3 + f4) / 4"
-    assert by_id["f5"].value == 3101.5 and by_id["f5"].round == 1 and by_id["f5"].unit == "가구" and recomputes(avg)
+    assert by_id["f5"].value == 3101.5 and by_id["f5"].round == 2 and by_id["f5"].unit == "가구" and recomputes(avg)
     assert avg.terms[0].cell_ids == ["f1", "f2", "f3", "f4"] and avg.terms[0].periods == ("2015", "2024")
     total = compute(flow, build.over_periods([flow_ref("T1", "2023"), flow_ref("T1", "2024")], "sum", "value"))
     assert facts_by_id(total)["f3"].derivation == "f1 + f2" and facts_by_id(total)["f3"].value == 24 and total.main == ["f1", "f2", "f3"]
@@ -243,7 +243,7 @@ def test_avg_and_sum_over_periods(households, flow):
 def test_two_period_groups_compared(households, flow):
     pavg = compute(households, build.groups_compared(seoul("2015", "2020"), seoul("2023", "2024"), "avg"))
     by_id = facts_by_id(pavg)
-    assert [by_id[i].value for i in pavg.main] == [3100.5, 3102.5, 2.0, 0.1] and by_id["f7"].derivation == "f6 - f3"
+    assert [by_id[i].value for i in pavg.main] == [3100.5, 3102.5, 2.0, 0.06] and by_id["f7"].derivation == "f6 - f3"
     assert by_id["f8"].derivation == "(f6 / f3 - 1) * 100" and by_id["f8"].unit == "%" and recomputes(pavg)
     with pytest.raises(ValueError):  # psum compares two sums, not a sum and a cell
         build.groups_compared([flow_ref("T1", "2023"), flow_ref("T1", "2024")], [flow_ref("T1", "2025")], "sum")
@@ -254,7 +254,7 @@ def test_value_against_an_average(households):
     by_id = facts_by_id(vsa)
     assert vsa.main == ["f4", "f5", "f6", "f7"] and by_id["f4"].value == 3101.0 and by_id["f5"].source_ref == ref("T1", "11", "2024")
     assert (by_id["f6"].derivation, by_id["f6"].value) == ("f5 - f4", 2.0) and by_id["f7"].derivation == "(f5 / f4 - 1) * 100"
-    assert by_id["f8"].derivation == "f5 / f4 * 100" and by_id["f8"].value == 100.1 and "수준" in by_id["f8"].note and recomputes(vsa)
+    assert by_id["f8"].derivation == "f5 / f4 * 100" and by_id["f8"].value == 100.06 and "수준" in by_id["f8"].note and recomputes(vsa)
 
 
 def test_share_change_in_points(households):
@@ -276,7 +276,7 @@ def test_summing_a_stock_or_a_rate_over_periods_is_refused(households, flow):
     assert err.value.reason == "not_aggregatable"
     psum = compute(flow, build.groups_compared([flow_ref("T1", "2023"), flow_ref("T1", "2024")],
                                                [flow_ref("T1", "2024"), flow_ref("T1", "2025")], "sum"))
-    assert [facts_by_id(psum)[i].value for i in psum.main] == [24, 26, 2, 8.3] and recomputes(psum)
+    assert [facts_by_id(psum)[i].value for i in psum.main] == [24, 26, 2, 8.33] and recomputes(psum)
 
 
 @pytest.mark.parametrize("make", [

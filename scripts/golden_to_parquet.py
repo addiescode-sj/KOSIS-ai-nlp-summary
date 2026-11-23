@@ -151,7 +151,7 @@ def main(argv=None) -> int:
     for item in items:
         path = parquet_path(item["table"], data)
         if path not in tables:
-            tables[path] = load_table(path)
+            tables[path] = load_table(path, big_rows=sys.maxsize)  # reads table.cells: the whole-table load
             print(f"loaded {path}: {len(tables[path].cells):,} cells")
         table = tables[path]
         item["table"] = path

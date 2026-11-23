@@ -61,6 +61,15 @@ def test_cli_answers_questions_with_mock(pop_path, capsys):
     assert out.count("[범위 ") == 2
 
 
+def test_cli_reads_a_big_table_whole(pop_path, capsys, monkeypatch):
+    """The B0 chatbot reads table.cells: the CLI loads through the memory route whatever the threshold (T1-31 S3)."""
+    from kosis_chat.adapters import parquet
+
+    monkeypatch.setattr(parquet, "BIG_TABLE_ROWS", 1)
+    assert cli.main(["--table", str(pop_path), "--backend", "mock", "-q", "질문1"]) == 0
+    assert capsys.readouterr().out.count("[mock]") == 1
+
+
 def test_cli_reports_contract_problems(tmp_path, capsys):
     table = tmp_path / "pop.csv"
     table.write_text("item,period,value,unit\n", encoding="utf-8")

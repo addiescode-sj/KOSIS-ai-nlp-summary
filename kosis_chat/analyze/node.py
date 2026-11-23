@@ -9,13 +9,15 @@ adds both to the question's record in the order they come.
 
 from __future__ import annotations
 
-from kosis_chat.analyze import event_lookup, fill, write
+from kosis_chat.analyze import event_lookup, fill, multi, write
 from kosis_chat.analyze.rules import Plan, Unresolved, build_plan, rule_plan
 from kosis_chat.analyze.schemas import (
     EventLookupIn,
     EventLookupOut,
     PlanFillIn,
     PlanFillOut,
+    PlanMultiIn,
+    PlanMultiOut,
     PlanRulesIn,
     PlanRulesOut,
     PlanWriteIn,
@@ -23,7 +25,7 @@ from kosis_chat.analyze.schemas import (
 )
 from kosis_chat.llm.calls import ModelAccess
 from kosis_chat.llm.model import STATUS_OK
-from kosis_chat.schemas.resources import StatResources
+from kosis_chat.schemas.resources import MultiResources, StatResources
 from kosis_chat.schemas.state import LLMCall, called_before
 
 from kosis_ai.schemas import PlanV3  # isort: skip
@@ -171,3 +173,44 @@ def step_plan_write_llm(inp: PlanWriteIn, res: StatResources, *, llm: ModelAcces
     if clarify is not None and len(clarify.options) >= 2:
         return out("clarify", clarify=clarify)
     return out("failed")
+
+
+# ---------------------------------------------------------------- plan_multi_llm (analyze-plan-multi-v1, T1-30)
+
+
+def step_plan_multi_llm(inp: PlanMultiIn, res: MultiResources, *, llm: ModelAccess) -> PlanMultiOut:
+    """The model's plan over two or three tables (analyze-plan-multi-v1), computed by code and said back once.
+
+    In: PlanMultiIn(question, called)
+    Out: PlanMultiOut(placed, clarify, refusal, calls, meta, route "placed" | "clarify" | "refused" | "failed")
+    Side effects: model calls through llm (at most 2: analyze.llm_plan, analyze.llm_plan_retry); computes the plan
+    Node: plan_multi_llm (spans "analyze.llm_plan", "analyze.llm_plan_retry", attribute tables=<n>)
+    """
+    calls: list[LLMCall] = []
+    meta: dict = {"route": "llm_plan_multi", "tables": [r.table.meta.tbl_id for r in res.tables]}
+
+    def out(route, **kw) -> PlanMultiOut:
+        return PlanMultiOut(calls=calls, meta=meta, route=route, **kw)
+
+    user = multi.user_prompt(inp.question, res)
+    last = refusal = None
+    for key in ("plan", "plan_retry"):
+        result, call = llm.ask(f"analyze.llm_{key}", multi.SYSTEM_PROMPT, user, PlanV3,
+                               called=inp.called or called_before(calls), tables=len(res.tables))
+        calls.append(call)
+        if result.status != STATUS_OK:
+            meta[f"{key}_status"] = result.status
+            return out("failed")
+        meta[key] = result.value.model_dump(exclude_defaults=True)
+        placed, refusal = multi.place(inp.question, result.value, res)
+        if not placed.problems:
+            return out("placed", placed=placed)
+        meta[f"{key}_problems"] = placed.problems
+        last = placed
+        user = multi.retry_prompt(user, placed.problems)
+    if last.clarify is not None and len(last.clarify.options) >= 2:
+        return out("clarify", clarify=last.clarify)
+    if refusal is not None:
+        return out("refused", refusal=refusal)
+    return out("failed")
+

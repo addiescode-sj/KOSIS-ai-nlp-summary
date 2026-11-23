@@ -78,7 +78,8 @@ def test_md_files_are_package_data():
     assert data["kosis_chat.analyze"] == ["prompts/*.md"] and data["kosis_chat.compose"] == ["prompts/*.md"]
     listed = {p.name for p in (ROOT / "kosis_chat" / "analyze" / "prompts").glob("*.md")}
     listed |= {p.name for p in (ROOT / "kosis_chat" / "compose" / "prompts").glob("*.md")}
-    assert listed == {c[4] for c in CASES}
+    # T1-30 added the multi-table plan prompt (no old Python constant to compare it with)
+    assert listed == {c[4] for c in CASES} | {"analyze-plan-multi-v1.md", "analyze-plan-multi-v1-examples.md"}
 
 
 def test_prompts_load_from_a_clean_interpreter(tmp_path):

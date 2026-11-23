@@ -22,8 +22,12 @@ from kosis_ai.schemas import PlanV3, QuestionType  # isort: skip
 # period groups compared (pavg, psum), a period against an average (vsa), two shares compared (shr), the gap between
 # two targets at two periods (gap), and the change of two targets compared (grw); plan: a plan the model wrote
 # (analyze_plan, S5b), whose shape has no name, so its sentence and chart list the numbers it shows.
+# cagr (loop 3, a Plan's pattern only: its blocks are built as "plan"): the average yearly rate of change between the
+# first and the last asked year.
 Pattern = Literal["value", "trend", "compare", "share", "extreme", "avg", "sum", "pavg", "psum", "vsa", "shr", "gap", "grw",
-                  "plan"]
+                  "plan", "cagr", "excl", "apc", "pratio", "each"]
+# loop 7 (Plan patterns, built as "compare" / "plan"): pratio, one period over another of one series ("2013년의 몇
+# 배"); each, each of two targets' change between two periods ("서울과 부산은 각각 얼마나 줄었어").
 Agg = Literal["avg", "sum"]
 
 
@@ -46,6 +50,10 @@ class Plan(BoundaryModel):
     groups: SkipValidation[list[list[str]]] = Field(default_factory=list)
     # (phrase, start) of calendar events periods came from
     events: SkipValidation[list[tuple[str, str]]] = Field(default_factory=list)
+    # loop 5: two named flows of a table whose two categories hold the same names in two roles (from, to): one code
+    # per category each, in question order (a compare of the two, or for a share: the part, then the whole)
+    pairs: SkipValidation[list[dict[str, str]]] = Field(default_factory=list)
+    pair_reference: int | None = None  # the index of the flow compared against (blocks.compare reference)
 
 
 # ---------------------------------------------------------------- compute/build.py
@@ -171,3 +179,28 @@ class EventLookupOut(BoundaryModel):
 
     start: str | None = None
     call: SkipValidation[LLMCall]
+
+
+# ---------------------------------------------------------------- analyze/multi.py (T1-30)
+
+
+class PlanMultiIn(BoundaryModel):
+    """step_plan_multi_llm's input: the question and whether a model answer came back already for it."""
+
+    question: str
+    called: bool = False
+
+
+class PlanMultiOut(BoundaryModel):
+    """step_plan_multi_llm's output. route "placed": placed holds the computed plan (built, computed). "clarify": the
+    plan named something several codes could be (two options or more). "refused": the second plan also computed to a
+    refusal (refusal: compute.CalcRefused), which is the answer. "failed": no usable plan (a refusal with reason
+    "class_mismatch" is answered; there is no compact-v2 fallback over several tables)."""
+
+    placed: SkipValidation[Placed | None] = None
+    clarify: Any = None
+    refusal: Any = None
+    calls: SkipValidation[list[LLMCall]] = Field(default_factory=list)
+    meta: SkipValidation[dict[str, Any]] = Field(default_factory=dict)
+    route: Literal["placed", "clarify", "refused", "failed"]
+

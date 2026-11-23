@@ -13,7 +13,7 @@ from typing import Literal
 
 from kosis_chat.shared.periods import span_text  # T1-28 S2b: was answer.render (compute must not import the answer)
 
-from kosis_ai.schemas import AggregateStep, CombineStep, PlanV3, QuestionType, RankStep, SelectStep  # isort: skip
+from kosis_ai.schemas import AggregateStep, CombineStep, MapStep, PeriodSpec, PlanV3, QuestionType, RankStep, SelectStep, TargetSpec  # isort: skip
 from kosis_chat.analyze.schemas import Agg, Built, Pattern, TermSteps  # isort: skip  # re-export: moved in T1-28 S1b
 
 AGG_WORDS = {"avg": "평균", "sum": "합계"}
@@ -47,20 +47,40 @@ def trend(cells: list[str], note: str | None = None) -> Built:
     return Built(_plan(steps, ["a", "b", "d", "g"], "trend", note), "trend")
 
 
-def compare(cells: list[str], reference: int | None = None, note: str | None = None) -> Built:
-    """Two cells: the subject minus the named reference (reference = its index), else larger minus smaller."""
+def compare(cells: list[str], reference: int | None = None, note: str | None = None, asked: bool = True,
+            per: tuple[int, float] | None = None) -> Built:
+    """Two cells: the subject minus the named reference (reference = its index), else larger minus smaller.
+
+    Loop 2: asked False (the question asks for no difference and no ratio): the two values side by side, so two
+    values of different units are not refused for a formula nobody asked; the answer step keeps the asked one of
+    the difference and the ratio otherwise. Or per = (the denominator's index,
+    the scale): one cell per scale units of the other ("혼인 1천 건당 이혼 건수")."""
     if len(cells) != 2:
         raise ValueError(f"compare needs 2 cells, got {len(cells)}")
     if reference not in (None, 0, 1):
         raise ValueError("reference is an index (0 or 1) into the two compare cells")
     steps: list = [SelectStep(id="x", cells=[cells[0]]), SelectStep(id="y", cells=[cells[1]])]
+    if per is not None:
+        den, scale = per
+        a, b = ("y", "x") if den == 0 else ("x", "y")
+        steps.append(CombineStep(id="p", a=a, b=b, fn="per", scale=scale, note=f"{scale:g}당"))
+        return Built(_plan(steps, ["x", "y", "p"], "compare", note), "plan", reference=den)
     if reference is None:
         a, b, orient = "x", "y", "larger_first"
     else:
         a, b, orient = ("y", "x", "fixed") if reference == 0 else ("x", "y", "fixed")
+    if not asked:  # the two values only (pattern "plan": the listed sentence, no formula to choose from)
+        return Built(_plan(steps, ["x", "y"], "compare", note), "plan", reference=reference)
     steps += [CombineStep(id="d", a=a, b=b, fn="diff", orient=orient),
               CombineStep(id="r", a=a, b=b, fn="ratio", orient=orient, optional=True)]
     return Built(_plan(steps, ["x", "y", "d", "r"], "compare", note), "compare", reference=reference)
+
+
+def remainder(whole: str, part: str, note: str | None = None) -> Built:
+    """The whole minus one of its parts (loop 4: "전국에서 서울을 제외한 나머지"): the two cells and the difference."""
+    steps = [SelectStep(id="x", cells=[whole]), SelectStep(id="y", cells=[part]),
+             CombineStep(id="d", a="x", b="y", fn="diff", orient="fixed", note="전체에서 뺀 나머지")]
+    return Built(_plan(steps, ["x", "y", "d"], "compare", note), "plan")
 
 
 def share(parts: list[str], total: str, note: str | None = None) -> Built:
@@ -71,9 +91,60 @@ def share(parts: list[str], total: str, note: str | None = None) -> Built:
 
 
 def extreme(candidates: list[str], pick: Literal["max", "min"], totals: list[str] | None = None,
-            context: list[str] | None = None, note: str | None = None) -> Built:
-    steps = [RankStep(id="k", candidates=candidates, totals=list(totals or []), pick=pick)]
+            context: list[str] | None = None, note: str | None = None,
+            places: tuple[Literal["places", "place"], int] | None = None) -> Built:
+    """The first place of a ranking; places (loop 3) = ("places", n): the first n places, ("place", n): the n-th."""
+    report, keep = places if places else ("first", 2)
+    steps = [RankStep(id="k", candidates=candidates, totals=list(totals or []), pick=pick, keep=keep, report=report)]
     return Built(_plan(steps, ["k"], "extreme", note), "extreme", context=list(context or []))
+
+
+def ranked_change(axis: str, codes: list[str], fixed: dict[str, str], item_axis: str, periods: tuple[str, str],
+                  rate: bool, pick: Literal["max", "min"], places: tuple[Literal["places", "place"], int] | None = None,
+                  note: str | None = None) -> Built:
+    """Candidates ranked by their change between two periods (loop 3): per code of axis, its cells at the earlier
+    and the later period and the later minus the earlier (or the rate of change); the answer cites the picked
+    candidates' two cells and their change."""
+    def select(step_id: str, period: str) -> SelectStep:
+        dims = {name: TargetSpec(codes=[code]) for name, code in fixed.items() if name not in (item_axis, axis)}
+        star = TargetSpec(codes=["*"])
+        if axis == item_axis:
+            item = star
+        else:
+            dims[axis] = star
+            item = TargetSpec(codes=[fixed[item_axis]]) if item_axis in fixed else None
+        return SelectStep(id=step_id, item=item, dims=dims, periods=PeriodSpec(kind="list", periods=[period]))
+
+    early, late = sorted(periods)
+    word = "증감률" if rate else "증감"
+    body = [select("ma", early), select("mb", late),
+            CombineStep(id="md", a="mb", b="ma", fn="pct_change" if rate else "diff", note=f"{early} 대비 {late} {word}")]
+    report, keep = places if places else ("places", 1)
+    steps = [MapStep(id="m", axis=axis, codes=codes, body=body, result="md"),
+             RankStep(id="k", of="m", pick=pick, keep=keep, report=report)]
+    return Built(_plan(steps, ["k"], "extreme", note), "plan")
+
+
+def average_growth(early: str, late: str, years: int, note: str | None = None, amount: bool = False) -> Built:
+    """The average yearly rate of change from one cell to a later one (loop 3: "연평균 증가율"); amount (loop 4: "한 해
+    평균 몇 명씩 늘었어"): the average yearly change, (late - early) / years."""
+    fn, word = ("avg_change", "연평균 증감") if amount else ("cagr", "연평균 증감률")
+    steps = [SelectStep(id="a", cells=[early]), SelectStep(id="b", cells=[late]),
+             CombineStep(id="g", a="b", b="a", fn=fn, years=years, note=f"{years}년간 {word}")]
+    return Built(_plan(steps, ["a", "b", "g"], "trend", note), "plan")
+
+
+def extremes_combined(cells: list[str], fn: Literal["diff", "ratio"] | None, note: str | None = None) -> Built:
+    """The largest and the smallest of the candidates, and their difference or ratio (loop 3: "가장 많은 해와 가장
+    적은 해의 차이"); fn None (loop 4: "가장 많은 곳과 가장 적은 곳은?"): the two values alone."""
+    if len(cells) < 2:
+        raise ValueError(f"extremes need 2+ cells, got {len(cells)}")
+    steps = [SelectStep(id="s", cells=cells), AggregateStep(id="hi", of="s", fn="max"),
+             AggregateStep(id="lo", of="s", fn="min")]
+    if fn is None:
+        return Built(_plan(steps, ["hi", "lo"], "value", note), "plan")
+    steps.append(CombineStep(id="d", a="hi", b="lo", fn=fn, note="최댓값과 최솟값의 " + ("차이" if fn == "diff" else "배율")))
+    return Built(_plan(steps, ["hi", "lo", "d"], "compare", note), "plan")
 
 
 # ---------------------------------------------------------------- numbers over periods
@@ -178,6 +249,20 @@ def growth(first: tuple[str, str], second: tuple[str, str], amount: bool = False
     steps.append(CombineStep(id="d", a="v1", b="v2", fn="pp_diff" if not amount else "diff",
                              orient="smaller_first" if decline else "larger_first", note=f"{unit_word} 차이"))
     return Built(_plan(steps, ["a1", "b1", "a2", "b2", "v1", "v2", "d"], "compare", note), "grw")
+
+
+def changes_each(pairs: list[tuple[str, str]], rate: bool, note: str | None = None) -> Built:
+    """Loop 7: each target's change between two periods (its rate of change when rate), and nothing that compares
+    the changes ("서울과 부산은 각각 얼마나 줄었어"). pairs: each target's (earlier, later) cells, in question order."""
+    fn, word = ("pct_change", "증감률") if rate else ("diff", "증감")
+    steps: list = []
+    show: list[str] = []
+    for n, pair in enumerate(pairs, start=1):
+        early, late = by_period(list(pair))
+        steps += [SelectStep(id=f"a{n}", cells=[early]), SelectStep(id=f"b{n}", cells=[late]),
+                  CombineStep(id=f"v{n}", a=f"b{n}", b=f"a{n}", fn=fn, note=word)]
+        show += [f"a{n}", f"b{n}", f"v{n}"]
+    return Built(_plan(steps, show, "trend", note), "plan")
 
 
 # ---------------------------------------------------------------- a plan the model wrote (S5b)

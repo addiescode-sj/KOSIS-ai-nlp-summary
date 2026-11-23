@@ -12,14 +12,17 @@ from __future__ import annotations
 
 import operator
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
+from functools import partial
 
-from kosis_chat.compute import semantics
-from kosis_chat.compute.resolve import EventLookup, resolve_select
+from kosis_chat.compute import scale, semantics
+from kosis_chat.compute.resolve import EventLookup, resolve_select_cells
 from kosis_chat.compute.engine import (
     PERCENT_DIGITS,
     CalcRefused,
     _cell_fact,
+    _cells,
     _check_units,
     _derived,
     _diff_unit,
@@ -29,8 +32,9 @@ from kosis_chat.compute.engine import (
     _Read,
     _share_parts,
 )
-from kosis_chat.data.schema import TableInput
+from kosis_chat.data.schema import Cell, TableInput
 from kosis_chat.judge import messages
+from kosis_chat.prepare.store import ITEM_AXIS, CellKey, store_of
 from kosis_chat.shared.patterns import FACT_ID
 from kosis_chat.shared.periods import span_text  # T1-28 S2b: was answer.render (compute must not import the answer)
 
@@ -87,6 +91,7 @@ class Mapped:
     codes: list[str]
     labels: list[str]
     values: list[Scalar]
+    facts: list[list[str]] = field(default_factory=list)  # loop 3: the facts the body made for each code, in order
 
     @property
     def ids(self) -> list[str]:
@@ -109,30 +114,133 @@ class PlanRun:
         return list(out.ids)
 
 
+class _MapCache:
+    """The cells a map's bodies read, kept for the whole map, so that a map makes the same store requests for any
+    number of codes. A key not seen yet is asked for under every code of the map at once (the key with the map's
+    axis set to each code: what the same select asks for at the other codes); refs are kept as read (a body's refs
+    do not change with the code). A key or ref the store did not have is remembered too. Only what the store
+    returned is given back, so the bodies read the cells they read without the cache."""
+
+    def __init__(self, axis: str, codes: list[str]) -> None:
+        self.axis = axis
+        self.codes = codes
+        self.keys: dict[int, dict[CellKey, Cell | None]] = {}  # id(table) -> key -> its cell
+        self.refs: dict[int, dict[str, Cell | None]] = {}  # id(table) -> ref -> its cell
+
+    def _at_codes(self, key: CellKey, code: str) -> list[CellKey]:
+        """key at every code of the map, when key is at `code` on the map's axis; else none."""
+        item, dims, period = key
+        if self.axis == ITEM_AXIS:
+            return [(c, dims, period) for c in self.codes] if item == code else []
+        if (self.axis, code) not in dims:
+            return []
+        return [(item, tuple((n, c if n == self.axis else v) for n, v in dims), period) for c in self.codes]
+
+    def cells_at(self, table: TableInput, keys: Iterable[CellKey], code: str) -> dict[CellKey, Cell]:
+        keys = list(keys)
+        known = self.keys.setdefault(id(table), {})
+        new = [k for k in keys if k not in known]
+        if new:
+            wanted = list(dict.fromkeys([*new, *(k2 for k in new for k2 in self._at_codes(k, code))]))
+            found = store_of(table).cells_at(wanted)
+            known.update((k, found.get(k)) for k in wanted)
+        return {k: cell for k in keys if (cell := known[k]) is not None}
+
+    def by_refs(self, table: TableInput, refs: list[str]) -> dict[str, Cell]:
+        known = self.refs.setdefault(id(table), {})
+        new = list(dict.fromkeys(r for r in refs if r not in known))
+        if new:
+            found = _cells(table, new)
+            known.update((r, found.get(r)) for r in new)
+        return {r: cell for r in refs if (cell := known[r]) is not None}
+
+
 class _Run:
-    def __init__(self, table: TableInput, lookup: EventLookup | None = None) -> None:
-        self.table = table
+    def __init__(self, table: TableInput, lookup: EventLookup | None = None,
+                 tables: dict[str, TableInput] | None = None) -> None:
+        self.table = table  # the first table: a select without `table` reads it
+        # T1-30: every table of the question by tbl_id; one table is the only entry (the behaviour before T1-30)
+        self.tables = dict(tables) if tables else {table.meta.tbl_id: table}
         self.lookup = lookup
         self.star: dict[str, str] = {}
+        self.cache: _MapCache | None = None  # inside a map: the cells its bodies read (one request for all codes)
         self.facts: list[Fact] = []
         self.ids = _Ids()
         self.results: dict[str, object] = {}
         self.cautions: list[str] = []
         self.raw: dict[str, float] = {}  # derived fact id -> its value before rounding
+        self.origin: dict[str, frozenset[str]] = {}  # step id -> the tbl_ids its numbers come from (T1-30)
 
     def add(self, fact: Fact) -> Fact:
         self.facts.append(fact)
         return fact
 
+    @property
+    def multi(self) -> bool:
+        return len(self.tables) > 1
+
+    def _of(self, ref: str) -> TableInput:
+        """The table a source_ref names (its first part is the tbl_id); the first table when no table has it."""
+        return self.tables.get(ref.split("|", 1)[0], self.table)
+
+    def _for(self, step: SelectStep) -> TableInput:
+        """The table a select reads: its `table`, else the first table. A table the question was not given is left to
+        resolve_select, which refuses it as before (out_of_scope)."""
+        return self.tables.get(step.table, self.table) if step.table else self.table
+
+    def origin_of(self, step) -> frozenset[str]:
+        """The tbl_ids a step's numbers come from (T1-30): a select's table, the union of its inputs' otherwise."""
+        if isinstance(step, SelectStep):
+            if step.cells:
+                return frozenset(ref.split("|", 1)[0] for ref in step.cells)
+            return frozenset({step.table if step.table and step.table not in self.tables else self._for(step).meta.tbl_id})
+        if isinstance(step, MapStep):
+            for body in step.body:
+                self.origin[body.id] = self.origin_of(body)
+            out = frozenset().union(*(self.origin.pop(b.id) for b in step.body))
+            return out
+        return frozenset().union(*(self.origin.get(i, frozenset()) for i in step.inputs()))
+
+    def _fetched(self, wanted: list[tuple[TableInput, str]]) -> list[dict[str, Cell]]:
+        """For each (table, ref), the cells found in that table, for _read(found=): one store request per table (a
+        question has one to three), however many refs."""
+        tables: list[TableInput] = []
+        refs: list[list[str]] = []
+        at: list[int] = []
+        for table, ref in wanted:
+            n = next((n for n, t in enumerate(tables) if t is table), len(tables))
+            if n == len(tables):
+                tables.append(table)
+                refs.append([])
+            refs[n].append(ref)
+            at.append(n)
+        found = [self.cache.by_refs(t, r) if self.cache is not None else _cells(t, r) for t, r in zip(tables, refs)]
+        return [found[n] for n in at]
+
+    def _cross(self, *step_ids: str) -> bool:
+        """The steps' numbers come from different tables (T1-30); never true for one table."""
+        return self.multi and len({self.origin.get(i, frozenset()) for i in step_ids}) > 1
+
     # ------------------------------------------------------------ blocks
 
     def select(self, step: SelectStep) -> Cells:
         cells = step.cells
-        if not cells:
-            resolved = resolve_select(self.table, step, self.lookup, self.star)
+        if cells:
+            wanted = [(self._of(ref), ref) for ref in cells]
+            found = self._fetched(wanted)
+        else:
+            table = self._for(step)
+            # in a map: the keys of this select at every code of the map are asked for at once
+            cache = self.cache
+            cells_at = None if cache is None else partial(cache.cells_at, table, code=self.star[cache.axis])
+            resolved, known = resolve_select_cells(table, step, self.lookup, self.star, cells_at)
             cells = resolved.cells
             self.cautions += [c for c in resolved.cautions if c not in self.cautions]
-        reads = [_read(self.table, ref) for ref in cells]
+            # the cells resolve found are read as they are; a ref whose tbl_id names another table is read there
+            wanted = [(self._of(ref), ref) for ref in cells]
+            other = iter(self._fetched([(t, ref) for t, ref in wanted if t is not table]))
+            found = [known if t is table else next(other) for t, _ in wanted]
+        reads = [_read(t, ref, f) for (t, ref), f in zip(wanted, found)]
         _check_units(reads)
         return Cells([self.add(_cell_fact(self.ids(), r)).id for r in reads], reads)
 
@@ -165,7 +273,7 @@ class _Run:
         span = span_text(*periods)
         note = f"{span} {len(values)}개 시점 {AGG_NOTES[step.fn]}"
         if step.fn == "avg":
-            digits = max(1, digits)
+            digits = max(2, digits)  # loop 1: an average is read to two decimals (was 1)
             fact = _derived(self.ids(), f"({' + '.join(ids)}) / {len(ids)}", sum(values) / len(values), digits, reads[0].unit, note=note)
         else:
             fact = _derived(self.ids(), " + ".join(ids), sum(values), digits, reads[0].unit, note=note)
@@ -186,11 +294,12 @@ class _Run:
         if step.fn == "share":
             return self._share(step)
         a_src, b_src = self.results[step.a], self.results[step.b]
+        cross = self._cross(step.a, step.b)  # T1-30: two tables; their units are aligned below, not compared here
         for src in (a_src, b_src):
             if isinstance(src, Cells):
                 _check_units([*src.reads])
         reads = [s.reads[0] for s in (a_src, b_src) if isinstance(s, Cells)]
-        if len(reads) == 2:
+        if len(reads) == 2 and not cross:
             _check_units(reads)
         a, b = self._scalar(step.a), self._scalar(step.b)
         if a.id == b.id:  # first and last of a series with one number, or one cell against itself
@@ -198,16 +307,23 @@ class _Run:
             if symbol is not None:
                 _numeric(symbol)
             raise CalcRefused("missing_value", messages.refusal_message("missing_value", raw="-", meaning="비교할 값이 부족함"))
+        if cross:
+            a, b = self._aligned(step.fn, a, b)
         if (step.orient == "larger_first" and a.value < b.value) or (step.orient == "smaller_first" and a.value > b.value):
             a, b = b, a
-        if step.fn in ("diff", "pp_diff", "pct_change", "cagr"):
+        if step.fn in ("diff", "pp_diff", "pct_change", "cagr", "sum", "avg_change"):
             semantics.check_same_unit(step.fn, a.unit, b.unit, f"{a.id}·{b.id}")
         unit = b.unit if b.unit is not None else a.unit
         if step.optional and self._meaningless(step.fn, a, b, unit):
             return None
         fn = step.fn
-        if fn == "diff":
+        if fn == "sum":
+            fact = self._make(f"{a.id} + {b.id}", a.value + b.value, max(a.digits, b.digits), unit, step.note)
+        elif fn == "diff":
             fact = self._make(f"{a.id} - {b.id}", a.value - b.value, max(a.digits, b.digits), _diff_unit(unit), step.note)
+        elif fn == "avg_change":  # loop 4: the average change per period, read to two decimals as an average is
+            fact = self._make(f"({a.id} - {b.id}) / {step.years}", (a.value - b.value) / step.years,
+                              max(2, a.digits, b.digits), _diff_unit(unit), step.note)
         elif fn == "pp_diff":
             fact = self._make(f"{a.id} - {b.id}", a.value - b.value, PERCENT_DIGITS, "%p", step.note)
         else:
@@ -235,6 +351,32 @@ class _Run:
         self.raw[fact.id] = value
         return fact
 
+    def _converted(self, x: Scalar, unit: str) -> Scalar:
+        """x in another unit of the same base (T1-30, '천명' -> '명'): a derived fact whose derivation names the factor."""
+        op, factor = scale.conversion(x.unit, unit)
+        zeros = len(str(factor)) - 1
+        if op == "*":
+            value, digits = x.value * factor, max(0, x.digits - zeros)
+        else:
+            value, digits = x.value / factor, x.digits + zeros
+        fact = self._make(f"{x.id} {op} {factor}", value, digits, unit, f"{x.unit}→{unit} 환산")
+        self.add(fact)
+        return Scalar(fact.id, fact.value, unit, digits, x.periods, exact=value)
+
+    def _aligned(self, fn: str, a: Scalar, b: Scalar) -> tuple[Scalar, Scalar]:
+        """Two numbers from different tables in one unit (T1-30, D5): a unit that differs only by a prefix is
+        converted to the finer one; other different units are refused, except for per, ratio and index, whose
+        result does not keep the inputs' unit (births per 1,000 people)."""
+        if not a.unit or not b.unit or a.unit == b.unit:
+            return a, b
+        target = scale.common_unit(a.unit, b.unit)
+        if target is None:
+            if fn in ("per", "ratio", "index"):
+                return a, b
+            raise CalcRefused("unit_mismatch", messages.refusal_message("unit_mismatch", what=f"{a.id}·{b.id}",
+                                                                        units=f"{a.unit} / {b.unit}"))
+        return (a if a.unit == target else self._converted(a, target)), (b if b.unit == target else self._converted(b, target))
+
     @staticmethod
     def _meaningless(fn: str, a: Scalar, b: Scalar, unit: str | None) -> bool:
         if fn == "ratio":
@@ -250,15 +392,31 @@ class _Run:
         parts, total = self.results[step.a], self.results[step.b]
         if not (isinstance(parts, Cells) and isinstance(total, Cells) and len(total.ids) == 1):
             raise CalcRefused("class_mismatch", messages.refusal_message("class_mismatch", what=step.id))
-        _check_units([*parts.reads, *total.reads])
-        semantics.check_share_parts(parts.reads)
-        semantics.check_share_scope(self.table, parts.reads, total.reads[0])
-        values = [_numeric(r) for r in parts.reads]
-        whole = _numeric(total.reads[0])
+        total_id = total.ids[0]
+        if self._cross(step.a, step.b):  # T1-30: the part and the whole are in two tables
+            _check_units(parts.reads)
+            semantics.check_share_parts(parts.reads)
+            semantics.check_share_periods(parts.reads, total.reads[0])
+            values = [_numeric(r) for r in parts.reads]
+            whole = _numeric(total.reads[0])
+            unit, total_unit = parts.reads[0].unit, total.reads[0].unit
+            if unit and total_unit and unit != total_unit:
+                if scale.conversion(total_unit, unit) is None:
+                    raise CalcRefused("unit_mismatch", messages.refusal_message(
+                        "unit_mismatch", what=f"{step.a}·{step.b}", units=f"{unit} / {total_unit}"))
+                r = total.reads[0]
+                converted = self._converted(Scalar(total_id, whole, total_unit, r.digits, (r.cell.period_raw,) * 2), unit)
+                total_id, whole = converted.id, converted.value
+        else:
+            _check_units([*parts.reads, *total.reads])
+            semantics.check_share_parts(parts.reads)
+            semantics.check_share_scope(self.table, parts.reads, total.reads[0])
+            values = [_numeric(r) for r in parts.reads]  # the parts first, then the whole (the order before T1-30)
+            whole = _numeric(total.reads[0])
         if not whole:
             raise CalcRefused("missing_value", messages.refusal_message("missing_value", raw="0", meaning="합계가 0"))
         top = " + ".join(parts.ids)
-        expr = f"({top}) / {total.ids[0]} * 100" if len(parts.ids) > 1 else f"{top} / {total.ids[0]} * 100"
+        expr = f"({top}) / {total_id} * 100" if len(parts.ids) > 1 else f"{top} / {total_id} * 100"
         semantics.check_share_bound(sum(values) / whole * 100, "·".join(r.cell.item for r in parts.reads))
         fact = self.add(_derived(self.ids(), expr, sum(values) / whole * 100, PERCENT_DIGITS, "%", step.note))
         period = total.reads[0].cell.period_raw
@@ -269,17 +427,22 @@ class _Run:
             return self._rank_mapped(step)
         word = "가장 높음" if step.pick == "max" else "가장 낮음"
         ranked: list[tuple[float, list[Fact], str]] = []
+        # every candidate and its total (read in the candidate's table) in one request per table, not one per cell
+        fetched = self._fetched([(self._of(ref), ref) for ref in step.candidates]
+                                + [(self._of(ref), total) for ref, total in zip(step.candidates, step.totals)])
         for i, ref in enumerate(step.candidates):
             ids = _Ids()
+            found = fetched[i]
             try:
                 if step.totals:
-                    part, whole = _read(self.table, ref), _read(self.table, step.totals[i])
-                    facts, share, score = _share_parts(self.table, [ref], step.totals[i], ids)
-                    semantics.check_share_scope(self.table, [part], whole)
+                    table = self._of(ref)
+                    part, whole = _read(table, ref, found), _read(table, step.totals[i], found)
+                    facts, share, score = _share_parts(table, [ref], step.totals[i], ids, found)
+                    semantics.check_share_scope(table, [part], whole)
                     semantics.check_share_bound(score, part.cell.item)
                     ranked.append((score, [*facts, share], share.id))
                 else:
-                    read = _read(self.table, ref)
+                    read = _read(self._of(ref), ref, found)
                     ranked.append((_numeric(read), [_cell_fact(ids(), read)], "f1"))
             except CalcRefused as exc:
                 if exc.reason != "missing_value":
@@ -288,8 +451,11 @@ class _Run:
             raise CalcRefused("missing_value", messages.refusal_message("missing_value", raw="-", meaning="비교할 값이 부족함"))
         semantics.check_rank_units([next(f.unit for f in group if f.id == scored) for _, group, scored in ranked])
         ranked.sort(key=lambda x: x[0], reverse=step.pick == "max")
+        if step.report == "place" and len(ranked) < step.keep:
+            raise CalcRefused("missing_value", messages.refusal_message("missing_value", raw="-", meaning=f"{step.keep}번째 값이 없음"))
         picked: dict[str, str] = {}
         first: list[str] = []
+        kept: list[list[str]] = []  # loop 3: each kept place's facts, in rank order (report places / place)
         places = ("winner", "runner_up") + tuple(f"place_{n}" for n in range(3, step.keep + 1))
         for place, (_, group, scored) in zip(places, ranked[: step.keep]):
             offset = len(self.facts)
@@ -301,6 +467,7 @@ class _Run:
                 self.add(f.model_copy(update={"id": renamed[f.id], "derivation": expr, "note": note or f.note}))
             self.ids.n = len(self.facts)
             picked[place] = renamed[scored]
+            kept.append(list(renamed.values()))
             if place == "winner":
                 first = list(renamed.values())
         ranking = []
@@ -308,7 +475,7 @@ class _Run:
             cell = next(f for f in group if f.source_ref)
             unit = next(f.unit for f in group if f.id == scored)
             ranking.append({"dims": dict(cell.dims or {}), "period": cell.period, "value": score, "unit": unit})
-        return Ranking(first, picked, ranking)
+        return Ranking(_reported(step, first, kept), picked, ranking)
 
     def _rank_mapped(self, step: RankStep) -> Ranking:
         """Rank a map's values; their facts are already made, the first keep get their place as a note."""
@@ -327,25 +494,41 @@ class _Run:
             picked[place] = fid
         ranking = [{"dims": {src.axis: src.labels[n]}, "period": None, "value": src.values[n].value, "unit": src.values[n].unit}
                    for n in order]
-        return Ranking([picked[p] for p in places[: min(step.keep, len(order))]], picked, ranking)
+        if step.report == "first":
+            return Ranking([picked[p] for p in places[: min(step.keep, len(order))]], picked, ranking)
+        if step.report == "place" and len(order) < step.keep:
+            raise CalcRefused("missing_value", messages.refusal_message("missing_value", raw="-", meaning=f"{step.keep}번째 값이 없음"))
+        kept = [src.facts[n] if n < len(src.facts) else [src.values[n].id] for n in order[: step.keep]]
+        return Ranking(_reported(step, kept[0] if kept else [], kept), picked, ranking)
 
     def map(self, step: MapStep) -> Mapped:
         """Run the body once per code, with the mapped axis's '*' set to that code; keep result per code."""
-        axis = semantics.index_of(self.table).axes.get(step.axis)
+        starred = next(b for b in step.body if isinstance(b, SelectStep) and step.axis in b.dims)
+        axis = semantics.index_of(self._for(starred)).axes.get(step.axis)
         if axis is None:
             raise CalcRefused("class_mismatch", messages.refusal_message("class_mismatch", what=f"분류 {step.axis}"))
         values: list[Scalar] = []
-        for code in step.codes:
-            if code not in axis.labels:
-                raise CalcRefused("class_mismatch", messages.refusal_message("class_mismatch", what=f"{step.axis} {code}"))
-            self.star = {step.axis: code}
-            for body in step.body:
-                self.results[body.id] = getattr(self, body.op)(body)
-            values.append(self._scalar(step.result))
-            for body in step.body:
-                del self.results[body.id]
-        self.star = {}
-        return Mapped(step.axis, list(step.codes), [axis.labels[c] for c in step.codes], values)
+        made: list[list[str]] = []
+        self.cache = _MapCache(step.axis, list(step.codes))
+        try:  # the cache and '*' are the map's only: a select after the map (or after a refused map) reads the store
+            for code in step.codes:
+                if code not in axis.labels:
+                    raise CalcRefused("class_mismatch",
+                                      messages.refusal_message("class_mismatch", what=f"{step.axis} {code}"))
+                self.star = {step.axis: code}
+                start = len(self.facts)
+                for body in step.body:
+                    self.origin[body.id] = self.origin_of(body)
+                    self.results[body.id] = getattr(self, body.op)(body)
+                values.append(self._scalar(step.result))
+                made.append([f.id for f in self.facts[start:]])
+                for body in step.body:
+                    del self.results[body.id]
+                    self.origin.pop(body.id, None)
+        finally:
+            self.cache = None
+            self.star = {}
+        return Mapped(step.axis, list(step.codes), [axis.labels[c] for c in step.codes], values, made)
 
     def find(self, step: FindStep) -> Found:
         src = self.results[step.of]
@@ -359,10 +542,23 @@ class _Run:
         return Found({"first": hits[:1], "last": hits[-1:], "all": hits}[step.which])
 
 
-def run_plan(table: TableInput, plan: PlanV3, lookup: EventLookup | None = None) -> PlanRun:
-    """Facts of plan over table; lookup answers events missing from the calendar (resolve.py)."""
-    run = _Run(table, lookup)
+def _reported(step: RankStep, first: list[str], kept: list[list[str]]) -> list[str]:
+    """The facts a ranking cites (RankStep.report, loop 3): the winner's, every kept place's, or the keep-th place's."""
+    if step.report == "places":
+        return [i for group in kept for i in group]
+    if step.report == "place":
+        return list(kept[step.keep - 1]) if len(kept) >= step.keep else []
+    return first
+
+
+def run_plan(table: TableInput, plan: PlanV3, lookup: EventLookup | None = None,
+             tables: dict[str, TableInput] | None = None) -> PlanRun:
+    """Facts of plan over table; lookup answers events missing from the calendar (resolve.py).
+
+    tables (T1-30): every table of a question by tbl_id, table among them (the one a select without `table` reads)."""
+    run = _Run(table, lookup, tables)
     for step in plan.steps:
+        run.origin[step.id] = run.origin_of(step)
         run.results[step.id] = getattr(run, step.op)(step)
     out = PlanRun(run.facts, run.results, [], run.cautions)
     out.main = list(dict.fromkeys(i for s in plan.show for i in out.ids_of(s)))

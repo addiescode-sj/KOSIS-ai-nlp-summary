@@ -53,7 +53,10 @@ def direction(fact: Fact) -> str:
     return "증가" if fact.value > 0 else "감소"
 
 
-_KIND_WORDS = {"growth": "증감률", "difference": "차이", "share": "비중", "ratio": "배수", "avg": "평균", "sum": "합계"}
+_KIND_WORDS = {"growth": "증감률", "difference": "차이", "share": "비중", "ratio": "배수", "avg": "평균", "sum": "합계",
+               "per": "비율"}
+# A per of 1,000 or more ('f1 / f2 * 1000', births per 1,000 people): not a share, though it holds '* 100' (T1-30).
+_PER_LARGE = re.compile(r"/\s*f\d+\s*\*\s*10{3,}$")
 _SUM = re.compile(r"^f\d+(?:\s*\+\s*f\d+)+$")
 _AVG = re.compile(r"^\(f\d+(?:\s*\+\s*f\d+)+\)\s*/\s*\d+$")
 
@@ -67,6 +70,8 @@ def derived_kind(fact: Fact) -> str:
         return _KIND_WORDS["avg"]
     if "* 100" in expr and "- 1)" in expr:
         return _KIND_WORDS["growth"]
+    if _PER_LARGE.search(expr):
+        return _KIND_WORDS["per"]
     if "* 100" in expr:
         return _KIND_WORDS["share"]
     if "/" in expr:

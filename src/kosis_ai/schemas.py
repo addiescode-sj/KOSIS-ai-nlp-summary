@@ -220,8 +220,9 @@ class Cell(Contract):
 AggFn = Literal["sum", "avg", "min", "max", "first", "last"]
 # diff: a - b · ratio: a / b · pct_change: (a / b - 1) * 100 · pp_diff: a - b of two percentages, in %p ·
 # share: a (summed when several cells) / b * 100 · per: a / b * scale ("per 1,000 people") ·
-# cagr: ((a / b) ** (1 / years) - 1) * 100 · index: a / b * 100 (b as 100)
-CombineFn = Literal["diff", "ratio", "pct_change", "pp_diff", "share", "per", "cagr", "index"]
+# cagr: ((a / b) ** (1 / years) - 1) * 100 · index: a / b * 100 (b as 100) · sum: a + b (two values of one unit, e.g.
+# from two tables) · avg_change: (a - b) / years, the average change per period between b and a (loop 4)
+CombineFn = Literal["diff", "ratio", "pct_change", "pp_diff", "share", "per", "cagr", "index", "sum", "avg_change"]
 Compare = Literal[">", ">=", "<", "<=", "=="]
 PeriodKind = Literal["list", "range", "recent", "anchor", "span"]
 SpanPart = Literal["year", "H1", "H2", "Q1", "Q2", "Q3", "Q4"]
@@ -329,15 +330,15 @@ class CombineStep(_Step):
     orient: Literal["fixed", "larger_first", "smaller_first"] = "fixed"
     optional: bool = False  # skip (no fact) when the value would mean nothing: a growth rate of a %, a zero base
     scale: float | None = Field(default=None, gt=0)  # per: e.g. 1000
-    years: int | None = Field(default=None, ge=1)  # cagr: periods between b and a
+    years: int | None = Field(default=None, ge=1)  # cagr, avg_change: periods between b and a
     note: str | None = None
 
     @model_validator(mode="after")
     def _fn_fields(self) -> CombineStep:
         if (self.fn == "per") != (self.scale is not None):
             raise ValueError(f"combine {self.id}: scale goes with per, and per needs it")
-        if (self.fn == "cagr") != (self.years is not None):
-            raise ValueError(f"combine {self.id}: years goes with cagr, and cagr needs it")
+        if (self.fn in ("cagr", "avg_change")) != (self.years is not None):
+            raise ValueError(f"combine {self.id}: years goes with cagr and avg_change, and they need it")
         if self.a == self.b:
             raise ValueError(f"combine {self.id}: a and b are the same step")
         return self
@@ -356,6 +357,10 @@ class RankStep(_Step):
     of: str | None = None  # a map step
     pick: Literal["max", "min"]
     keep: int = Field(default=2, ge=1)
+    # What the answer cites (loop 3): first = the winner's facts (a map: the first keep values, as before) ·
+    # places = the facts of each of the first keep candidates, in rank order ("상위 3개 시도") · place = the facts of
+    # the keep-th candidate only ("세 번째로 많은 시도"). A map's candidate facts are what its body made for that code.
+    report: Literal["first", "places", "place"] = "first"
 
     @model_validator(mode="after")
     def _totals_match(self) -> RankStep:
@@ -717,6 +722,9 @@ class StatAnswer(Contract):
     clarify_choices: list[ClarifyChoice] = Field(default_factory=list)  # S6: the options with their codes
     default_applied: dict[str, str] = Field(default_factory=dict)  # e.g. {"period": "latest (2025)"}
     source: Source | None = None
+    # T1-30: every table an answer read, in input order; empty for one table (source is that table). With two or
+    # three tables, source is the first of them (kept for readers of one source).
+    sources: list[Source] = Field(default_factory=list)
     # v2 record of trust: see NumbersOrigin. numbers_verified is True only when code checked every number in the
     # parts against result (kosis_chat/answer/verify.py); defaults_verified only when the calculation itself used
     # default_applied (a chatbot answer records the rules' plan without proof the model followed it).
@@ -753,6 +761,8 @@ class StatAnswer(Contract):
         if self.outcome != "answered" and cited:
             raise ValueError(f"a {self.outcome} answer cannot cite facts: {cited}")
         out_of_scope = self.refusal is not None and self.refusal.reason == "out_of_scope"
+        if self.sources and self.source != self.sources[0]:
+            raise ValueError("source must be the first of sources")
         if self.source is None and not out_of_scope:
             raise ValueError("source is required unless the question is out of scope")
         blank = [k for k, v in self.default_applied.items() if not k.strip() or not v.strip()]

@@ -25,9 +25,11 @@ def _items(reads: list[_Read]) -> str:
 
 def check_sum(reads: list[_Read]) -> None:
     """R1: a sum over periods needs a flow (births); a stock counts the same people again, a rate is meaningless,
-    and an unknown measure is refused rather than guessed."""
+    and an unknown measure is refused rather than guessed. Cells of one period (several regions or items: 서울과 부산
+    인구) are counted once each, so a stock adds up there too (loop 1)."""
     kinds = {r.kind for r in reads}
-    if kinds != {"count_flow"}:
+    allowed = {"count_flow"} if len({r.cell.period_raw for r in reads}) > 1 else set(COUNT_KINDS)
+    if not kinds or not kinds <= allowed:
         raise CalcRefused("not_aggregatable", messages.refusal_message("not_aggregatable", what=_items(reads)))
 
 
@@ -67,6 +69,15 @@ def _covers(index: TableIndex, axis: str, whole: str, part: str, whole_label: st
 def _period_covers(whole: str, part: str) -> bool:
     """The same period, or a year holding the part's month or quarter (12월 혼인 / 2025년 혼인)."""
     return whole == part or (len(whole) == 4 and len(part) > 4 and part.startswith(whole))
+
+
+def check_share_periods(parts: list[_Read], total: _Read) -> None:
+    """R5 for a part and a whole from two tables (T1-30): only the periods can be checked (the categories are
+    another table's codes); the whole's period is the part's or the year that holds it."""
+    t = total.cell
+    wrong = [f"시점 {p.cell.period_raw}≠{t.period_raw}" for p in parts if not _period_covers(t.period_raw, p.cell.period_raw)]
+    if wrong:
+        raise CalcRefused("class_mismatch", messages.refusal_message("class_mismatch", what=", ".join(wrong)))
 
 
 def check_share_scope(table: TableInput, parts: list[_Read], total: _Read) -> None:

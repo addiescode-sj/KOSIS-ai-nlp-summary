@@ -37,11 +37,13 @@ from kosis_chat.prepare.index import (  # noqa: E402, F401
     cell_measure,
     index_of,
     is_total,
+    total_stem,
 )
 # T1-28 S2b: label helpers and the patterns two stages share moved to kosis_chat/shared/ (old names are aliases).
 # LABEL_ALIASES was read from data/scope.py (the judge importing the B0 scope module).
-from kosis_chat.shared.labels import LABEL_ALIASES, squash  # noqa: E402
+from kosis_chat.shared.labels import LABEL_ALIASES, interval_forms, squash  # noqa: E402
 from kosis_chat.shared.patterns import COHORT, PAREN, RECENT_N, REGION_SUFFIX, YEAR, YEAR_RANGE, YEAR_SINCE  # noqa: E402
+from kosis_chat.shared.patterns import PREVIOUS_MONTH, PREVIOUS_SAME_MONTH, PREVIOUS_YEAR  # noqa: E402  # loop 5
 
 COUNT_KINDS = ("count_stock", "count_flow")
 
@@ -71,9 +73,12 @@ TREND_WORDS = re.compile(r"추이|변화|변했|흐름|추세")
 AVG_WORDS = re.compile(r"평균")
 # "누적" is not here: it names items ("누적 혼인 비율"), it does not ask for a sum over periods.
 TOTAL_WORDS = re.compile(r"모두|전부")
-# "얼마나 늘었나", "감소했어": a change asked without 추이/변화. Verb forms only, so a label such as 자연증가건수 stays out.
-CHANGE_WORDS = re.compile(r"늘었|줄었|늘어|줄어|증가(?:했|한|하|세)|감소(?:했|한|하|세)")
-SUM_WORDS = re.compile(r"더하|더한|합하|합한|합치|합친|합산|총합")
+# "얼마나 늘었나", "감소했어": a change asked without 추이/변화 (kosis_chat/shared/patterns.py since loop 2).
+from kosis_chat.shared.patterns import CHANGE_WORDS  # noqa: E402
+# Every form of 더하다·합하다·합치다 (더해, 합쳐, 합쳤), and the nouns and adverbs that ask for a total (합계는, 합은,
+# 도합, 통틀어) (loop 1: was a few of the forms only).
+SUM_WORDS = re.compile(r"더하|더한|더해|더했|합하|합한|합해|합했|합치|합친|합쳐|합쳤|합산|총합|도합|통틀어"
+                       r"|합계(?:는|가|를|로|은)|합(?:은|이)(?![가-힣])")
 ARITH_WORDS = re.compile(SUM_WORDS.pattern + r"|나누|나눈|몇\s*배|차이|빼면|뺀")
 CAUSAL_WORDS = re.compile(r"왜|이유|원인|때문|효과|영향")
 # A causal question that also asks for numbers ("추이와 원인") is answered; the LLM declines the cause part.
@@ -87,7 +92,11 @@ _REGION_SUFFIX = REGION_SUFFIX
 # 2,364 tables of data/table_metadata on 10/28).
 _COUNT_SUFFIX = "건수"
 _COUNTED_FORMS = ("수", "아수", "자수", "아", "자")
+_PERSON_ENDS = ("자", "아", "인")
 _TOKEN = re.compile(r"[0-9A-Za-z가-힣~\-]+")
+# A particle that joins two words of a label: '고령자의 비율', '부모와 동거', '가구주 및 배우자' (the word before it
+# has two syllables or more, so '이와' or '과' alone is no particle).
+_INNER_PARTICLE = re.compile(r"(?<=[가-힣]{2})(?:의|와|과|및|에서|에)\s+")
 _PARTICLE = re.compile(r"(?<=[가-힣]{2})(?:은|는|이|가|을|를|의|에|도|만|와|과)$")
 
 
@@ -151,7 +160,32 @@ def _bare_months(text: str) -> list[str]:
     return out
 
 
-def asked_periods(question: str) -> Periods:
+def _earlier(single: str, text: str, words: str, labels: tuple[str, ...] = ()) -> str | None:
+    """The period right before a named one (a year 'YYYY' or a month 'YYYYMM') that the question compares it with:
+    "N년 전" (on text), the same month a year before, the month before ("N개월 전" too), the year before (shared/patterns
+    PREVIOUS_*, on words: the question without its labels). A word inside a label the question names ('전년대비
+    증감률') is the label's. None when there is no such word."""
+    year, month = int(single[:4]), int(single[4:]) if len(single) == 6 else None
+    found = None
+    if m := _YEARS_BEFORE.search(text):
+        found, back = m, (int(m.group(1)), 0)
+    elif m := PREVIOUS_SAME_MONTH.search(words):
+        found, back = m, (1, 0)
+    elif month and (m := PREVIOUS_MONTH.search(words)):
+        found, back = m, (0, int(m.group(1) or 1))
+    elif m := PREVIOUS_YEAR.search(words):
+        found, back = m, (1, 0)
+    if found is None or any(squash(found.group(0)) in label for label in labels):
+        return None
+    if month is None:
+        return str(year - back[0]) if back[1] == 0 else None
+    total = (year - back[0]) * 12 + (month - 1) - back[1]
+    return f"{total // 12}{total % 12 + 1:02d}"
+
+
+def asked_periods(question: str, rest: str | None = None, labels: tuple[str, ...] = ()) -> Periods:
+    """The periods a question names. rest: the question without the labels it names (Parsed.rest), where the words
+    for the period right before a named one are read; labels: the squashed labels it names."""
     text = _COHORT.sub(" ", question)  # "1985년생" is a cohort label, not a period
     text, event_singles, event_ranges, events, event_at = _event_periods(text)
     singles: list[str] = []
@@ -182,8 +216,11 @@ def asked_periods(question: str) -> Periods:
         year_at = next((m.start() for m in _YEAR.finditer(question)), len(question))
         singles = event_singles + singles if event_at < year_at else singles + event_singles
     before = _YEARS_BEFORE.search(text)
-    if before and len(singles) == 1 and len(singles[0]) == 4:  # "10년 전과 비교해서 2025년": the earlier year is implied
-        singles.insert(0, str(int(singles[0]) - int(before.group(1))))
+    # "10년 전과 비교해서 2025년", "2024년 3월 전월 대비", "2023년은 작년보다": the earlier period is implied (loop 5:
+    # was "N년 전" of a year only)
+    if len(singles) == 1 and (not ranges or before) and (earlier := _earlier(singles[0], text, question if rest is None else rest,
+                                                                 labels)):
+        singles.insert(0, earlier)
     recent_n = _RECENT_N.search(question)
     return Periods(
         singles=tuple(dict.fromkeys(singles)),
@@ -215,19 +252,34 @@ def label_forms(label: str, regional_total: bool = False) -> tuple[set[str], set
     m = _UNIT_PAREN.search(text)
     core = text[: m.start()].strip() if m and _known_unit(m.group(1).strip()) else text
     exact = {squash(core), *(squash(a) for a in LABEL_ALIASES.get(core, ()))}
+    # '부모와 동거하는 자녀', '고령자의 비율' are also asked without the particle between the words (loop 1)
+    plain = _INNER_PARTICLE.sub(" ", core)
+    if plain != core:
+        exact.add(squash(plain))
     short = _REGION_SUFFIX.sub("", core)
     if short != core and len(short) >= 2:
         exact.add(squash(short))
     stem = squash(core)[: -len(_COUNT_SUFFIX)]
     if squash(core).endswith(_COUNT_SUFFIX) and len(stem) >= 2:
         exact.update(stem + form for form in _COUNTED_FORMS)
+    # A count of people 'X자수' / 'X아수' / 'X인수' is also asked by the people: '사망자수' as '사망자', '출생아수' as
+    # '출생아' (loop 1).
+    person = squash(core)[:-1]
+    if squash(core).endswith("수") and len(person) >= 3 and person[-1] in _PERSON_ENDS:
+        exact.add(person)
     if regional_total and core in TOTAL_LABELS:
         exact.add("전국")
+    # loop 6: a total marked on a stem ('임금근로자-계', '일반가구_계') is asked by its stem ('임금근로자')
+    if (stem := total_stem(core)) and len(squash(stem)) >= 2:
+        exact.add(squash(stem))
+    # loop 6: an interval name joined another way ('20-24세' as '20~24세', '20세부터 24세까지', '20대 초반')
+    exact |= interval_forms(core)
     bare = PAREN.sub(" ", core)
     head = squash(bare.split(" - ")[0])
     # '기대수명(출생시 기대여명)' is also asked as '기대수명'; not '인구(명): 0-14세', where '인구' is only a prefix.
     partial = {head} - exact if head and "(" in core and ":" not in core else set()
-    tokens = tuple(t for t in _TOKEN.findall(bare) if len(t) >= 2 and t != "-")
+    tokens = tuple(t for t in (_INNER_PARTICLE.sub("", w + " ").strip() for w in _TOKEN.findall(bare))
+                   if len(t) >= 2 and t != "-")
     return exact, partial, tokens
 
 
@@ -241,25 +293,146 @@ def _found(form: str, question: str, squashed: str, lower_level: bool) -> bool:
     return True
 
 
+_WORD = re.compile(r"[0-9A-Za-z가-힣]+")
+_NAME_WORD = 3  # the shortest word read as coming from the survey's or the table's name
+
+
+def name_spans(index: TableIndex, question: str) -> list[tuple[int, int]]:
+    """Loop 6: where the question (squashed) says words of the survey's name or the table's title ('가상장애인실태조사
+    에서'): for each word of the question, its longest start of three characters or more that is in one of those names.
+    A label form strictly inside such a span is a part of the name's word, not the label ('장애' in '장애인실태조사')."""
+    meta = index.table.meta
+    names = [squash(n) for n in (getattr(meta, "survey_nm", ""), getattr(meta, "tbl_nm", "")) if n]
+    spans = []
+    for m in _WORD.finditer(question):
+        word, at = m.group(0), len(squash(question[: m.start()]))
+        size = next((k for k in range(len(word), _NAME_WORD - 1, -1) if any(word[:k] in n for n in names)), 0)
+        if size:
+            spans.append((at, at + size))
+    return spans
+
+
+def _outside_names(form: str, q: str, spans: list[tuple[int, int]]) -> bool:
+    """The form occurs in q at least once that is not strictly inside a word of a name (name_spans)."""
+    at = q.find(form)
+    while at >= 0:
+        if not any(a <= at and at + len(form) <= b and b - a > len(form) for a, b in spans):
+            return True
+        at = q.find(form, at + 1)
+    return False
+
+
+_JOIN_MARK = "-_·"  # a mark that joins a group's name and an attribute ('귀농인-여자', '가구주_남자')
+_HANGUL = re.compile(r"[가-힣]+")
+
+
+def _core(label: str) -> str:
+    text = label.strip().lstrip("-").strip()
+    m = _UNIT_PAREN.search(text)
+    return squash(text[: m.start()] if m and _known_unit(m.group(1).strip()) else text)
+
+
+def group_parts(axis: Axis, elsewhere) -> dict[str, tuple[str, str]]:
+    """Loop 7: code -> (group, attribute) for the names of a category made of the name of a group of the same category
+    and an attribute, joined by a mark or written together: '귀농인-여자' and '귀농인여자' beside '귀농인' or '귀농인-계'
+    (the group: another name of the category, or the stem of its total name, two characters or more). The attribute
+    is a word of two Hangul characters or more that no other category of the table names (elsewhere: their exact
+    forms; there that category holds the attribute). A total name and a name with no such group have none, and so has
+    a regional category ('서울특별시' is no group '서울' with an attribute)."""
+    if axis.regional:
+        return {}
+    cores = {code: _core(label) for code, label in axis.labels.items()}
+    groups = {c for c in cores.values() if len(c) >= 2}
+    groups |= {squash(s) for label in axis.labels.values() if (s := total_stem(label)) and len(squash(s)) >= 2}
+    out: dict[str, tuple[str, str]] = {}
+    for code, core in cores.items():
+        if is_total(axis.labels[code]):
+            continue
+        group = next((core[:k] for k in range(len(core) - 1, 1, -1) if core[:k] in groups), None)  # the longest
+        if group is None:
+            continue
+        attr = core[len(group):].lstrip(_JOIN_MARK)
+        if len(attr) >= 2 and _HANGUL.fullmatch(attr):
+            out[code] = (group, attr)
+    if out:
+        out = {code: pair for code, pair in out.items() if pair[1] not in elsewhere()}
+    return out
+
+
+def group_parts_of(index: TableIndex) -> dict[str, dict[str, tuple[str, str]]]:
+    """group_parts of every category of the table, once per table (TableInput.caches)."""
+    def build() -> dict[str, dict[str, tuple[str, str]]]:
+        exact_of: dict[str, set[str]] = {}
+
+        def forms(name: str) -> set[str]:
+            if name not in exact_of:
+                exact_of[name] = set().union(*(label_forms(label)[0] for label in index.axes[name].labels.values()))
+            return exact_of[name]
+
+        return {name: group_parts(axis, lambda name=name: set().union(*(forms(n) for n in index.axes if n != name)))
+                for name, axis in index.axes.items()}
+
+    caches = getattr(index.table, "caches", None)
+    return build() if caches is None else caches.get("judge.group_parts", build)
+
+
 def match_labels(index: TableIndex, question: str) -> list[Match]:
     q = squash(question)
+    spans = name_spans(index, question)
     found: list[Match] = []
+    splits = group_parts_of(index)
     for axis in index.axes.values():
+        split = splits.get(axis.name, {})
         for code, label in axis.labels.items():
             lower = axis.parents.get(code) is not None
             exact, partial, tokens = label_forms(label, regional_total=axis.regional and axis.parents.get(code) is None)
-            hit = next((f for f in sorted(exact, key=len, reverse=True) if _found(f, question, q, lower)), None)
+            # loop 6: a two-character region name is a word's start too ('대구' is not a region inside '연령대구분')
+            short = lower or axis.regional
+
+            def seen(f: str) -> bool:
+                return _found(f, question, q, short) and _outside_names(f, q, spans)
+
+            hit = next((f for f in sorted(exact, key=len, reverse=True) if seen(f)), None)
             if hit:
                 found.append(Match(axis.name, code, label, hit, True))
                 continue
-            hit = "".join(tokens) if len(tokens) >= 2 and all(t in q for t in tokens) else None
-            hit = hit or next((f for f in partial if _found(f, question, q, lower)), None)
+            hit = ("".join(tokens) if len(tokens) >= 2 and all(t in q and _outside_names(t, q, spans) for t in tokens)
+                   else None)
+            hit = hit or next((f for f in partial if seen(f)), None)
             if hit:
                 found.append(Match(axis.name, code, label, hit, False))
-    return _dedupe(found)
+                continue
+            # loop 7: a group and an attribute said apart ("귀농인 중 여자", "귀농인 여성"); an attribute is also said
+            # by its other names (LABEL_ALIASES)
+            if code in split:
+                group, attr = split[code]
+                said = next((f for f in (attr, *(squash(a) for a in LABEL_ALIASES.get(attr, ()))) if seen(f)), None)
+                if seen(group) and said:
+                    found.append(Match(axis.name, code, label, group + attr, False, parts=(group, said)))
+    return _dedupe(found, q)
 
 
-def _dedupe(found: list[Match]) -> list[Match]:
+def _inside_longer(form: str, longer: list[str] | list[Match], q: str) -> bool:
+    """Every place q says form is inside a place it says one of the longer forms ('수도권' in '비수도권'). Loop 6: a
+    form said once on its own too ('수도권과 비수도권') is its own label. Loop 7: a longer label matched by its parts
+    said apart (Match.parts: '귀농인' and '여자' of '귀농인-여자') covers the places of its parts."""
+    covered = set()
+    for o in longer:
+        texts = (o,) if isinstance(o, str) else (o.form,) if o.form in q or not o.parts else o.parts
+        for text in texts:
+            at = q.find(text)
+            while at >= 0:
+                covered.update(range(at, at + len(text)))
+                at = q.find(text, at + 1)
+    at = q.find(form)
+    while at >= 0:
+        if not set(range(at, at + len(form))) <= covered:
+            return False
+        at = q.find(form, at + 1)
+    return True
+
+
+def _dedupe(found: list[Match], q: str | None = None) -> list[Match]:
     # One question word, several labels: '중국' matches '중국' and '중국(한국계)'; keep the label that is the word.
     by_form: dict[tuple[str, str], list[Match]] = {}
     for m in found:
@@ -269,7 +442,12 @@ def _dedupe(found: list[Match]) -> list[Match]:
         whole = [m for m in group if squash(m.label) == m.form]
         kept += whole if whole and len(whole) < len(group) else group
     # A form inside a longer matched form is not its own label: '0세' in '20세', '합계' in '합계출산율'.
-    return [m for m in kept if not any(m.form != o.form and m.form in o.form for o in kept)]
+    def longer(m: Match) -> list[Match]:
+        return [o for o in kept if m.form != o.form and m.form in o.form]
+
+    if q is None:
+        return [m for m in kept if not longer(m)]
+    return [m for m in kept if not longer(m) or not _inside_longer(m.form, longer(m), q)]
 
 
 # ---------------------------------------------------------------- the parsed question
@@ -278,10 +456,13 @@ def _dedupe(found: list[Match]) -> list[Match]:
 def parse(index: TableIndex, question: str) -> Parsed:
     matches = match_labels(index, question)
     rest = squash(question)
-    for form in sorted({m.form for m in matches}, key=len, reverse=True):
+    # loop 7: a label matched by its parts said apart leaves those parts out of rest
+    forms = {f for m in matches for f in ((m.form,) if m.form in rest or not m.parts else m.parts)}
+    for form in sorted(forms, key=len, reverse=True):
         rest = rest.replace(form, " ")
-    forms = {m.form for m in matches}
     words = tuple(
         _PARTICLE.sub("", w) for w in re.findall(r"[가-힣]{2,}", question) if not any(f in w for f in forms)
     )
-    return Parsed(question=question, periods=asked_periods(question), matches=matches, rest=rest, words=words)
+    labels = tuple(squash(m.label) for m in matches)
+    return Parsed(question=question, periods=asked_periods(question, rest, labels), matches=matches, rest=rest,
+                  words=words)

@@ -9,9 +9,11 @@ T1-28 S3a: moved here from judge/answerability.py (a re-export shim now); judge/
 from __future__ import annotations
 
 import re
+from functools import cached_property
 
 from kosis_chat.judge import texts as messages  # T1-28 S3a: was judge/messages.py
 from kosis_chat.prepare.schemas import Cell, TableInput
+from kosis_chat.prepare.store import RangeSummary, store_of
 from kosis_chat.judge.question import (
     ARITH_WORDS,
     AVG_WORDS,
@@ -39,7 +41,7 @@ from kosis_chat.judge.question import (
 from kosis_ai.schemas import Outcome, Refusal  # isort: skip  (question.py puts src/ on the path)
 from kosis_chat.judge.schemas import Resolved, Verdict  # isort: skip  # re-export: moved in T1-28 S1b
 from kosis_chat.shared import defaults as default_strings  # isort: skip  # T1-28 S2b: the default_applied strings
-from kosis_chat.shared.patterns import UNIT_PAREN  # isort: skip
+from kosis_chat.shared.patterns import ASKS_PERIOD, MOST_RECENT, RANKING, UNIT_PAREN  # isort: skip
 from kosis_chat.shared.periods import period_text  # isort: skip
 
 _UNIT_SUFFIX = UNIT_PAREN  # old name (T1-28 S2b: one trailing '(...)' pattern)
@@ -104,6 +106,37 @@ def targets(index: TableIndex, parsed: Parsed, resolved: Resolved) -> list[Cell]
         if parsed.periods.contains(c.period_raw)
         and all(index.axis_of(c, name) in codes for name, codes in resolved.codes.items())
     ]
+
+
+class TargetSummary:
+    """targets() summarized by the cell store, without listing the cells, asked on first use and then kept: a question
+    asks the store at most once, and not at all when no rule needs it (no period named, and defaults() returns before
+    the periods). With no period named the summary spans every period, the costliest request of a file store."""
+
+    def __init__(self, index: TableIndex, parsed: Parsed, resolved: Resolved) -> None:
+        self.index, self.parsed, self.resolved = index, parsed, resolved
+
+    @cached_property
+    def found(self) -> RangeSummary:
+        # index.periods holds every period of the table, so asking for those the question contains picks the same
+        # cells as parsed.periods.contains per cell
+        periods = [p for p in self.index.periods if self.parsed.periods.contains(p)]
+        return store_of(self.index.table).summary(self.resolved.codes, periods)
+
+
+def target_summary(index: TableIndex, parsed: Parsed, resolved: Resolved) -> TargetSummary:
+    """The lazy summary of targets() (TargetSummary) that judge() and calc hand to the rules and defaults()."""
+    return TargetSummary(index, parsed, resolved)
+
+
+Targets = list[Cell] | RangeSummary | TargetSummary  # the target cells as the rules and defaults() take them
+
+
+def _summary(cells: Targets) -> RangeSummary:
+    # A list (tests, callers before T1-31), a summary, or the lazy summary (asked of the store here, once).
+    if isinstance(cells, TargetSummary):
+        return cells.found
+    return cells if isinstance(cells, RangeSummary) else RangeSummary.of(cells)
 
 
 # ---------------------------------------------------------------- measures
@@ -292,23 +325,25 @@ def _not_aggregatable(p: Parsed, index: TableIndex, resolved: Resolved, **_) -> 
     return None
 
 
-def _no_cell(p: Parsed, index: TableIndex, resolved: Resolved, cells: list[Cell], **_) -> Verdict | None:
+def _no_cell(p: Parsed, index: TableIndex, resolved: Resolved, cells: Targets, **_) -> Verdict | None:
     """Labels and periods each exist but not together (세종 before 2012), or '전국' in a table without it."""
     if _COUNTRY_WORD in p.question and not any(m.form == _COUNTRY_WORD for m in p.matches):
         if any(axis.regional for axis in index.axes.values()):
             return refuse("no_cell", "class_mismatch", what="전국")
-    if p.periods.explicit and not cells:
+    if p.periods.explicit and not _summary(cells).count:
         return refuse("no_cell", "class_mismatch", what=_named_text(index, resolved, p.periods.singles))
     return None
 
 
-def _symbol(p: Parsed, index: TableIndex, resolved: Resolved, cells: list[Cell], **_) -> Verdict | None:
-    if not p.periods.explicit or not cells or any(c.value_kind == "ok" for c in cells):
+def _symbol(p: Parsed, index: TableIndex, resolved: Resolved, cells: Targets, **_) -> Verdict | None:
+    if not p.periods.explicit:  # before the summary: without a named period it is not needed
         return None
-    kinds = {c.value_kind for c in cells}
-    if kinds == {"blank"}:  # the cell exists but nothing was collected for that period
+    found = _summary(cells)
+    if not found.count or "ok" in found.kinds:
+        return None
+    if found.kinds == {"blank"}:  # the cell exists but nothing was collected for that period
         return refuse("symbol", "class_mismatch", what=_named_text(index, resolved, p.periods.singles))
-    cell = next(c for c in cells if c.value_kind != "blank")
+    cell = found.sample
     meaning = normalize.VALUE_LABELS.get(cell.value_kind) or "수치 아님"
     return refuse("symbol", "missing_value", raw=cell.value_raw.strip(), meaning=meaning)
 
@@ -323,7 +358,7 @@ RULES = (
 # ---------------------------------------------------------------- defaults
 
 
-def defaults(p: Parsed, index: TableIndex, resolved: Resolved, cells: list[Cell]) -> dict[str, str]:
+def defaults(p: Parsed, index: TableIndex, resolved: Resolved, cells: Targets) -> dict[str, str]:
     """What the answer assumes when the question leaves it open: the period, and the scenario of a projection."""
     out: dict[str, str] = {}
     for name, axis in index.axes.items():
@@ -332,9 +367,13 @@ def defaults(p: Parsed, index: TableIndex, resolved: Resolved, cells: list[Cell]
         base = next((label for label in axis.labels.values() if label.startswith(_DEFAULT_SCENARIO)), None)
         if base:
             out[name] = base.split("(")[0].strip()
-    if p.periods.explicit or p.periods.recent_n or _ASKS_PERIOD.search(p.question):
+    # loop 3: also a ranking of periods asked with a period word and any particle ("가장 많았던 해와 가장 적었던 해의
+    # 차이"), as the rules read it (shared/patterns.py ASKS_PERIOD)
+    # loop 4: the ranking word read on the question without its labels (p.rest), as the rules read it
+    ranked_period = bool(RANKING.search(MOST_RECENT.sub(" ", p.rest)) and ASKS_PERIOD.search(p.question))
+    if p.periods.explicit or p.periods.recent_n or _ASKS_PERIOD.search(p.question) or ranked_period:
         return out
-    numeric = sorted({c.period_raw for c in cells if c.value_kind == "ok"})
+    numeric = list(_summary(cells).numeric_periods)
     if not numeric:
         return out
     if p.periods.previous:  # "작년 대비": the latest period is this year, the one before it is last year
@@ -359,10 +398,34 @@ def judge(question: str, table: TableInput, index: TableIndex | None = None) -> 
     index = index or build_index(table)
     parsed = parse(index, question)
     resolved = resolve(index, parsed)
-    cells = targets(index, parsed, resolved)
+    cells = target_summary(index, parsed, resolved)
     for rule in RULES:
         verdict = rule(parsed, index=index, resolved=resolved, cells=cells)
         if verdict is not None:
             return verdict
     applied = defaults(parsed, index, resolved, cells)
     return Verdict("answered", "default" if applied else None, default_applied=applied)
+
+
+def judge_multi(question: str, indexes: list[TableIndex]) -> Verdict:
+    """The rules for a question over two or three tables (T1-30): only those about the question itself.
+
+    A causal or evaluative question, a question no table matches that names another domain, and a period no table
+    has are decided here, once. What one table lacks (a category, a cell, a symbol) is the other table's business:
+    the plan names a table per select and compute refuses a cell that is not there. No default is applied (the plan
+    prompt asks for the latest period every table has when the question names none)."""
+    parsed = [parse(index, question) for index in indexes]
+    first = parsed[0]
+    for rule in (_causal, _evaluative):
+        if (verdict := rule(first)) is not None:
+            return verdict
+    if all(_out_of_scope(p) is not None for p in parsed):
+        return refuse("out_of_scope", "out_of_scope")
+    missing = [_period_text(s) for s in first.periods.singles if not any(ix.period_ok(s) for ix in indexes)]
+    missing += [_range_text(a, b) for a, b in first.periods.ranges
+                if not any(in_range(y, a, b) for ix in indexes for y in ix.periods)]
+    if missing:
+        available = "; ".join(f"{ix.table.meta.tbl_nm} {_available(ix).split(': ', 1)[-1]}" for ix in indexes)
+        return refuse("no_period", "no_period", available=f"표의 시점: {available}", asked=", ".join(missing))
+    return Verdict("answered")
+

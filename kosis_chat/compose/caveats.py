@@ -14,6 +14,7 @@ from kosis_chat.shared.periods import period_text  # isort: skip
 from kosis_chat.compute import Computed  # isort: skip
 from kosis_chat.compute.context import Alternatives  # isort: skip
 from kosis_chat.prepare.schemas import TableInput  # isort: skip
+from kosis_chat.prepare.store import RefReader, store_of  # isort: skip
 
 from kosis_ai.schemas import Caveat  # isort: skip
 
@@ -59,7 +60,7 @@ def _from_note(note: str) -> list[Caveat]:
     return out
 
 
-def caveats_of(computed: Computed, table: TableInput, alternatives: list[Alternatives] | None = None,
+def caveats_of(computed: Computed, table: TableInput | RefReader, alternatives: list[Alternatives] | None = None,
                context_ids: list[str] | None = None) -> list[Caveat]:
     out: list[Caveat] = []
     for text in computed.cautions:
@@ -67,8 +68,11 @@ def caveats_of(computed: Computed, table: TableInput, alternatives: list[Alterna
             out.append(c)
     if computed.note:
         out += _from_note(computed.note)
-    by_ref = {c.source_ref: c for c in table.cells}
     shown = set(computed.main) | set(context_ids or [])
+    # table: one table, or several seen as one (graph/multi.py _Cells: only by_refs, the one method used here)
+    store = store_of(table) if isinstance(table, TableInput) else table
+    refs = [f.source_ref for f in computed.result.facts if f.id in shown and f.source_ref]
+    by_ref = store.by_refs(refs) if refs else {}
     for f in computed.result.facts:
         if f.id not in shown or not f.source_ref:
             continue

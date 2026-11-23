@@ -13,9 +13,16 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
-from kosis_chat.prepare.convert import (PARQUET_COLUMNS, ROW_LIMIT, check_meta, convert, meta_from_row, no_rows, period_codes,
-                                        rows_of, tidy_note, tidy_rows)
-from kosis_chat.prepare.schemas import Problem, SchemaError, TableInput, validate
+import pyarrow as pa
+
+from kosis_chat.adapters import parquet_store
+from kosis_chat.prepare.convert import (PARQUET_COLUMNS, ROW_LIMIT, build_meta, check_meta, convert, meta_from_row, no_rows,
+                                        period_codes, rows_of, tidy_note, tidy_rows)
+from kosis_chat.prepare.schemas import FILE_BACKED, Problem, SchemaError, TableInput, validate
+
+# A table of this many rows or more is not read whole: its cells stay in the file (load_file_backed, T1-31 S3). Read at
+# call time, so tests and tools may set it; ROW_LIMIT remains the ceiling of a whole-table load.
+BIG_TABLE_ROWS = 500_000
 
 
 # The rows' tbl_id must be the tables.csv row's tbl_id (plans/T1-28.md 검토 반영 2: the file path picks the catalog row
@@ -65,7 +72,12 @@ def catalog_tbl_id_problems(rows: list[dict], catalog: dict, where: str) -> list
 
 
 def sha256_of(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    """The file's sha256, read in 1 MiB pieces (a big table is not held whole; no hashlib.file_digest: Python 3.11+)."""
+    digest = hashlib.sha256()
+    with path.open("rb") as f:
+        for piece in iter(lambda: f.read(1 << 20), b""):
+            digest.update(piece)
+    return digest.hexdigest()
 
 
 def find_catalog(path: Path) -> Path | None:
@@ -122,7 +134,7 @@ def read_parquet(path: Path) -> Any:
 
 
 def load_parquet(path: Path) -> TableInput:
-    """One long Parquet file per table (data/values), meta from tables.csv; not yet validated as a whole."""
+    """One long Parquet file per table (data/values), read whole, meta from tables.csv; not yet validated as a whole."""
     row_count = footer_rows(path)
     if row_count is not None and row_count > ROW_LIMIT:
         raise SchemaError([Problem(path.name, f"table has {row_count:,} rows, over the {ROW_LIMIT:,}-row limit of a whole-table load")])
@@ -146,8 +158,81 @@ def load_parquet(path: Path) -> TableInput:
     return convert(rows, meta, sha256_of(path))
 
 
-def load_table(path: str | Path) -> TableInput:
-    """Load one Parquet table; raises SchemaError with every problem found."""
+def index_folder(path: Path) -> Path | None:
+    """Where the scan of a big table is saved: parquet_store.INDEX_DIR, else <data dir>/index (the folder of
+    tables.csv); None when there is no catalog."""
+    if parquet_store.INDEX_DIR is not None:
+        return Path(parquet_store.INDEX_DIR)
+    catalog = find_catalog(path)
+    return catalog.parent / "index" if catalog is not None else None
+
+
+def _facts(path: Path) -> parquet_store.Facts:
+    """The scan of the file (parquet_store.load_facts, saved under index_folder); SchemaError when it cannot be read."""
+    try:
+        return parquet_store.load_facts(path, index_folder(path), sha256_of)
+    except MemoryError:
+        raise
+    except (pa.ArrowException, OSError) as exc:  # as read_parquet: a broken file
+        raise SchemaError([Problem(path.name, f"cannot read Parquet: {exc}")]) from exc
+
+
+def load_file_backed(path: Path, row_count: int) -> TableInput:
+    """A table of BIG_TABLE_ROWS or more: file-backed when its scan finds it eligible
+    (kosis_chat/adapters/parquet_store.py), else loaded whole (load_parquet) when within ROW_LIMIT, else refused with
+    the failed condition. A table missing from tables.csv fails before any scan."""
+    row = catalog_row(path)
+    facts = _facts(path)
+    failure = facts.failure
+    if failure is None:
+        table = _file_backed(path, facts, row)
+        if table is not None:
+            return table
+        failure = "tbl_id"
+    if row_count <= ROW_LIMIT:
+        return load_parquet(path)
+    raise SchemaError([Problem(path.name, f"table has {row_count:,} rows, over the {ROW_LIMIT:,}-row limit of a "
+                                          f"whole-table load, and cannot be read from the file: "
+                                          f"{parquet_store.ELIGIBILITY[failure]}")])
+
+
+def _file_backed(path: Path, facts: parquet_store.Facts, row: dict) -> TableInput | None:
+    """load_parquet's steps over the scan's facts; None when the table's tbl_id cannot be told apart in a ref."""
+    if CHECK_CATALOG_TBL_ID:
+        problems = catalog_tbl_id_problems([{"tbl_id": t} for t in facts.tbl_ids], row, path.name)
+        if problems:
+            raise SchemaError(problems)
+    meta = meta_from_row(row, set(facts.codes_all), fetched_at_of(path))
+    if not facts.descriptor_count:
+        raise no_rows(path.name)
+    meta["note"] += tidy_note({"blank_rows": facts.blank_rows, "cycle_rows": facts.cycle_rows,
+                               "same_rows": facts.same_rows, "conflict_cells": facts.conflict_cells})
+    check_meta(meta, where=path.name)
+    table_meta = build_meta(meta, facts.sha256)
+    if "|" in table_meta.tbl_id:
+        return None
+    return TableInput(meta=table_meta, cells=FILE_BACKED, store=parquet_store.ParquetStore(path, table_meta, facts))
+
+
+def why_not_file_backed(path: str | Path) -> tuple[str, str] | None:
+    """Why this Parquet file cannot be file-backed: None when it can, else (the parquet_store.ELIGIBILITY key of the
+    failed condition, its message). Uses the saved scan when there is one for the file's current bytes (else scans
+    and saves it). The row count is not asked: a table under BIG_TABLE_ROWS is still loaded whole. SchemaError when
+    the file cannot be read or has no tables.csv row."""
+    data_path = Path(path)
+    facts = _facts(data_path)
+    failure = facts.failure
+    if failure is None and "|" in str(catalog_row(data_path).get("tbl_id")):
+        failure = "tbl_id"
+    return None if failure is None else (failure, parquet_store.ELIGIBILITY[failure])
+
+
+def load_table(path: str | Path, *, big_rows: int | None = None) -> TableInput:
+    """Load one Parquet table; raises SchemaError with every problem found.
+
+    A table of big_rows rows or more (default BIG_TABLE_ROWS, read at call time) is file-backed (load_file_backed);
+    the others are read whole as before. Callers that need every cell in memory (table.cells) pass
+    big_rows=sys.maxsize: a table over ROW_LIMIT is then refused as before T1-31 S3."""
     data_path = Path(path)
     if not data_path.exists():
         raise SchemaError([Problem(str(data_path), "file not found")])
@@ -155,7 +240,12 @@ def load_table(path: str | Path) -> TableInput:
         raise SchemaError(
             [Problem(data_path.name, f"unsupported input format {data_path.suffix!r} (use data/values/*.parquet)")]
         )
-    table = load_parquet(data_path)
+    limit = BIG_TABLE_ROWS if big_rows is None else big_rows
+    row_count = footer_rows(data_path)
+    if row_count is not None and row_count >= limit:
+        table = load_file_backed(data_path, row_count)
+    else:
+        table = load_parquet(data_path)
     problems = validate(table)
     if problems:
         raise SchemaError(problems)

@@ -113,7 +113,7 @@ def test_growth_race_and_average_annual_growth(households):
     assert d.unit == "%p" and d.derivation == "f5 - f6"
     assert c.derivation == "((f2 / f1) ** (1 / 9) - 1) * 100" and c.unit == "%"
     expected = ((value("T1", "21", "2024") / value("T1", "21", "2015")) ** (1 / 9) - 1) * 100
-    assert c.value == round(expected, 1)
+    assert c.value == round(expected, 2)
     assert recomputes(run.facts)
 
 

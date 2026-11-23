@@ -16,7 +16,7 @@ FILES = sorted([*(ROOT / "analyze" / "prompts").glob("*.md"), *(ROOT / "compose"
 
 
 def test_there_are_prompt_files():
-    assert len(FILES) == 9
+    assert len(FILES) == 11  # T1-30: analyze-plan-multi-v1 and its examples
 
 
 @pytest.mark.parametrize("path", FILES, ids=lambda p: p.name)

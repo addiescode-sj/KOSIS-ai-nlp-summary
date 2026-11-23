@@ -53,6 +53,16 @@ YEAR_SINCE = re.compile(r"((?:19|20)\d{2})\s*년?\s*이후")
 RECENT_N = re.compile(r"최근\s*(\d+)\s*년")
 # "1985년생" is a cohort label, not a period (judge/question._COHORT; data/scope.py inline re.sub).
 COHORT = re.compile(r"(?:19|20)\d{2}\s*년생")
+# The period right before the one a question names (loop 5; judge/question.py asked_periods puts it in the periods,
+# as it does for "N년 전"). Read on the question without the labels it names. Three kinds:
+# - the same month (or the same part of the year) a year before: 전년 동월, 작년 같은 달, 지난해 같은 기간, 1년 전 같은 달;
+# - the month before (a named month only): 전월, 전달, 지난달, 앞 달, 직전 달·월, 한 달 전, "N개월 전" (group 1: N);
+#   not 전월세 (a rent), not 전달하다 (to pass on);
+# - the year before: 전년, 전년도, 작년, 지난해, 앞 해, 직전 해·연도, 한 해 전.
+PREVIOUS_SAME_MONTH = re.compile(r"(?:전년|작년|지난\s*해|한\s*해\s*전|1\s*년\s*전)\s*(?:의\s*)?(?:동월|같은\s*달|동기|같은\s*기간)")
+PREVIOUS_MONTH = re.compile(r"전월(?!세)|전\s*달(?![하해했되된받])|지난\s*달|앞\s*달|직전\s*(?:달|월)|한\s*달\s*전"
+                            r"|(?<!\d)(\d{1,2})\s*개월\s*전")
+PREVIOUS_YEAR = re.compile(r"전년|작년|지난\s*해|앞\s*해|직전\s*(?:해|연도|년도)|한\s*해\s*전")
 
 # ---------------------------------------------------------------- numbers and ids
 
@@ -62,3 +72,170 @@ COHORT = re.compile(r"(?:19|20)\d{2}\s*년생")
 FACT_ID = re.compile(r"f\d+")
 # A KOSIS agency id, ASCII digits (kosis_chat/contract.py: re.fullmatch(r"[0-9]{3}", ...) twice).
 ORG_ID = re.compile(r"[0-9]{3}")
+
+# ---------------------------------------------------------------- what a question computes between two numbers
+# (loop 1). The texts are read on the question with its spaces removed (labels.squash) unless said otherwise.
+
+# "혼인 1건당", "인구 1천 명당", "10만 명당", "가구당", "1인당": a value per unit of another (on the question as
+# written). Group 1 the number, group 2 its 십/백/천/만 word. Not 해당, 상당, 담당, 정당, 적당, 부당, 배당, and not a 당
+# that starts a word (당시, 당해).
+PER_UNIT = re.compile(r"(\d[\d,.]*)?\s*(십만|백만|천만|십|백|천|만)?\s*(?:[가-힣]{1,2}\s*)?(?<![해상담정적부배])당"
+                      r"(?=$|[\s?.!,]|(?:은|는|의|으로|로)(?:$|[\s?.!,]))")
+_SCALE_WORDS = {"십": 10, "백": 100, "천": 1000, "만": 10_000, "십만": 100_000, "백만": 1_000_000, "천만": 10_000_000}
+
+
+def per_scale(m: re.Match) -> float:
+    """The number a PER_UNIT match counts by: '1천 명당' -> 1000, '10만 명당' -> 100000, '1건당' / '가구당' -> 1."""
+    number = float(m.group(1).replace(",", "")) if m.group(1) else 1.0
+    return number * _SCALE_WORDS.get(m.group(2) or "", 1)
+
+
+# ---------------------------------------------------------------- a change between two periods (loop 2)
+# One place for the words that ask how a number changed, read by the one-table rules (analyze/rules.py), the
+# multi-table rules (analyze/multi_rules.py) and the judge (judge/question.py CHANGE_WORDS is this object).
+
+# "얼마나 늘었나", "감소했어": a change asked without 추이/변화. Verb forms only, so a label such as 자연증가건수 stays out.
+CHANGE_WORDS = re.compile(r"늘었|줄었|늘어|줄어|증가(?:했|한|하|세)|감소(?:했|한|하|세)")
+# The stems of the verbs and nouns of a change in either direction or none (늘다, 줄다, 오르다, 떨어지다, 변하다,
+# 달라지다, 바뀌다), as they follow "몇 퍼센트".
+CHANGE_VERB = r"(?:늘|줄|증가|감소|올|오르|내리|내려|떨어|변하|변했|변해|변화|달라|바뀌|바뀐)"
+# A rate of change: the nouns (증가율, 감소율, 증감률, 변화율, 변동률) or "몇 퍼센트(나) + a change verb".
+# loop 3: also "몇 퍼센트씩 늘었어" (씩: by so much each period).
+RATE_OF_CHANGE = re.compile(rf"증가율|감소율|증감률|증감율|변화율|변동률|성장률|몇\s*(?:퍼센트|%|프로)\s*(?:씩)?\s*(?:나|가|정도)?\s*{CHANGE_VERB}")
+# A change asked at all (an amount unless RATE_OF_CHANGE says a rate): the verb forms above, the noun 증감 and the
+# verbs of a change with no direction (변했다, 변화, 달라졌다, 바뀌었다).
+CHANGE_ASKED = re.compile(CHANGE_WORDS.pattern + r"|증감(?![률율])|변했|변화(?!율)|달라졌|바뀌었|" + RATE_OF_CHANGE.pattern)
+# Loop 5 (compute/answer_facts.py, which of a change and a rate of change a trend answer keeps): a percent asked
+# (퍼센트, %, 프로; not a percent point), and an amount asked: 몇 + a counting word ("몇 명", "몇 건", "몇 가구", "몇 세";
+# not 몇 퍼센트, 몇 배, 몇 년, 몇 월, 몇 위) or a percent point (%p, 퍼센트 포인트).
+PERCENT = re.compile(r"퍼센트(?!\s*포인트)|%(?!\s*(?:p|포인트))|프로(?!그|젝)")
+ASKS_AMOUNT = re.compile(r"몇\s*(?!퍼센트|프로|배|번|위|등|년|개월|월|분기|시)[가-힣]|%\s*p|퍼센트\s*포인트|%\s*포인트")
+
+# Two categories of one table that hold the same names in two roles (loop 5): where a flow starts and where it ends
+# (전출지별 × 전입지별, 출발지 × 도착지, 출신지 × 거주지). The role of a category, read on its name:
+ORIGIN_AXIS = re.compile(r"전출|출발|출신|유출|송출|발송|이전\s*전")
+DEST_AXIS = re.compile(r"전입|도착|목적|유입|수신|행선|거주|이전\s*후")
+# The role of a name the question gives (on the squashed question, right after the name): a particle of a start
+# (에서, 부터, 로부터) or of an end (으로, 로, 에, 까지), or, after a subject or object particle, a word of leaving
+# (떠나다, 나가다, 빠져나가다, 전출, 출발, 출신) or of arriving (들어오다, 들어가다, 옮겨 오다, 전입, 도착, 유입).
+ORIGIN_AFTER = re.compile(r"^(?:에서|으로부터|로부터|부터)"
+                          r"|^(?:을|를|이|가|의|은|는)?(?:떠나|떠난|나간|나가|빠져나|유출|전출|출발|출신)")
+DEST_AFTER = re.compile(r"^(?:으로|로|에|까지)(?!서)"
+                        r"|^(?:을|를|이|가|의|은|는)?(?:들어오|들어온|들어간|들어가|옮겨온|옮겨간|유입|전입|도착)")
+# A second flow named only as the first one turned around: "그 반대", "반대로", "거꾸로", "역방향", "역으로".
+REVERSE = re.compile(r"반대|거꾸로|역방향|역으로")
+
+# Years asked at a regular interval: "2년 간격으로", "5년마다", "3년 주기로", "5년 단위로", "격년으로" (loop 4).
+# Group 1 the number of years (none: 격년, every other year).
+EVERY_N_YEARS = re.compile(r"(?<!\d)(\d{1,2})\s*년\s*(?:간격|마다|주기|단위로|단위\s*로)|격년")
+# A range of periods asked period by period (연도별, 해마다, 매년, 월별, 매달, 분기별, and every n years): the periods
+# are not aggregated.
+EACH_PERIOD = re.compile(r"연도별|년도별|해마다|매년|매해|연도마다|년마다|월별|매월|매달|달마다|분기별|분기마다|"
+                         + EVERY_N_YEARS.pattern)
+
+
+# Loop 7: a word that asks for the same thing of each target named ("각각", "각자", "저마다", "제각기", "따로", "각 지역"),
+# on the question without its labels. 각 only as a word of its own (not 각종, 시각).
+EACH_TARGET = re.compile(r"각각|각자|저마다|제각기|제각각|따로|(?<![가-힣])각(?=\s)")
+# Loop 7: words that ask which of two targets is more ("어느 쪽", "어디가", "누가", "더 많이", "더 크게", "비교", "차이"),
+# on the question without its labels: the two targets' changes are compared, not only given.
+WHICH_MORE = re.compile(r"어느|어디가|어디의|누가|누구|비교|차이|격차|더\s*(?:많|적|크|작|높|낮|늘|줄|빠르|느리|가파르)")
+
+
+def years_step(question: str) -> int | None:
+    """The interval of years a question asks the periods at ("5년마다" -> 5, "격년" -> 2), None for none or 1."""
+    m = EVERY_N_YEARS.search(question)
+    if m is None:
+        return None
+    n = int(m.group(1)) if m.group(1) else 2
+    return n if n >= 2 else None
+
+# A share of one number in another: 비중, 차지, 구성비, 몇 퍼센트 (not 몇 퍼센트 + a change verb, a rate of change).
+MULTI_SHARE = re.compile(rf"비중|차지|구성비|몇(?:퍼센트|%|프로)(?!(?:씩)?(?:나|가|정도)?{CHANGE_VERB})")
+# One number over another: 몇 배, 배수, 나누다, 비율, and 배 with an ending (배나, 배야, 배인, 배로). One list for one
+# table (compute/answer_facts.py, analyze/rules.py) and several (loop 2: was two lists, MULTI_RATIO and _ASKS_RATIO).
+ASKS_RATIO = re.compile(r"몇배|배수|비율|나누|나눈|나눠|배(?:나|정도|가량|야|인|이|로)")
+MULTI_RATIO = ASKS_RATIO
+# What follows the name of the whole (the denominator): "A 중", "A 가운데", "A 대비", "A에서", "A의 몇 배".
+MULTI_WHOLE_AFTER = re.compile(r"^(?:은|는|이|가)?(?:중|가운데|대비|에서|에비해|의몇|기준)")
+# Loop 6: what follows the name of a group a question looks inside (on the question as written, right after the
+# name): "A 중", "A 중에서", "A 가운데", "A 안에서", "A 내에서", "A에 속한", "A에 해당하는". 중 and 가운데 only as words of
+# their own (not 중구, 중학교). The group is a share's whole and a ranking's pool (its members are the candidates).
+WITHIN_AFTER = re.compile(r"^\s*(?:은|는|이|가)?\s*(?:(?:중|가운데)(?:에서|에|의)?(?![가-힣])|(?:안|내)(?:에서|의)(?![가-힣])"
+                          r"|에\s*(?:속한|속하는|속해|해당하는|해당한|해당되는))")
+# A difference of two numbers, and the words that ask how much fewer (the reference minus the subject). The
+# one-syllable comparatives are kept out of the words they also start (loop 1 learnings): 적어 줘 (write it down),
+# 작년 (last year), 크기 (size). One list for one table (ASKS_DIFF) and several (MULTI_DIFF).
+_COMPARATIVE = r"많|적(?!어\s*(?:줘|주|봐|달|둬))|높|낮|크(?!기)|작(?!년)|넘|모자|덜"
+ASKS_GAP = re.compile(r"차이|격차|빼|뺀")  # a difference asked by name, beside a ratio
+# The rest of a whole but one part (loop 4), on the question as written: "서울을 제외한", "서울 빼고", "서울 말고",
+# "나머지", "서울 외 지역", "서울 이외의", "그 밖의". 외 only as a word of its own (not 외국, 해외).
+EXCLUDE = re.compile(r"제외|빼고|빼면|뺀|말고|나머지|그\s*밖|(?<![가-힣])(?:이)?외(?:의|에|에는)?(?![가-힣])")
+MULTI_DIFF = re.compile(rf"{ASKS_GAP.pattern}|{_COMPARATIVE}")
+ASKS_DIFF = re.compile(rf"비교|보다|대비|{MULTI_DIFF.pattern}")
+MULTI_FEWER = re.compile(r"적(?!어\s*(?:줘|주|봐|달|둬))|낮|작(?!년)|모자|덜")
+
+
+def asked_comparison(rest: str) -> tuple[bool, bool]:
+    """(a difference asked, a ratio asked) of two values, read on the question without its labels (squashed): a
+    ratio for 몇 배 / 비율 / 나누다, a difference for a comparing word, but beside a ratio only when named (차이,
+    빼다: "몇 배 많아" is one ratio); neither when only the two values were asked ("서울과 부산 인구 알려줘")."""
+    ratio, diff = bool(ASKS_RATIO.search(rest)), bool(ASKS_DIFF.search(rest))
+    if ratio and not ASKS_GAP.search(rest):
+        diff = False
+    return diff, ratio
+# A count item's name without its count word: '혼인건수' -> '혼인', '출생아수' -> '출생', '사망자수' -> '사망'.
+COUNT_STEM_SUFFIX = re.compile(r"(?:건수|아수|자수|수)$")
+# The word that makes an item name the whole of its kind: '총인구수' is asked as '인구수'.
+TOTAL_PREFIX = re.compile(r"^(?:총|전체)")
+
+# ---------------------------------------------------------------- a ranking (loop 3)
+# Read by the one-table rules (analyze/rules.py): which places of a ranking the question asks for, and whether it
+# ranks periods. On the question as written.
+
+# A count as a digit or a native Korean number word (한·두·세 ... 열), and the ordinal stems (첫째, 둘째, ...).
+_COUNT_WORDS = {"하나": 1, "한": 1, "첫": 1, "두": 2, "둘": 2, "세": 3, "셋": 3, "네": 4, "넷": 4, "다섯": 5, "여섯": 6,
+                "일곱": 7, "여덟": 8, "아홉": 9, "열": 10}
+_COUNT = r"(\d+|" + "|".join(sorted(_COUNT_WORDS, key=len, reverse=True)) + r")"
+# One place: "3번째", "세 번째로", "둘째로", "3위", "2등" (not 3위까지 / 3위 안: several; not 1등급).
+RANK_PLACE = re.compile(rf"{_COUNT}\s*번\s*째|{_COUNT}\s*째|(\d+)\s*(?:위|등)(?!\s*(?:까지|안|이내|권|내|부터)|급|분)")
+# The first n places: "상위 3개", "하위 다섯 곳", "위에서 세 번째까지", "1~3위", "1위부터 3위까지", "3위까지", "3위 안",
+# and a count of places after a ranking word ("가장 많은 세 곳", "높은 순으로 5개 시도"). Not "17개 시도 중" (the pool),
+# not "3개월" (a period).
+RANK_TOP = re.compile(
+    rf"(?:상위|하위|위에서|아래에서|밑에서|뒤에서|톱|top|TOP)\s*{_COUNT}"
+    r"|1\s*(?:위|등)?\s*(?:~|-|부터|에서)\s*(\d+)\s*(?:위|등)"
+    rf"|{_COUNT}\s*(?:위|등|번\s*째)\s*(?:까지|안|이내|권|내)"
+    rf"|{_COUNT}\s*(?:개|곳|군데)(?!월|\s*(?:시도|지역|도시|나라|국가|항목)?\s*(?:중|가운데|에서|의))")
+# The periods of a series ranked: 언제, 몇 년, 어느 해, and a period word (해, 연도, 시기, 시점, 달, 분기, 때) that a
+# describing word ends in ("가장 많았던 해", "높은 연도와", "증가한 달은"), whatever particle follows.
+ASKS_PERIOD = re.compile(
+    r"언제|몇\s*년(?!\s*(?:간|동안|째|치))|어느\s*(?:해|연도|년도|달|시기|시점|분기)|연도|(?<!\d)년도|시점은"
+    r"|(?:(?<=[가-힣][던은는운된한든진])|(?<=큰))\s*(?:해|달|때|분기|시기|시점)(?=[은는이가와과랑의를을에도로]|\s|$|[?,.])")
+# A word that makes a question a ranking without 가장 / 최고 ("세 번째로 많은", "2위 지역", "상위 3개", "순위").
+RANK_WORDS = re.compile(r"상위|하위|순위|번\s*째|(?:첫|둘|셋|넷|다섯)\s*째|\d\s*(?:위|등)(?!급|분)")
+
+
+def count_of(word: str) -> int:
+    return int(word) if word.isdigit() else _COUNT_WORDS[word]
+
+
+def rank_places(question: str) -> tuple[str, int] | None:
+    """("places", n) for the first n places of a ranking, ("place", n) for the n-th one alone, None for the first
+    place only (the plain extreme question)."""
+    if m := RANK_TOP.search(question):
+        n = count_of(next(g for g in m.groups() if g))
+        return ("places", n) if n >= 2 else None
+    if m := RANK_PLACE.search(question):
+        n = count_of(next(g for g in m.groups() if g))
+        return ("place", n) if n >= 2 else None
+    return None
+# The largest end of a ranking, beside the smallest one (analyze/roles.py pick_of reads the smallest): "가장 많은 해와
+# 가장 적은 해의 차이", "최댓값과 최솟값".
+EXTREME_MAX = re.compile(r"많|높|최대|최댓|최고|크|큰|1위")
+# A change downward (줄다, 감소, 떨어지다, 하락, 내려가다, 축소): a ranking of such changes puts the most negative first.
+CHANGE_DOWN = re.compile(r"줄었|줄어|줄은|감소|떨어|하락|내려|내렸|축소")
+# Any ranking word (the judge reads it with ASKS_PERIOD: a ranked period is the answer, not a period to assume).
+RANKING = re.compile(r"가장|제일|최고|최저|최대|최소|최댓|최솟|꼴찌|" + RANK_WORDS.pattern)
+# "가장 최근 ~" names a period, not a ranking (was analyze/rules.py MOST_RECENT).
+MOST_RECENT = re.compile(r"(?:가장|제일)\s*최근")

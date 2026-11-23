@@ -11,13 +11,14 @@ Period strings follow the Parquet files: 'YYYY' a year, 'YYYYMM' a month (a mont
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from itertools import product
 
 from kosis_chat.compute import texts
 from kosis_chat.compute.engine import CalcRefused
 from kosis_chat.compute.semantics import _whole_label, index_of
 from kosis_chat.data.schema import Cell, TableInput
+from kosis_chat.prepare.store import CellKey, MemoryStore, store_of
 from kosis_chat.shared import cautions as caution_strings
 from kosis_chat.shared.events import event_key as _key
 from kosis_chat.shared.events import load_events
@@ -181,16 +182,23 @@ def resolve_periods(spec: PeriodSpec, periods: list[str], period_type: str, look
 # ---------------------------------------------------------------- select
 
 
-def _cells_by_key(table: TableInput) -> dict[tuple, Cell]:
-    # One per TableInput (T1-28 S2: TableInput.caches, was a module dict keyed by id(table)).
-    return table.caches.get(
-        "compute.resolve.cells",
-        lambda: {(c.item_code, tuple(sorted(c.dim_codes.items())), c.period_raw): c for c in table.cells})
+def _cells_by_key(table: TableInput) -> dict[CellKey, Cell]:
+    # For in-memory tables only (tests): the whole key dict of the memory store, one per TableInput.
+    return MemoryStore.of(table).key_map
 
 
 def resolve_select(table: TableInput, step: SelectStep, lookup: EventLookup | None = None,
                    star: dict[str, str] | None = None) -> Resolved:
     """source_refs of a select named by item / dims / periods; star fills a map's '*' code."""
+    return resolve_select_cells(table, step, lookup, star)[0]
+
+
+def resolve_select_cells(table: TableInput, step: SelectStep, lookup: EventLookup | None = None,
+                         star: dict[str, str] | None = None,
+                         cells_at: Callable[[Iterable[CellKey]], dict[CellKey, Cell]] | None = None,
+                         ) -> tuple[Resolved, dict[str, Cell]]:
+    """resolve_select, with the cells it found by ref: the select reads them without asking the store again.
+    cells_at: what asks for the cells of keys (the table's store by default; a map's cache, plan_engine._MapCache)."""
     if step.table and step.table != table.meta.tbl_id:
         raise CalcRefused("out_of_scope", texts.other_table(step.table, table.meta.tbl_id))
     index = index_of(table)
@@ -211,8 +219,10 @@ def resolve_select(table: TableInput, step: SelectStep, lookup: EventLookup | No
         cautions.append(caution_strings.DEFAULT_LATEST)
     periods = resolve_periods(spec, index.periods, table.meta.period_type, lookup, cautions)
     names = [n for n in index.axes if n != ITEM_AXIS]
-    by_key = _cells_by_key(table)
     combos = list(product(codes[ITEM_AXIS], *(codes[n] for n in names)))
+    # Every cell the select may read, in one request to the store (the periods below are a subset of these).
+    by_key = (cells_at or store_of(table).cells_at)(
+        (combo[0], tuple(sorted(zip(names, combo[1:]))), p) for combo in combos for p in periods)
     if spec.kind == "recent":
         monthly = any(len(p) == 6 for p in periods)
         usable = [p for p in periods if (len(p) == 6) == monthly and all(
@@ -224,6 +234,7 @@ def resolve_select(table: TableInput, step: SelectStep, lookup: EventLookup | No
         if len(periods) < spec.n:
             cautions.append(caution_strings.recent_short(spec.n, len(periods)))
     refs: list[str] = []
+    found: dict[str, Cell] = {}
     missing: list[str] = []
     for combo in combos:
         dims = tuple(sorted(zip(names, combo[1:])))
@@ -233,6 +244,7 @@ def resolve_select(table: TableInput, step: SelectStep, lookup: EventLookup | No
                 missing.append(f"{combo}·{p}")
             else:
                 refs.append(cell.source_ref)
+                found[cell.source_ref] = cell
     if missing:
         raise CalcRefused("class_mismatch", messages.refusal_message("class_mismatch", what=", ".join(missing[:4])))
-    return Resolved(refs, cautions)
+    return Resolved(refs, cautions), found

@@ -11,12 +11,15 @@ an average has at least 1, a sum keeps the inputs' decimals.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from kosis_chat.compute.build import Built, Pattern
 from kosis_chat.data.preprocessing import clean_cell
 from kosis_chat.data.schema import Cell, TableInput
+from kosis_chat.prepare.index import index_of
+from kosis_chat.prepare.store import MemoryStore, dim_key, store_of
 from kosis_chat.shared.numbers import display_value  # T1-28 S2b: was data.serializer (B0); re-exported there
 from kosis_chat.judge import messages
 from kosis_chat.judge.question import COUNT_KINDS, cell_measure
@@ -27,7 +30,7 @@ from kosis_chat.compute.schemas import Computed, TermResult  # isort: skip  # re
 if TYPE_CHECKING:  # resolve.py imports this module
     from kosis_chat.compute.resolve import EventLookup
 
-PERCENT_DIGITS = 1  # growth rate, share and multiple
+PERCENT_DIGITS = 2  # growth rate, share and multiple (loop 1: was 1; a computed value is read to two decimals)
 _DECIMALS = re.compile(r"\.(\d+)")
 
 
@@ -42,21 +45,13 @@ class CalcRefused(Exception):
 
 def _indexed(table: TableInput) -> tuple[TableInput, dict[str, Cell], bool]:
     """(table, cells by source_ref, whether facts name the item)."""
-    # One per TableInput (T1-28 S2: TableInput.caches, was a module dict keyed by id(table)).
-    by_ref, named = table.caches.get(
-        "compute.engine.indexed", lambda: ({c.source_ref: c for c in table.cells}, _item_named(table)))
-    return table, by_ref, named
+    # For in-memory tables only (tests): the whole ref dict of the memory store, one per TableInput.
+    return table, MemoryStore.of(table).ref_map, _item_named(table)
 
 
 def _item_named(table: TableInput) -> bool:
     """False when one item only wraps a '기본항목별' category that holds the real items (DT_1B8000F)."""
-    if len({c.item_code for c in table.cells}) > 1 or not table.cells:
-        return True
-    return not any("항목" in name for name in table.cells[0].dims)
-
-
-def _by_ref(table: TableInput) -> dict[str, Cell]:
-    return _indexed(table)[1]
+    return index_of(table).item_named  # a fact of the whole table: the index has it (T1-31 S2)
 
 
 @dataclass(frozen=True)
@@ -69,16 +64,18 @@ class _Read:
     show_item: bool  # False when the item label says nothing (see _item_named)
 
 
-def _read(table: TableInput, ref: str) -> _Read:
-    cell = _by_ref(table).get(ref)
+def _read(table: TableInput, ref: str, found: Mapping[str, Cell] | None = None) -> _Read:
+    """The cell of ref as a fact reads it. found: cells by ref the caller already asked the store for, so a step that
+    reads many cells makes one request (_cells); without it, this asks the store for the one cell."""
+    cell = found.get(ref) if found is not None else store_of(table).by_ref(ref)
     if cell is None:
         raise CalcRefused("class_mismatch", messages.refusal_message("class_mismatch", what=ref))
     if cell.value_flag is None:
         cell = clean_cell(cell)
     unit, kind = cell_measure(table, cell)
     unit = unit or (cell.unit if cell.unit_source != "unknown" else None) or None
-    found = _DECIMALS.search(display_value(cell.value_raw))
-    return _Read(cell, cell.value, unit, kind, len(found.group(1)) if found else 0, _indexed(table)[2])
+    decimals = _DECIMALS.search(display_value(cell.value_raw))
+    return _Read(cell, cell.value, unit, kind, len(decimals.group(1)) if decimals else 0, _item_named(table))
 
 
 def _numeric(read: _Read) -> float:
@@ -133,24 +130,23 @@ class _Ids:
         return f"f{self.n}"
 
 
-def _series_groups(table: TableInput) -> dict[tuple, list[Cell]]:
-    groups: dict[tuple, list[Cell]] = {}
-    for c in table.cells:
-        groups.setdefault((c.item_code, tuple(sorted(c.dim_codes.items()))), []).append(c)
-    return groups
+def _cells(table: TableInput, refs: list[str]) -> dict[str, Cell]:
+    """The cells of refs in one store request, for _read(found=)."""
+    return store_of(table).by_refs(refs)
 
 
 def _series(table: TableInput, cell: Cell) -> list[dict]:
-    # One grouping per TableInput (T1-28 S2: TableInput.caches, was a module dict keyed by id(table)).
-    groups = table.caches.get("compute.engine.series", lambda: _series_groups(table))
-    same = groups.get((cell.item_code, tuple(sorted(cell.dim_codes.items()))), [])
-    reads = sorted((_read(table, c.source_ref) for c in same), key=lambda r: r.cell.period_raw)
+    same = store_of(table).series(cell.item_code, dim_key(cell))
+    found = {c.source_ref: c for c in same}  # the series' own cells: no second request (refs are unique)
+    reads = sorted((_read(table, c.source_ref, found) for c in same), key=lambda r: r.cell.period_raw)
     return [{"period": r.cell.period_raw, "value": r.value} for r in reads if r.value is not None]
 
 
-def _share_parts(table: TableInput, parts: list[str], total: str, ids: _Ids) -> tuple[list[Fact], Fact, float]:
-    reads = [_read(table, ref) for ref in parts]
-    total_read = _read(table, total)
+def _share_parts(table: TableInput, parts: list[str], total: str, ids: _Ids,
+                 found: Mapping[str, Cell]) -> tuple[list[Fact], Fact, float]:
+    """found: the cells of parts and total, asked for by the caller (rank asks for every candidate at once)."""
+    reads = [_read(table, ref, found) for ref in parts]
+    total_read = _read(table, total, found)
     _check_units([*reads, total_read])
     if len(reads) > 1 and any(r.kind not in COUNT_KINDS for r in reads if r.kind):
         what = "·".join(r.cell.item for r in reads)
@@ -170,19 +166,22 @@ def _share_parts(table: TableInput, parts: list[str], total: str, ids: _Ids) -> 
 def _with_context(table: TableInput, computed: Computed, refs: list[str]) -> Computed:
     """Context cells (a 전국 value, a newer period shown as '-') join the facts, symbols included; never cited first."""
     facts = list(computed.result.facts)
+    found = _cells(table, refs) if refs else {}  # most questions have no context cells: no request
     for ref in refs:
-        if ref in _by_ref(table) and all(f.source_ref != ref for f in facts):
-            facts.append(_cell_fact(f"f{len(facts) + 1}", _read(table, ref)))
+        if ref in found and all(f.source_ref != ref for f in facts):
+            facts.append(_cell_fact(f"f{len(facts) + 1}", _read(table, ref, found)))
     return computed.model_copy(update={"result": StatResult(facts=facts)})
 
 
-def compute(table: TableInput, built: Built, lookup: EventLookup | None = None) -> Computed:
+def compute(table: TableInput, built: Built, lookup: EventLookup | None = None,
+            tables: dict[str, TableInput] | None = None) -> Computed:
     """Facts of the built plan; Computed also keeps what templates and charts read beside the facts.
 
-    lookup answers an event the calendar does not have (a plan the model wrote may name one)."""
+    lookup answers an event the calendar does not have (a plan the model wrote may name one). tables (T1-30): every
+    table of the question by tbl_id, table among them (a select without `table` reads table)."""
     from kosis_chat.compute.plan_engine import run_plan
 
-    run = run_plan(table, built.plan, lookup)
+    run = run_plan(table, built.plan, lookup, tables)
     by_id = {f.id: f for f in run.facts}
     extra: dict = {}
     if built.pattern == "value":

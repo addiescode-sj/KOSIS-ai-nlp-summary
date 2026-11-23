@@ -10,13 +10,16 @@ rule_plan and build_plan. The split into rules.py / place.py is left for later.
 from __future__ import annotations
 
 import re
+from itertools import product
 
 from kosis_chat.analyze import blocks as build  # T1-28 S3a: was compute/build.py
 from kosis_chat.analyze.blocks import Built, Pattern
 from kosis_chat.analyze.roles import is_province, pick_of, reference_index
 from kosis_chat.judge.rules import resolve
 from kosis_chat.prepare.schemas import Cell, TableInput
+from kosis_chat.prepare.store import DimKey, store_of
 from kosis_chat.judge.question import (
+    ARITH_WORDS,
     AVG_WORDS,
     CHANGE_WORDS,
     ITEM_AXIS,
@@ -24,23 +27,32 @@ from kosis_chat.judge.question import (
     TOTAL_WORDS,
     TREND_WORDS,
     Match,
+    Parsed,
     Periods,
     TableIndex,
     in_range,
     is_total,
     parse,
     squash,
+    total_stem,
 )
+from kosis_chat.judge.question import group_parts_of  # isort: skip  # loop 7
 
-from kosis_ai.schemas import QuestionType, StatQuery  # isort: skip
+from kosis_ai.schemas import PlanV3, QuestionType, SelectStep, StatQuery  # isort: skip
 from kosis_chat.analyze.schemas import Plan  # isort: skip  # re-export: moved in T1-28 S1b
 from kosis_chat.shared import defaults as default_strings  # isort: skip
-from kosis_chat.shared.patterns import RECENT_N, REGION_SUFFIX  # isort: skip
+from kosis_chat.shared.patterns import CHANGE_ASKED, PER_UNIT, RATE_OF_CHANGE, RECENT_N, REGION_SUFFIX, asked_comparison, per_scale  # isort: skip
+from kosis_chat.shared.patterns import MOST_RECENT  # isort: skip  # "가장 최근 ~" names a period, not a ranking
+from kosis_chat.shared.patterns import ASKS_GAP, ASKS_PERIOD, ASKS_RATIO, CHANGE_DOWN, EXTREME_MAX, RANK_WORDS, rank_places  # isort: skip
+from kosis_chat.shared.patterns import EACH_PERIOD, EXCLUDE, years_step  # isort: skip  # loop 4
+from kosis_chat.shared.patterns import DEST_AFTER, DEST_AXIS, ORIGIN_AFTER, ORIGIN_AXIS, REVERSE  # isort: skip  # loop 5
+from kosis_chat.shared.patterns import WITHIN_AFTER  # isort: skip  # loop 6
+from kosis_chat.shared.patterns import EACH_TARGET, PERCENT, WHICH_MORE  # isort: skip  # loop 7
 
 PERIOD_AXIS = "시점"  # Plan.over when an extreme question ranks periods ("가장 낮았던 해")
 RECENT_POINTS = 5
-EXTREME_WORDS = re.compile(r"가장|제일|최고|최저|최대|최소|1위|꼴찌")
-MOST_RECENT = re.compile(r"(?:가장|제일)\s*최근")  # "가장 최근 ~" names a period, not a ranking
+# loop 4: also the nouns 최댓값 / 최솟값 (최댓, 최솟), as the judge's RANKING reads them
+EXTREME_WORDS = re.compile(r"가장|제일|최고|최저|최대|최소|최댓|최솟|1위|꼴찌")
 SHARE_WORDS = re.compile(r"비중|차지|구성비")
 # "서울이 전국의 몇 퍼센트": a share when a label the question names comes right before 의 (not "몇 퍼센트 늘었어",
 # not "평균의 몇 %", where 평균 is no label).
@@ -48,7 +60,7 @@ _OF_PERCENT = re.compile(r"의몇(?:퍼센트|%|프로)")
 # "%p" asks for a difference of percentages: of two codes a question word matched, the ones measured in %.
 _PERCENT_POINT = re.compile(r"%\s*p|퍼센트\s*포인트|%\s*포인트")
 COMPARE_WORDS = re.compile(r"비교|차이|몇\s*배|보다|더\s*(?:높|낮|많|적|크|작)")
-ASKS_PERIOD = re.compile(r"해는|해가|연도|년도|언제|시점은")
+# ASKS_PERIOD (loop 3: shared/patterns.py): a period word a describing word ends in, whatever particle follows.
 # A year on a monthly table that also holds the year's value is that value, unless the question asks for the months.
 BY_MONTH = re.compile(r"월별|매월|매달|달마다|월간")
 # The judge's default period (default_applied["period"]) read as period codes: kosis_chat/shared/defaults.py since
@@ -65,7 +77,7 @@ _GAP_WORDS = re.compile(r"격차|차이")
 _GAP_CHANGE = re.compile(r"변했|변화|벌어|좁혀|줄어|늘어|커졌|작아|달라|줄었|늘었")
 _GROWTH_WORDS = re.compile(r"증가율|감소율|증감률|증가\s*폭|감소\s*폭|증감\s*폭|더\s*(?:많이\s*)?(?:늘|줄)")
 _DECLINE = re.compile(r"감소율|감소\s*폭|더\s*(?:많이\s*)?줄")
-_GROWTH_RATE = re.compile(r"증가율|감소율|증감률")
+_GROWTH_RATE = RATE_OF_CHANGE  # loop 2: the shared words of a rate of change (shared/patterns.py), as multi_rules reads them
 _AMOUNT = re.compile(r"증가\s*폭|감소\s*폭|증감\s*폭|더\s*(?:많이\s*)?(?:늘|줄)")
 
 
@@ -97,8 +109,12 @@ def _percent_only(question: str, index: TableIndex, codes: dict[str, list[str]])
             codes[name] = percent
 
 
-def _question_type(question: str, periods: Periods, codes: dict[str, list[str]], matches: list[Match]) -> QuestionType:
-    if EXTREME_WORDS.search(MOST_RECENT.sub(" ", question)):
+def _question_type(question: str, periods: Periods, codes: dict[str, list[str]], matches: list[Match],
+                   rest: str | None = None) -> QuestionType:
+    # loop 3: a place other than the first ("세 번째로 많은", "2위", "상위 3개") ranks too. Loop 4: the ranking words are
+    # read on the question without the labels it names (rest), so an ordinal in a label ('첫째아', '1순위') ranks nothing.
+    ranking = question if rest is None else rest
+    if EXTREME_WORDS.search(MOST_RECENT.sub(" ", ranking)) or RANK_WORDS.search(ranking):
         return "extreme"
     if _asks_share(question, matches):
         return "share"
@@ -155,22 +171,56 @@ def _drop_children(index: TableIndex, codes: dict[str, list[str]]) -> None:
             codes[name] = roots
 
 
-def _order_in_question(question: str, index: TableIndex, name: str, named: list[str]) -> list[str]:
+def _position(question: str, index: TableIndex, name: str, code: str) -> int:
+    """Where the squashed question first names a code's label (its length when it does not)."""
     q = squash(question)
-
-    def at(code: str) -> int:
-        label = index.axes[name].labels[code]
-        forms = [squash(label), squash(re.sub(r"\s*\(.*\)\s*$", "", label)), squash(REGION_SUFFIX.sub("", label))]
-        found = [q.find(f) for f in forms if f and q.find(f) >= 0]
-        return min(found) if found else len(q)
-
-    return sorted(named, key=at)
+    label = index.axes[name].labels[code]
+    forms = [squash(label), squash(re.sub(r"\s*\(.*\)\s*$", "", label)), squash(REGION_SUFFIX.sub("", label))]
+    found = [q.find(f) for f in forms if f and q.find(f) >= 0]
+    return min(found) if found else len(q)
 
 
-def _range_periods(index: TableIndex, start: str, end: str) -> list[str]:
+def _order_in_question(question: str, index: TableIndex, name: str, named: list[str]) -> list[str]:
+    return sorted(named, key=lambda code: _position(question, index, name, code))
+
+
+def _per_unit(question: str, index: TableIndex, name: str, named: list[str]) -> tuple[int, float] | None:
+    """(the denominator's index in named, the scale) when the question asks one of two targets per units of the
+    other (loop 2, the words multi_rules reads too: shared/patterns.py PER_UNIT, per_scale): "사망자 1천 명당 출생아
+    수", "인구 1만 명당 의사 수". The denominator is the target named last before 당; a 당 inside a label the question
+    names ('인구 천명당 사망률') is no such word."""
+    m = PER_UNIT.search(question)
+    if m is None or len(named) != 2:
+        return None
+    q = squash(question)
+    at = len(squash(question[: m.end()])) - 1
+    named_at: dict[str, int] = {}  # where the question names each target, by the form it was matched by
+    for match in parse(index, question).matches:
+        start = q.find(match.form)
+        if match.axis == name and start >= 0:
+            named_at[match.code] = min(named_at.get(match.code, start), start)
+        while start >= 0:
+            if start <= at < start + len(match.form):
+                return None
+            start = q.find(match.form, start + 1)
+    before = [(p, n) for n, code in enumerate(named)
+              if (p := named_at.get(code, _position(question, index, name, code))) < at]
+    if not before:
+        return None
+    return max(before)[1], per_scale(m)
+
+
+def _range_periods(index: TableIndex, start: str, end: str, months: bool = False) -> list[str]:
+    """Table periods inside an asked range. A range of years is read year by year as _single_periods reads one
+    year (loop 2): a year the table holds a value of is that value, not that value and its months as well; a year
+    with months only is its months. Months asked (BY_MONTH) or a range of months: every period inside."""
     if end == "9999":
         end = max(x[:4] for x in index.periods)
-    return [x for x in index.periods if in_range(x, start, end)]
+    inside = [x for x in index.periods if in_range(x, start, end)]
+    if months or len(start) != 4 or len(end) != 4:
+        return inside
+    yearly = {x for x in inside if len(x) == 4}
+    return [x for x in inside if x in yearly or x[:4] not in yearly]
 
 
 def _single_periods(index: TableIndex, single: str, months: bool = False) -> list[str]:
@@ -181,11 +231,19 @@ def _single_periods(index: TableIndex, single: str, months: bool = False) -> lis
     return [x for x in index.periods if x == single or (len(single) == 4 and x[:4] == single)]
 
 
-def _periods(p: Periods, index: TableIndex, default: dict[str, str], months: bool = False) -> tuple[list[str], list[str]]:
+def _every(periods: list[str], start: str, step: int | None) -> list[str]:
+    """The periods of a range at an interval of years from its first year (loop 4: "2010~2020년 5년마다")."""
+    if not step or len(start) != 4:
+        return periods
+    return [x for x in periods if (int(x[:4]) - int(start)) % step == 0]
+
+
+def _periods(p: Periods, index: TableIndex, default: dict[str, str], months: bool = False,
+             step: int | None = None) -> tuple[list[str], list[str]]:
     """(table periods asked, asked years the table lacks)."""
     years = sorted({x[:4] for x in index.periods})
     if p.ranges:
-        found = [x for a, b in p.ranges for x in _range_periods(index, a, b)]
+        found = [x for a, b in p.ranges for x in _every(_range_periods(index, a, b, months), a, step)]
         if p.singles:  # "2025년 ... 2020~2024년 평균보다": the single period belongs to the question too
             found += [x for s in p.singles for x in _single_periods(index, s, months)]
         # Only the asked ends: a census table has no 2016~2019 by design, which is not worth a note.
@@ -208,7 +266,7 @@ def _periods(p: Periods, index: TableIndex, default: dict[str, str], months: boo
 def _period_groups(p: Periods, index: TableIndex, kind: QuestionType, months: bool = False) -> list[list[str]]:
     """The period groups an op works on, in question order: one per range (a decade, a half, a quarter), and
     for a share the two single periods compared."""
-    groups = [_range_periods(index, a, b) for a, b in p.ranges]
+    groups = [_range_periods(index, a, b, months) for a, b in p.ranges]
     if kind == "share" and not groups and len(p.singles) >= 2:
         groups = [_single_periods(index, s, months) for s in p.singles[:2]]
     return [g for g in groups if g]
@@ -221,11 +279,19 @@ def _operation(question: str, rest: str, p: Periods, index: TableIndex, kind: Qu
     rest is the question with matched labels removed, so "평균" in a label ('평균 가구원수') does not count."""
     groups = _period_groups(p, index, kind, months)
     average = bool(AVG_WORDS.search(rest))
-    total = bool(SUM_WORDS.search(rest) or (TOTAL_WORDS.search(rest) and p.ranges))
+    # "모두" / "전부" sums a range, but not a range asked period by period ("연도별로 모두 알려줘", loop 4)
+    total = bool(SUM_WORDS.search(rest) or (TOTAL_WORDS.search(rest) and p.ranges and not EACH_PERIOD.search(rest)))
     if kind == "share":
         if _part_of_year([x for g in groups for x in g]):  # "2025년 중 12월 비중": one share, not two compared
             return None, []
         return ("shr", groups) if len(groups) == 2 and not average and not total else (None, [])
+    if average and kind != "extreme" and _GROWTH_RATE.search(rest):
+        return "cagr", []  # loop 3: the average is of the rate ("연평균 증가율", "해마다 평균 몇 퍼센트씩"), not of the values
+    # loop 4: the same for an amount ("한 해 평균 몇 명씩 줄었어", "연평균 얼마나 늘었어"): the average is of the change
+    # between the two ends (one range, two years, or the last n years), not of the values
+    ends = (len(groups) == 1 and not p.singles) or (not p.ranges and len(p.singles) == 2) or (not groups and p.recent_n)
+    if average and kind != "extreme" and CHANGE_ASKED.search(rest) and ends:
+        return "apc", []
     if average and groups:
         if len(groups) >= 2:
             return "pavg", groups[:2]
@@ -242,7 +308,37 @@ def _operation(question: str, rest: str, p: Periods, index: TableIndex, kind: Qu
             return "sum", groups
     if total and groups:
         return ("psum", groups[:2]) if len(groups) >= 2 else ("sum", groups)
+    if total and kind != "extreme" and not p.ranges and len(p.singles) >= 2:  # "2021년과 2023년 출생아 수를 합치면": periods named one by one
+        named = [x for s in p.singles for x in _single_periods(index, s, months)]
+        return ("sum", [named]) if len(named) >= 2 else (None, [])
+    if total and kind != "extreme":  # "서울과 부산 인구를 합치면", "출생아와 사망자를 더하면": the named targets at one period (build_plan)
+        return "sum", []
     return None, []
+
+
+def _excluded(question: str, index: TableIndex, codes: dict[str, list[str]], periods: list[str]) -> tuple[str, str, str] | None:
+    """(axis, the category's total, the part left out) when the question asks for the rest of a category but one
+    (loop 4, shared EXCLUDE): one code named of a category that has a total, before the word that leaves it out (and
+    after the total when the total is named too: "전국에서 서울을 제외한", "서울 말고 나머지 지역"; not "전국 말고 서울"),
+    one code of every other category, one period."""
+    m = EXCLUDE.search(question)
+    if m is None or len(periods) > 1:
+        return None
+    at = len(squash(question[: m.start()]))
+    found = None
+    for name, named in codes.items():
+        total = _total(index, name)
+        parts = [c for c in named if c != total]
+        if not parts or total is None:
+            continue
+        if len(parts) != 1 or len(named) > 2 or found is not None:
+            return None
+        part = parts[0]
+        where = _position(question, index, name, part)
+        if where >= at or (total in named and _position(question, index, name, total) > where):
+            return None
+        found = (name, total, part)
+    return found
 
 
 def rule_plan(question: str, index: TableIndex, default_applied: dict[str, str] | None = None) -> Plan:
@@ -255,45 +351,331 @@ def rule_plan(question: str, index: TableIndex, default_applied: dict[str, str] 
     _drop_children(index, codes)
     _percent_only(question, index, codes)
     default = dict(default_applied or {})
-    kind = _question_type(question, parsed.periods, codes, parsed.matches)
+    kind = _question_type(question, parsed.periods, codes, parsed.matches, parsed.rest)
+    if kind not in ("share", "extreme") and _drop_scopes(question, index, codes):
+        kind = _question_type(question, parsed.periods, codes, parsed.matches, parsed.rest)
+    pairs: list[dict[str, str]] = []
+    pair_reference = None
+    if found := _flows(question, index, parsed, kind):  # loop 5: names in a start and an end category
+        for side, named in found[0].items():
+            if named:
+                codes[side] = named
+            else:
+                codes.pop(side, None)
+        pairs, pair_reference = found[1], found[2]
+        kind = _question_type(question, parsed.periods, codes, parsed.matches, parsed.rest)
+        if pairs and kind not in ("share", "extreme"):
+            kind = "compare"  # two flows: compared (blocks.compare reads the difference or the ratio asked)
     p = parsed.periods
     # "2024년 혼인 추이" on a monthly table: the months of the one year asked
     months = bool(BY_MONTH.search(question)) or (kind == "trend" and len(p.singles) == 1 and not p.ranges)
-    periods, missing = _periods(p, index, default, months)
+    periods, missing = _periods(p, index, default, months, years_step(question))
     plan = Plan(question, kind, codes, periods, missing_years=missing, default_applied=default,
-                events=list(parsed.periods.events))
+                events=list(parsed.periods.events), pairs=pairs, pair_reference=pair_reference)
     plan.pattern, plan.groups = _operation(question, parsed.rest, parsed.periods, index, kind, months)
+    if (kind in ("value", "compare") and (plan.pattern is None or (plan.pattern == "sum" and not plan.groups))
+            and _excluded(question, index, codes, periods)):
+        plan.pattern, plan.groups, plan.type = "excl", [], "compare"  # loop 4: the total minus the part left out
+        return plan
     if plan.pattern == "sum" and parsed.periods.spans and not parsed.periods.singles:
         plan.type = "value"  # "2024년 상반기 혼인 건수": one number for one named period
     elif plan.pattern and plan.pattern != "shr" and kind not in ("value", "trend"):
         plan.type = "trend"  # an average or sum over periods is a trend question, whatever its wording suggested
-    if plan.pattern is None and (pair := _two_by_two(question, plan)):
+    if plan.pattern is None and (pair := _two_by_two(question, plan, parsed.rest)):
         plan.pattern, plan.groups, plan.type = pair
         return plan
+    if plan.pattern is None and kind == "trend" and (ratio := _period_ratio(question, parsed.rest, plan)):
+        plan.pattern, plan.groups, plan.type = "pratio", ratio, "compare"
+        return plan
+    if plan.pattern is None and kind in ("trend", "compare") and _values_only(parsed, kind, codes):
+        plan.type = "value"  # "2021년과 2023년 서울과 부산 인구 알려줘": the cells of every named target and period
     if kind == "extreme":
         plan.pick = pick_of(question)
-        plan.over = PERIOD_AXIS if ASKS_PERIOD.search(question) else _ranked_axis(index, codes)
+        plan.over = PERIOD_AXIS if ASKS_PERIOD.search(question) else (_scope(question, index, codes)
+                                                                      or _ranked_axis(index, codes))
+        if plan.over is None and len(plan.periods) >= 2:  # loop 4: nothing open but the asked periods: they are ranked
+            plan.over = PERIOD_AXIS
         if plan.over is None:
             plan.unresolved.append("over")
     return plan
 
 
-def _two_by_two(question: str, plan: Plan) -> tuple[Pattern, list[list[str]], QuestionType] | None:
-    """(gap or grw, the two periods, "compare") when the question names two targets of one category and two years
-    (or a range: its ends). A monthly table's yearly value stands for the year; without one the rules do not guess."""
+def _values_only(parsed: Parsed, kind: QuestionType, codes: dict[str, list[str]]) -> bool:
+    """No word that asks for a change, a trend, a comparison or a formula, and the question names several periods
+    one by one (a trend by count: two or more, no range, no relative period) or several codes in two categories or
+    more (a compare by count: two regions and two items) (loop 2): the question lists values ("2020년, 2023년 각각
+    얼마야?", "서울과 부산의 혼인건수와 조혼인율"). The type was counted (_question_type), which put a change in the
+    answer nobody asked for, or failed for the second category. Read on the question without its labels."""
+    p, rest = parsed.periods, parsed.rest
+    if kind == "compare":
+        # one pair: the compare plan lists it when no formula is asked (blocks.compare); loop 5: three targets or more
+        # of one category are listed when the question names each of them (not a range, not an over-wide match)
+        several = [n for n, v in codes.items() if len(v) >= 2]
+        if len(several) < 2 and not (several and len(codes[several[0]]) >= 3
+                                     and _named_one_by_one(parsed, several[0], codes[several[0]])):
+            return False
+    elif p.recent or p.recent_n or p.previous or p.before or p.events:
+        return False
+    elif p.ranges:  # loop 4: a range asked period by period (shared EACH_PERIOD, as the multi-table rules read it)
+        if not EACH_PERIOD.search(rest):
+            return False
+    elif len(p.singles) < 2:
+        return False
+    diff, ratio = asked_comparison(rest)
+    asks = (diff or ratio or TREND_WORDS.search(rest) or CHANGE_ASKED.search(rest) or ARITH_WORDS.search(rest)
+            or AVG_WORDS.search(rest) or "얼마나" in rest)
+    return not asks
+
+
+def _twin_axes(index: TableIndex) -> tuple[str, str] | None:
+    """(the start category, the end category) of a table with two categories that hold the same names (three or
+    more) in two roles, the roles read on the categories' names (shared ORIGIN_AXIS, DEST_AXIS)."""
+    names = [n for n, a in index.axes.items() if n != ITEM_AXIS and len(a.labels) >= 3]
+    for a, b in ((a, b) for i, a in enumerate(names) for b in names[i + 1:]):
+        labels_a = {squash(x) for x in index.axes[a].labels.values()}
+        if labels_a != {squash(x) for x in index.axes[b].labels.values()}:
+            continue
+        if ORIGIN_AXIS.search(a) and DEST_AXIS.search(b) and not DEST_AXIS.search(a):
+            return a, b
+        if ORIGIN_AXIS.search(b) and DEST_AXIS.search(a) and not DEST_AXIS.search(b):
+            return b, a
+    return None
+
+
+def _flows(question: str, index: TableIndex, parsed: Parsed, kind: QuestionType
+           ) -> tuple[dict[str, list[str]], list[dict[str, str]], int | None] | None:
+    """Loop 5. On a table with a start and an end category of the same names (_twin_axes), the names the question
+    gives a role (a particle or word right after the name: shared ORIGIN_AFTER, DEST_AFTER) put in their category:
+    ({start: [code], end: [code]}, the flows) for every name read so. A side no name was given is the category's total
+    ("서울로 전입한": from everywhere). A role named twice starts a second flow ("A에서 B로 ... B에서 A로"), and a word
+    that turns the flow around (REVERSE) names the second flow as the first one swapped. A share keeps the flow and
+    the same flow with the side named last set to its total (the whole). None when the table has no such
+    categories, or a name of them has no role in the question (the codes are left as they were)."""
+    twins = _twin_axes(index)
+    if twins is None:
+        return None
+    start, end = twins
+    totals = {start: _total(index, start), end: _total(index, end)}
+    codes_of: dict[str, dict[str, str]] = {}  # form -> category -> code
+    for m in parsed.matches:
+        if m.axis in twins:
+            codes_of.setdefault(m.form, {})[m.axis] = m.code
+    if not codes_of:
+        return None
+    q = squash(question)
+    found: list[tuple[int, int, str]] = []  # (at, end, form), longer forms first where two overlap
+    for form in sorted(codes_of, key=len, reverse=True):
+        at = q.find(form)
+        while at >= 0:
+            if not any(a < at + len(form) and at < b for a, b, _ in found):
+                found.append((at, at + len(form), form))
+            at = q.find(form, at + 1)
+    found.sort()
+    flows: list[dict[str, str]] = []
+    where: list[int] = []
+    current: dict[str, str] = {}
+    for at, stop, form in found:
+        after = q[stop:]
+        role = start if ORIGIN_AFTER.match(after) else end if DEST_AFTER.match(after) else None
+        if role is None or role not in codes_of[form]:
+            return None
+        if role in current:
+            flows.append(current)
+            current = {}
+        if not current:
+            where.append(at)
+        current[role] = codes_of[form][role]
+    flows.append(current)
+    if any(totals[side] is None for flow in flows for side in twins if side not in flow):
+        return None
+    # the sides the first flow names; a side it does not name is left open (the total, or the axis a ranking ranks)
+    codes = {side: [flows[0][side]] if side in flows[0] else [] for side in twins}
+    flows = [{side: flow.get(side, totals[side]) for side in twins} for flow in flows]
+    if len(flows) == 1 and (rev := REVERSE.search(q)) and rev.start() > where[0]:
+        flows.append({start: flows[0][end], end: flows[0][start]})
+        where.append(rev.start())
+    if len(flows) > 2:
+        return None
+    if kind == "share" and len(flows) == 1:
+        last = max(found)[2]
+        part = next(side for side in twins if codes_of[last].get(side) == flows[0][side])
+        flows.append({**flows[0], part: totals[part]})
+        return codes, flows, None
+    return codes, (flows if len(flows) == 2 else []), _pair_reference(q, where) if len(flows) == 2 else None
+
+
+def _named_one_by_one(parsed: Parsed, name: str, named: list[str]) -> bool:
+    """Every code is matched by a name of its own in the question (loop 5): each code has an exact match, and no
+    question word matched two of them (a range such as '3인 이하' or a word matching several labels is not that)."""
+    forms: dict[str, set[str]] = {}
+    for m in parsed.matches:
+        if m.axis == name and m.code in named and m.exact:
+            forms.setdefault(m.code, set()).add(m.form)
+    if set(forms) != set(named):
+        return False
+    used = [f for fs in forms.values() for f in fs]
+    return len(used) == len(set(used))
+
+
+def _listing(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | None) -> Built:
+    """The cells of every combination of the named targets at every asked period, one select per cell (two items
+    of different units are listed, not refused), in question order."""
+    several = [n for n, named in plan.codes.items() if len(named) >= 2]
+    problems: list[str] = []
+    fixed = _fixed(plan, index, set(several), problems)
+    if problems:
+        raise Unresolved(problems)
+    combos = [{**fixed, **dict(zip(several, combo))} for combo in product(*(plan.codes[n] for n in several))]
+    refs = _refs(lookup, [(f, p) for f in combos for p in plan.periods], problems)
+    if problems:
+        raise Unresolved(problems)
+    steps = [SelectStep(id=f"c{n}", cells=[r]) for n, r in enumerate(refs)]
+    return build.written(PlanV3(steps=steps, show=[s.id for s in steps], present="value", note=note))
+
+
+def _two_by_two(question: str, plan: Plan, rest: str | None = None) -> tuple[Pattern, list[list[str]], QuestionType] | None:
+    """(gap, grw or each, the two periods, "compare") when the question names two targets of one category and two
+    years (or a range: its ends). A monthly table's yearly value stands for the year; without one the rules do not
+    guess. Loop 7: a change asked the way one target's change is asked (shared CHANGE_ASKED: a verb, a rate of change,
+    a percent point; read on rest, the question without its labels) is each target's change (each) unless the
+    question asks which of them is more (shared WHICH_MORE); so is a rate named by its noun with a word of each
+    (shared EACH_TARGET: "각각", "저마다")."""
+    rest = question if rest is None else rest
     pairs = [n for n, named in plan.codes.items() if len(named) == 2]
     years = sorted({p[:4] for p in plan.periods})
     if len(pairs) != 1 or len(years) < 2 or any(len(v) > 2 for v in plan.codes.values()):
         return None
     if _GROWTH_WORDS.search(question):
-        pattern: Pattern = "grw"
+        pattern: Pattern = "each" if EACH_TARGET.search(rest) and not WHICH_MORE.search(rest) else "grw"
     elif _GAP_WORDS.search(question) and _GAP_CHANGE.search(question):
         pattern = "gap"
+    elif CHANGE_ASKED.search(rest) or _PERCENT_POINT.search(rest):
+        pattern = "grw" if WHICH_MORE.search(rest) else "each"
     else:
         return None
     if years[0] not in plan.periods or years[-1] not in plan.periods:
         return None
     return pattern, [[years[0]], [years[-1]]], "compare"
+
+
+def _period_ratio(question: str, rest: str, plan: Plan) -> list[list[str]] | None:
+    """Loop 7: [[subject period], [reference period]] when the question asks how many times one period's value of
+    one series is another's (shared asked_comparison: a ratio, no difference named): two periods of one kind, no
+    category with two codes. The reference is the period named right before a comparing word ("2013년의 몇 배",
+    "2015년 대비", "2014년에 비해", "2023년보다": roles.reference_index, as two targets' reference is read), else the
+    earlier one (an implied period: "전년 대비 몇 배")."""
+    periods = list(plan.periods)
+    if len(periods) != 2 or len({len(p) for p in periods}) != 1 or any(len(v) >= 2 for v in plan.codes.values()):
+        return None
+    diff, ratio = asked_comparison(rest)
+    # 비율 alone names a measure ("고령인구 비율 변화"), not how many times one period is the other
+    if not ratio or diff or all(m.group(0) == "비율" for m in ASKS_RATIO.finditer(rest)):
+        return None
+    names = [f"{p[:4]}년" + (f" {int(p[4:])}월" if len(p) == 6 else "") for p in periods]
+    ref = reference_index(question, names)
+    if ref is None:
+        ref = periods.index(min(periods))
+    return [[periods[1 - ref]], [periods[ref]]]
+
+
+def _period_ratio_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | None) -> Built:
+    """Loop 7: one series at the subject period over the reference period (plan.groups); the answer keeps the ratio."""
+    problems: list[str] = []
+    fixed = _fixed(plan, index, set(), problems)
+    if problems:
+        raise Unresolved(problems)
+    (subject,), (reference,) = plan.groups
+    refs = _refs(lookup, [(fixed, subject), (fixed, reference)], problems)
+    if problems:
+        raise Unresolved(problems)
+    return build.compare(refs, reference=1, note=note)
+
+
+def _spaced_end(question: str, squashed_end: int) -> int:
+    """The position in the question as written right after its first squashed_end characters that are not spaces."""
+    seen = 0
+    for at, ch in enumerate(question):
+        if seen == squashed_end:
+            return at
+        seen += not ch.isspace()
+    return len(question)
+
+
+def _within(question: str, index: TableIndex, name: str) -> list[str]:
+    """Loop 6: the codes of a category the question names right before a word of looking inside a group (shared
+    WITHIN_AFTER: "임금근로자 중", "서울 안에서", "비임금근로자 가운데"), in question order. Other names the question
+    gives may come between the name and that word ("소규모 사업체 중": the group of the small ones among the
+    businesses), with a 의 after each."""
+    q = squash(question)
+    matches = parse(index, question).matches
+    forms = sorted({m.form for m in matches}, key=len, reverse=True)
+
+    def after_names(end: int) -> int:
+        while True:
+            if q.startswith("의", end):
+                end += 1
+            nxt = next((f for f in forms if q.startswith(f, end)), None)
+            if nxt is None:
+                return end
+            end += len(nxt)
+
+    found: list[tuple[int, str]] = []
+    for m in matches:
+        if m.axis != name:
+            continue
+        at = q.find(m.form)
+        while at >= 0:
+            if WITHIN_AFTER.match(question[_spaced_end(question, after_names(at + len(m.form))):]):
+                found.append((at, m.code))
+                break
+            at = q.find(m.form, at + 1)
+    return [c for _, c in sorted(found)]
+
+
+def _holds(index: TableIndex, name: str, whole: str, code: str) -> bool:
+    """Loop 7: the code `whole` of a category is a group that holds `code`: the category's total (a total name with no
+    parent), an ancestor of it, or the group its name is made of (judge group_parts: '귀농인-계' holds '귀농인-여자')."""
+    axis = index.axes[name]
+    if whole == code:
+        return False
+    if whole in axis.ancestors(code) or (whole == _total(index, name) and axis.parents.get(whole) is None):
+        return True
+    stem = total_stem(axis.labels[whole])
+    group = squash(stem) if stem else squash(axis.labels[whole])
+    pair = group_parts_of(index).get(name, {}).get(code)
+    return pair is not None and pair[0] == group
+
+
+def _drop_scopes(question: str, index: TableIndex, codes: dict[str, list[str]]) -> bool:
+    """Loop 7: a code named right before a word of looking inside a group (shared WITHIN_AFTER: "가구원 중 청년",
+    "전국 가운데 대구") that holds every other code named of its category (_holds) is where the question looks, not a
+    target: it is left out (a value, a trend or a comparison of the others). Not called for a share (the group is the
+    whole) or a ranking (the group is the pool). True when a code was left out."""
+    dropped = False
+    for name, named in codes.items():
+        if len(named) < 2:
+            continue
+        scopes = [w for w in _within(question, index, name) if w in named]
+        inner = [c for c in named if c not in scopes]
+        if inner and scopes and all(_holds(index, name, w, c) for w in scopes for c in inner):
+            codes[name] = inner
+            dropped = True
+    return dropped
+
+
+def _children(index: TableIndex, name: str, code: str) -> list[str]:
+    axis = index.axes[name]
+    return [c for c, parent in axis.parents.items() if parent == code]
+
+
+def _scope(question: str, index: TableIndex, codes: dict[str, list[str]]) -> str | None:
+    """Loop 6: the category a ranking looks inside a named group of (one code named right before a word of looking
+    inside, WITHIN_AFTER, that has members in the table: a subtotal and its details, a region and its districts); its
+    members are the candidates (_pool). None when there is no such group."""
+    for name, named in codes.items():
+        if len(named) == 1 and _children(index, name, named[0]) and named[0] in _within(question, index, name):
+            return name
+    return None
 
 
 def _ranked_axis(index: TableIndex, codes: dict[str, list[str]]) -> str | None:
@@ -307,32 +689,44 @@ def _ranked_axis(index: TableIndex, codes: dict[str, list[str]]) -> str | None:
 
 
 def _total(index: TableIndex, name: str) -> str | None:
-    return next((c for c, label in index.axes[name].labels.items() if is_total(label)), None)
+    """The category's total: the first total name with no parent (loop 6: not a subtotal such as '임금근로자-계' under
+    '취업자-계'), else the first total name."""
+    axis = index.axes[name]
+    totals = [c for c, label in axis.labels.items() if is_total(label)]
+    return next((c for c in totals if axis.parents.get(c) is None), totals[0] if totals else None)
 
 
 class _Lookup:
+    """The table's cells by `fixed` (one code per axis, ITEM_AXIS included), read through the cell store. The plural
+    methods make one store request for many cells or series (a loop over regions or periods asks once)."""
+
     def __init__(self, table: TableInput) -> None:
-        self.cells: dict[tuple, Cell] = {}
-        self.series: dict[tuple, list[Cell]] = {}
-        for c in table.cells:
-            key = (c.item_code, tuple(sorted(c.dim_codes.items())))
-            self.cells[(*key, c.period_raw)] = c
-            self.series.setdefault(key, []).append(c)
-        for cells in self.series.values():
-            cells.sort(key=lambda c: c.period_raw)
+        self.store = store_of(table)
 
     @staticmethod
-    def key(fixed: dict[str, str]) -> tuple:
+    def key(fixed: dict[str, str]) -> tuple[str, DimKey]:
         return fixed.get(ITEM_AXIS, ""), tuple(sorted((k, v) for k, v in fixed.items() if k != ITEM_AXIS))
 
     def cell(self, fixed: dict[str, str], period: str) -> Cell | None:
-        return self.cells.get((*self.key(fixed), period))
+        return self.store.cell((*self.key(fixed), period))
+
+    def cells(self, wanted: list[tuple[dict[str, str], str]]) -> list[Cell | None]:
+        """cell() of many (fixed, period) pairs, in order."""
+        keys = [(*self.key(fixed), period) for fixed, period in wanted]
+        found = self.store.cells_at(keys) if keys else {}  # nothing asked: no request
+        return [found.get(key) for key in keys]
 
     def numeric_periods(self, fixed: dict[str, str]) -> list[str]:
-        return [c.period_raw for c in self.series.get(self.key(fixed), []) if c.value_kind == "ok"]
+        return [c.period_raw for c in self.store.series(*self.key(fixed)) if c.value_kind == "ok"]
+
+    def numeric_periods_of(self, fixed_sets: list[dict[str, str]]) -> list[list[str]]:
+        """numeric_periods() of many fixed sets, in order."""
+        keys = [self.key(fixed) for fixed in fixed_sets]
+        found = self.store.series_at(keys) if keys else {}  # nothing asked: no request
+        return [[c.period_raw for c in found.get(key, ()) if c.value_kind == "ok"] for key in keys]
 
     def all_periods(self, fixed: dict[str, str]) -> list[str]:
-        return [c.period_raw for c in self.series.get(self.key(fixed), [])]
+        return [c.period_raw for c in self.store.series(*self.key(fixed))]
 
 
 def _lookup(table: TableInput) -> _Lookup:
@@ -373,8 +767,8 @@ def _one_period(plan: Plan, lookup: _Lookup, fixed_sets: list[dict[str, str]]) -
     if plan.periods:
         return plan.periods[-1]
     shared = None
-    for fixed in fixed_sets:
-        found = set(lookup.numeric_periods(fixed))
+    for periods in lookup.numeric_periods_of(fixed_sets):
+        found = set(periods)
         shared = found if shared is None else shared & found
     return max(shared) if shared else None
 
@@ -383,12 +777,20 @@ def _with(fixed: dict[str, str], name: str, code: str) -> dict[str, str]:
     return {**fixed, name: code}
 
 
-def _ref(lookup: _Lookup, fixed: dict[str, str], period: str, problems: list[str]) -> str:
-    cell = lookup.cell(fixed, period)
+def _ref_of(cell: Cell | None, fixed: dict[str, str], period: str, problems: list[str]) -> str:
     if cell is None:
         problems.append(f"칸 없음 {fixed} {period}")
         return ""
     return cell.source_ref
+
+
+def _ref(lookup: _Lookup, fixed: dict[str, str], period: str, problems: list[str]) -> str:
+    return _ref_of(lookup.cell(fixed, period), fixed, period, problems)
+
+
+def _refs(lookup: _Lookup, wanted: list[tuple[dict[str, str], str]], problems: list[str]) -> list[str]:
+    """_ref() of many (fixed, period) pairs in one store request: the same refs and problems, in the same order."""
+    return [_ref_of(cell, fixed, period, problems) for (fixed, period), cell in zip(wanted, lookup.cells(wanted))]
 
 
 def _note(plan: Plan) -> str | None:
@@ -408,10 +810,20 @@ def build_plan(plan: Plan, index: TableIndex, table: TableInput) -> Built:
     problems: list[str] = []
     note = _note(plan)
     kind = plan.type
-    if plan.pattern in ("gap", "grw"):
+    if plan.pattern in ("gap", "grw", "each"):
         return _two_by_two_plan(plan, index, lookup, note)
+    if plan.pattern == "pratio":
+        return _period_ratio_plan(plan, index, lookup, note)
+    if plan.pattern == "sum" and not plan.groups:
+        return _targets_sum(plan, index, lookup, note)
+    if plan.pattern in ("cagr", "apc"):
+        return _cagr_plan(plan, index, lookup, note, amount=plan.pattern == "apc")
+    if plan.pattern == "excl":
+        return _excluded_plan(plan, index, lookup, note)
     if plan.pattern:
         return _period_plan(plan, index, lookup, note)
+    if kind == "value" and (len(plan.periods) >= 2 or any(len(v) >= 2 for v in plan.codes.values())):
+        return _listing(plan, index, lookup, note)
     if kind in ("value", "trend"):
         fixed = _fixed(plan, index, set(), problems)
         if problems:
@@ -420,7 +832,7 @@ def build_plan(plan: Plan, index: TableIndex, table: TableInput) -> Built:
             # One asked period ("2023년 얼마나 늘었나"): the recent points that end there.
             numeric = [p for p in lookup.numeric_periods(fixed) if not plan.periods or p <= plan.periods[-1]]
             periods = plan.periods if len(plan.periods) >= 2 else numeric[-RECENT_POINTS:]
-            refs = [r for p in periods if (r := _ref(lookup, fixed, p, []))]
+            refs = [r for r in _refs(lookup, [(fixed, p) for p in periods], []) if r]
             if len(refs) < 2:
                 raise Unresolved([f"추이 시점 부족 {periods}"])
             return build.trend(refs, note)
@@ -429,7 +841,9 @@ def build_plan(plan: Plan, index: TableIndex, table: TableInput) -> Built:
         if problems:
             raise Unresolved(problems)
         newer = [p for p in lookup.all_periods(fixed) if period and p > period] if plan.default_applied.get("period") else []
-        return build.value(ref, [_ref(lookup, fixed, p, []) for p in newer], note)
+        return build.value(ref, _refs(lookup, [(fixed, p) for p in newer], []), note)
+    if plan.pairs and kind in ("compare", "share"):
+        return _pairs_plan(plan, index, lookup, note)
     if kind == "compare":
         side = next((n for n, named in plan.codes.items() if len(named) == 2), None)
         if side is None:
@@ -441,16 +855,54 @@ def build_plan(plan: Plan, index: TableIndex, table: TableInput) -> Built:
         if len(plan.periods) >= 2 and all(len(v) <= 1 for n, v in plan.codes.items() if n != side):
             pass  # two places and two years: compare at the later one
         period = _one_period(plan, lookup, pair)
-        refs = [_ref(lookup, f, period or "", problems) for f in pair]
+        refs = _refs(lookup, [(f, period or "") for f in pair], problems)
         if problems:
             raise Unresolved(problems)
+        if per := _per_unit(plan.question, index, side, plan.codes[side]):
+            return build.compare(refs, note=note, per=per)
         labels = [index.axes[side].labels[c] for c in plan.codes[side]]
-        return build.compare(refs, reference_index(plan.question, labels), note)
+        diff, ratio = asked_comparison(parse(index, plan.question).rest)
+        return build.compare(refs, reference_index(plan.question, labels), note, asked=diff or ratio)
     if kind == "share":
         return _share_plan(plan, index, lookup, note)
     if kind == "extreme":
         return _extreme_plan(plan, index, lookup, note)
     raise Unresolved(["질문 유형"])
+
+
+_REFERENCE_WORD = re.compile(r"보다|에비해|대비|와비교|과비교|을기준|를기준")
+
+
+def _pairs_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | None) -> Built:
+    """Loop 5: the two flows of plan.pairs (one code in each of two categories) at one period. A share: the first
+    over the second (the part, then the whole). A compare: the difference or the ratio asked; the flow named just
+    before a comparing word ("보다", "에 비해", "대비") is the reference."""
+    sides = set().union(*plan.pairs)
+    problems: list[str] = []
+    fixed = _fixed(plan.model_copy(update={"codes": {k: v for k, v in plan.codes.items() if k not in sides}}),
+                   index, sides, problems)
+    if problems:
+        raise Unresolved(problems)
+    sets = [{**fixed, **pair} for pair in plan.pairs]
+    period = _one_period(plan, lookup, sets)
+    refs = _refs(lookup, [(f, period or "") for f in sets], problems)
+    if problems:
+        raise Unresolved(problems)
+    if plan.type == "share":
+        return build.share(refs[:1], refs[1], note)
+    rest = parse(index, plan.question).rest
+    diff, ratio = asked_comparison(rest)
+    return build.compare(refs, plan.pair_reference, note, asked=diff or ratio)
+
+
+def _pair_reference(q: str, where: list[int]) -> int | None:
+    """The flow a comparing word follows (on the squashed question, where = each flow's first position): the later
+    of the flows named before the word; None without such a word or with no flow before it."""
+    word = _REFERENCE_WORD.search(q)
+    if word is None:
+        return None
+    before = [n for n, at in enumerate(where) if at < word.start()]
+    return max(before, key=lambda n: where[n]) if before else None
 
 
 def _share_axis(plan: Plan, index: TableIndex) -> tuple[str, list[str], str] | None:
@@ -459,6 +911,9 @@ def _share_axis(plan: Plan, index: TableIndex) -> tuple[str, list[str], str] | N
     The denominator is the parts' nearest common parent in the code hierarchy ('외국인근로자' -> '한국국적을 가지지 않은
     자'), else the category's total; a parent the question names with the parts is not a part."""
     order = [ITEM_AXIS] + [n for n in plan.codes if n != ITEM_AXIS]
+    # loop 6: first the category of a group the question looks inside that holds the parts named in it
+    order.sort(key=lambda n: not (n in index.axes and any(
+        w in index.axes[n].ancestors(c) for w in _within(plan.question, index, n) for c in plan.codes.get(n, []))))
     for name in order:
         if name not in index.axes:
             continue
@@ -468,6 +923,11 @@ def _share_axis(plan: Plan, index: TableIndex) -> tuple[str, list[str], str] | N
         parent = next(iter(parents)) if len(parents) == 1 else None
         total = _total(index, name)
         whole = parent if parent is not None and all(axis.parents.get(c) == parent or c == parent for c in named) else total
+        # loop 6: a group the question looks inside ("취업자 중 자영업자", "임금근로자 가운데 상용근로자") is the whole
+        # when it holds every part (an ancestor of each), whether it is the total, a subtotal or a parent further up
+        within = _within(plan.question, index, name)
+        inner = [c for c in named if c not in within]
+        whole = next((w for w in within if inner and all(w in axis.ancestors(c) for c in inner)), whole)
         parts = [c for c in named if c not in (total, whole)]
         if whole and parts:
             return name, parts, whole
@@ -496,7 +956,7 @@ def _share_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | None
         raise Unresolved(problems)
     sets = [_with(fixed, name, c) for c in [*parts, total]]
     period = _one_period(plan, lookup, sets)
-    refs = [_ref(lookup, f, period or "", problems) for f in sets]
+    refs = _refs(lookup, [(f, period or "") for f in sets], problems)
     if problems:
         raise Unresolved(problems)
     return build.share(refs[:-1], refs[-1], note)
@@ -509,16 +969,50 @@ def _period_share(plan: Plan, index: TableIndex, lookup: _Lookup, span: tuple[li
     if problems:
         raise Unresolved(problems)
     months, year = span
-    parts = [_ref(lookup, fixed, m, problems) for m in months]
-    whole = _ref(lookup, fixed, year, problems)
+    *parts, whole = _refs(lookup, [(fixed, m) for m in [*months, year]], problems)
     if problems:
         raise Unresolved(problems)
     return build.share(parts, whole, note)
 
 
+def _pool(index: TableIndex, name: str, named: list[str] | None = None) -> list[str]:
+    """The candidates of a ranking over a category: its top-level codes but the total; the provinces of a regional one.
+    Loop 6: the members of the one group the question looks inside (_scope: named is that one code with members);
+    a category whose top level is only its total (a whole, subtotals and their details): the whole's members."""
+    axis = index.axes[name]
+    if named and len(named) == 1 and (members := _children(index, name, named[0])):
+        return members
+    pool = [c for c, label in axis.labels.items() if axis.parents.get(c) is None and not is_total(label)]
+    if not pool and (whole := _total(index, name)) is not None:
+        return _children(index, name, whole)
+    if axis.regional and any(is_province(axis.labels[c]) for c in pool):
+        pool = [c for c in pool if is_province(axis.labels[c])]
+    return pool
+
+
+def _two_ends(plan: Plan) -> tuple[str, str] | None:
+    """The earliest and the latest asked period of one kind (years, or months) when two or more were asked."""
+    asked = sorted(plan.periods)
+    if not asked:
+        return None
+    same = [p for p in asked if len(p) == len(asked[-1])]
+    return (same[0], same[-1]) if len(same) >= 2 and same[0] != same[-1] else None
+
+
 def _extreme_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | None) -> Built:
     if plan.over is None or (plan.over != PERIOD_AXIS and plan.over not in index.axes):
         raise Unresolved(["over"])  # the model fill can leave it open too
+    rest = parse(index, plan.question).rest
+    places = rank_places(rest)  # loop 4: not the ordinal of a label the question names
+    changed = bool(CHANGE_ASKED.search(rest) or _GROWTH_WORDS.search(rest))
+    if changed and plan.over != PERIOD_AXIS and not SHARE_WORDS.search(rest) and (ends := _two_ends(plan)):
+        return _change_rank_plan(plan, index, lookup, ends, rest, places, note)
+    # both ends of a ranking: with their difference or ratio (loop 3), or (loop 4) named each with its own ranking word
+    # ("가장 많은 곳과 가장 적은 곳", "최댓값과 최솟값") for their values alone
+    both_ends = not changed and places is None and EXTREME_MAX.search(rest) and pick_of(rest) == "min"
+    formula = bool(ASKS_GAP.search(rest) or ASKS_RATIO.search(rest))
+    if both_ends and (formula or len(EXTREME_WORDS.findall(MOST_RECENT.sub(" ", rest))) >= 2):
+        return _extremes_plan(plan, index, lookup, rest, note, formula)
     share = bool(SHARE_WORDS.search(plan.question))
     problems: list[str] = []
     item_total = _total(index, ITEM_AXIS) if share else None
@@ -537,30 +1031,84 @@ def _extreme_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | No
         fixed = _fixed(plan.model_copy(update={"codes": {k: v for k, v in codes.items() if k != name}}), index, {name}, problems)
         if problems:
             raise Unresolved(problems)
-        axis = index.axes[name]
-        pool = [c for c, label in axis.labels.items() if axis.parents.get(c) is None and not is_total(label)]
-        if axis.regional and any(is_province(axis.labels[c]) for c in pool):
-            pool = [c for c in pool if is_province(axis.labels[c])]
+        pool = _pool(index, name, plan.codes.get(name))
         sets = [_with(fixed, name, c) for c in pool]
         period = _one_period(plan, lookup, sets[:1])
         groups = [(f, period or "") for f in sets]
         total = _total(index, name)
         context_sets = [(_with(fixed, name, total), period or "")] if total else []
+    # every candidate, denominator and context cell in one store request (a denominator is asked even when its
+    # candidate has no cell: it is then not used, as before)
+    with_total = bool(share and item_total)
+    denominator_sets = [(_with(f, ITEM_AXIS, item_total), p) for f, p in groups] if with_total else []
+    found = _refs(lookup, [*groups, *denominator_sets, *context_sets], [])
+    split = len(groups) + len(denominator_sets)
+    refs, denominators, context = found[:len(groups)], found[len(groups):split], [r for r in found[split:] if r]
     candidates, totals = [], []
-    for f, p in groups:
-        ref = _ref(lookup, f, p, [])
+    for n, ref in enumerate(refs):
         if not ref:
             continue
-        if share and item_total:
-            denominator = _ref(lookup, _with(f, ITEM_AXIS, item_total), p, [])
-            if not denominator:
+        if with_total:
+            if not denominators[n]:
                 continue
-            totals.append(denominator)
+            totals.append(denominators[n])
         candidates.append(ref)
     if len(candidates) < 2:
         raise Unresolved(["비교 대상 부족"])
-    context = [r for f, p in context_sets if (r := _ref(lookup, f, p, []))]
-    return build.extreme(candidates, plan.pick, totals, context, note)
+    return build.extreme(candidates, plan.pick, totals, context, note, places=places)
+
+
+def _change_rank_plan(plan: Plan, index: TableIndex, lookup: _Lookup, ends: tuple[str, str], rest: str,
+                      places, note: str | None) -> Built:
+    """Loop 3: the candidates ranked by their change between the earliest and the latest asked period (the amount,
+    or the rate when a rate of change is asked); a ranking of declines puts the most negative change first."""
+    name = plan.over
+    problems: list[str] = []
+    fixed = _fixed(plan.model_copy(update={"codes": {k: v for k, v in plan.codes.items() if k != name}}), index, {name}, problems)
+    if problems:
+        raise Unresolved(problems)
+    pool = _pool(index, name, plan.codes.get(name))
+    found = lookup.cells([(_with(fixed, name, c), p) for c in pool for p in ends])  # both ends of every candidate at once
+    codes = [c for n, c in enumerate(pool)
+             if all(cell is not None and cell.value_kind == "ok" for cell in found[2 * n:2 * n + 2])]
+    if len(codes) < 2:
+        raise Unresolved(["비교 대상 부족"])
+    pick = plan.pick or pick_of(plan.question)
+    if CHANGE_DOWN.search(rest):  # "가장 많이 줄어든": the largest decline is the smallest change
+        pick = "min" if pick == "max" else "max"
+    rate = bool(_GROWTH_RATE.search(rest))
+    return build.ranked_change(name, codes, fixed, ITEM_AXIS, ends, rate, pick, places, note)
+
+
+def _extremes_plan(plan: Plan, index: TableIndex, lookup: _Lookup, rest: str, note: str | None,
+                   formula: bool = True) -> Built:
+    """Loop 3: the largest and the smallest of the candidates (periods of one series, or the codes of a category at
+    one period) and their difference, or their ratio when one is asked."""
+    problems: list[str] = []
+    if plan.over == PERIOD_AXIS:
+        fixed = _fixed(plan, index, set(), problems)
+        if problems:
+            raise Unresolved(problems)
+        periods = plan.periods or lookup.numeric_periods(fixed)
+        if len({len(p) for p in periods}) > 1:  # a year's value beside its months: the kind asked (months by BY_MONTH)
+            want = 6 if BY_MONTH.search(plan.question) else 4
+            periods = [p for p in periods if len(p) == want]
+        wanted = [(fixed, p) for p in periods]
+    else:
+        name = plan.over
+        fixed = _fixed(plan.model_copy(update={"codes": {k: v for k, v in plan.codes.items() if k != name}}), index, {name}, problems)
+        if problems:
+            raise Unresolved(problems)
+        sets = [_with(fixed, name, c) for c in _pool(index, name, plan.codes.get(name))]
+        period = _one_period(plan, lookup, sets[:1])
+        wanted = [(f, period or "") for f in sets]
+    cells = [c.source_ref for c in lookup.cells(wanted) if c is not None and c.value_kind == "ok"]
+    if len(cells) < 2:
+        raise Unresolved(["비교 대상 부족"])
+    if not formula:
+        return build.extremes_combined(cells, None, note)
+    _, ratio = asked_comparison(rest)
+    return build.extremes_combined(cells, "ratio" if ratio and not ASKS_GAP.search(rest) else "diff", note)
 
 
 def _two_by_two_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | None) -> Built:
@@ -573,14 +1121,85 @@ def _two_by_two_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str |
     if problems:
         raise Unresolved(problems)
     early, late = plan.groups[0][0], plan.groups[-1][-1]
-    cells = [[_ref(lookup, _with(fixed, side, c), p, problems) for p in (early, late)] for c in plan.codes[side]]
+    wanted = [(_with(fixed, side, c), p) for c in plan.codes[side] for p in (early, late)]
+    found = lookup.cells(wanted)
+    flat = [_ref_of(cell, f, p, problems) for (f, p), cell in zip(wanted, found)]
+    cells = [flat[n:n + 2] for n in range(0, len(flat), 2)]
     if problems:
         raise Unresolved(problems)
+    if plan.pattern == "each":
+        return build.changes_each([tuple(c) for c in cells], _rate_asked(plan, index, found), note)
     (x1, x2), (y1, y2) = cells
     if plan.pattern == "gap":
         return build.gap((x1, y1), (x2, y2), note)
     return build.growth((x1, x2), (y1, y2), amount=bool(_AMOUNT.search(plan.question)) and not _GROWTH_RATE.search(plan.question),
                         decline=bool(_DECLINE.search(plan.question)), note=note)
+
+
+def _rate_asked(plan: Plan, index: TableIndex, cells: list[Cell | None]) -> bool:
+    """Loop 7: whether a change is asked as a rate (as compute/answer_facts.py reads one target's change): a rate of
+    change named, or a percent asked of cells that are not in % (a percent of % cells is a change in points unless
+    the rate is named by its noun, 증가율 or 변화율)."""
+    rest = parse(index, plan.question).rest
+    named_rate = any(w in m.group(0) for m in RATE_OF_CHANGE.finditer(rest) for w in ("률", "율"))
+    if any(c is not None and (c.unit or "").strip() in ("%", "퍼센트") for c in cells):
+        return named_rate
+    return bool(RATE_OF_CHANGE.search(rest) or PERCENT.search(rest))
+
+
+def _cagr_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | None, amount: bool = False) -> Built:
+    """Loop 3: the average yearly rate of change from the first to the last asked year (or the last n years of
+    "최근 n년"), from those two cells only."""
+    problems: list[str] = []
+    fixed = _fixed(plan, index, set(), problems)
+    if problems:
+        raise Unresolved(problems)
+    years = sorted(p for p in plan.periods if len(p) == 4)
+    if not years and (m := RECENT_N.search(plan.question)):
+        years = [p for p in lookup.numeric_periods(fixed) if len(p) == 4][-int(m.group(1)):]
+    if len(years) < 2 or years[0] == years[-1]:
+        raise Unresolved(["연평균 변화율의 처음·끝 연도"])
+    early, late = years[0], years[-1]
+    refs = _refs(lookup, [(fixed, early), (fixed, late)], problems)
+    if problems:
+        raise Unresolved(problems)
+    return build.average_growth(refs[0], refs[1], int(late) - int(early), note, amount=amount)
+
+
+def _excluded_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | None) -> Built:
+    """Loop 4: the category's total minus the code the question leaves out, at one period."""
+    found = _excluded(plan.question, index, plan.codes, plan.periods)
+    if found is None:
+        raise Unresolved(["제외할 대상"])
+    name, total, part = found
+    problems: list[str] = []
+    fixed = _fixed(plan.model_copy(update={"codes": {k: v for k, v in plan.codes.items() if k != name}}), index, {name}, problems)
+    if problems:
+        raise Unresolved(problems)
+    sets = [_with(fixed, name, total), _with(fixed, name, part)]
+    period = _one_period(plan, lookup, sets)
+    whole, piece = _refs(lookup, [(f, period or "") for f in sets], problems)
+    if problems:
+        raise Unresolved(problems)
+    return build.remainder(whole, piece, note)
+
+
+def _targets_sum(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | None) -> Built:
+    """The sum of the targets one category names (two regions, two items, three age groups) at one period."""
+    sides = [n for n, named in plan.codes.items() if len(named) >= 2]
+    if len(sides) != 1:
+        raise Unresolved(["더할 대상"])
+    side = sides[0]
+    problems: list[str] = []
+    fixed = _fixed(plan, index, {side}, problems)
+    if problems:
+        raise Unresolved(problems)
+    sets = [_with(fixed, side, c) for c in plan.codes[side]]
+    period = _one_period(plan, lookup, sets)
+    refs = _refs(lookup, [(f, period or "") for f in sets], problems)
+    if problems:
+        raise Unresolved(problems)
+    return build.over_periods(refs, "sum", "value", note)
 
 
 def _period_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | None) -> Built:
@@ -596,10 +1215,15 @@ def _period_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | Non
         if problems:
             raise Unresolved(problems)
         shares = []
+        # every group's parts and total in one store request, up to the first empty group; the groups are then read
+        # in order as before: the first group with a problem stops it, and an empty group fails at its turn
+        # (IndexError on group[-1], as the group-by-group reads did)
+        empty = next((n for n, group in enumerate(plan.groups) if not group), len(plan.groups))
+        cells = iter(lookup.cells([(_with(fixed, name, c), group[-1]) for group in plan.groups[:empty]
+                                   for c in [*parts, total]]))
         for group in plan.groups:
             period = group[-1]
-            refs = [_ref(lookup, _with(fixed, name, c), period, problems) for c in parts]
-            whole = _ref(lookup, _with(fixed, name, total), period, problems)
+            *refs, whole = [_ref_of(next(cells), _with(fixed, name, c), period, problems) for c in [*parts, total]]
             if problems:
                 raise Unresolved(problems)
             shares.append((refs, whole))
@@ -615,8 +1239,9 @@ def _period_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | Non
         n = int(m.group(1)) if (m := RECENT_N.search(plan.question)) else RECENT_POINTS
         groups = [numeric[-n:]]
     cells = []
+    found = iter(lookup.cells([(fixed, p) for group in groups for p in group]))  # every group in one store request
     for n, group in enumerate(groups):
-        refs = [r for p in group if (r := _ref(lookup, fixed, p, []))]
+        refs = [r for p in group if (r := _ref_of(next(found), fixed, p, []))]
         if not refs:
             raise Unresolved([f"기간 {group[0]}~{group[-1]}에 칸 없음"])
         agg = None if plan.pattern == "vsa" and n == 1 else ("sum" if plan.pattern in ("sum", "psum") else "avg")

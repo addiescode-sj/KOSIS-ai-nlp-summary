@@ -16,6 +16,8 @@ FILL_RETRY = "analyze-fill-v2-retry.md"
 PLAN = "analyze-plan-v1.md"  # analyze/write.py: the model writes the plan as v3 blocks
 PLAN_EXAMPLES = "analyze-plan-v1-examples.md"
 PLAN_RETRY = "analyze-plan-v1-retry.md"
+PLAN_MULTI = "analyze-plan-multi-v1.md"  # analyze/multi.py: the plan over two or three tables (T1-30)
+PLAN_MULTI_EXAMPLES = "analyze-plan-multi-v1-examples.md"
 EVENT_LOOKUP = "event-lookup-v1.md"  # analyze/event_lookup.py: when an event the calendar lacks began
 
 
