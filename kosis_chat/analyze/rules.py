@@ -116,6 +116,30 @@ def _percent_of_other(question: str, index: TableIndex, codes: dict[str, list[st
     return not _holds(index, name, a, b) and not _holds(index, name, b, a)
 
 
+def _scoped_percent(question: str, index: TableIndex, codes: dict[str, list[str]], rest: str) -> bool:
+    """Loop 11: a share asked without a share word: a percent asked as a level (shared asks_level: no difference,
+    more / less or change), a code named right before a word of looking inside a group (_within: "정규직 중",
+    "서울 가운데") and another code named that is not that group (the part). Not of cells already in % (a rate asked
+    of a group: the cell's value), not when a code the question names is measured in %, and not "<label>의 몇
+    퍼센트" (one target as a percent of another)."""
+    if not asks_level(rest):
+        return False
+    q = squash(question)
+    matches = parse(index, question).matches
+    if any(q[: m.start()].endswith(match.form) for m in _OF_PERCENT.finditer(q) for match in matches):
+        return False  # "여자는 남자의 몇 퍼센트": one target as a percent of another (loop 8), not a share
+    scopes = {(n, c) for n in codes if n in index.axes for c in _within(question, index, n) if c in codes[n]}
+    if not scopes:
+        return False
+    if any((index.measure_of(n, c) or (None,))[0] in ("%", "퍼센트") for n, named in codes.items() if n in index.axes
+           for c in named):
+        return False
+    items = index.axes[ITEM_AXIS].labels if ITEM_AXIS in index.axes else {}
+    if not codes.get(ITEM_AXIS) and len(items) == 1 and (index.measure_of(ITEM_AXIS, next(iter(items))) or (None,))[0] in ("%", "퍼센트"):
+        return False
+    return any((n, c) not in scopes for n, named in codes.items() if n in index.axes for c in named)
+
+
 def _percent_only(question: str, index: TableIndex, codes: dict[str, list[str]]) -> None:
     if not _PERCENT_POINT.search(question):
         return
@@ -379,6 +403,8 @@ def rule_plan(question: str, index: TableIndex, default_applied: dict[str, str] 
     _percent_only(question, index, codes)
     default = dict(default_applied or {})
     kind = _question_type(question, parsed.periods, codes, parsed.matches, parsed.rest)
+    if kind in ("value", "compare") and _scoped_percent(question, index, codes, parsed.rest):
+        kind = "share"  # loop 11: "정규직 중 여자는 몇 퍼센트야": a part of the group the question looks inside
     if kind not in ("share", "extreme") and _drop_scopes(question, index, codes):
         kind = _question_type(question, parsed.periods, codes, parsed.matches, parsed.rest)
     if kind == "share" and _percent_of_other(question, index, codes, parsed.matches):
@@ -414,7 +440,10 @@ def rule_plan(question: str, index: TableIndex, default_applied: dict[str, str] 
     if plan.pattern is None and kind != "extreme" and (named := _named_average(parsed, index, plan)):
         plan.pattern, plan.groups, plan.type = named
         return plan
-    if plan.pattern is None and (pair := _two_by_two(question, plan, parsed.rest, parsed)):
+    # loop 11: a ranking among targets the question names one by one ranks them (their values or their changes),
+    # not each target's change (_two_by_two)
+    named_pool = _named_pool(parsed, index, plan.codes) if kind == "extreme" else None
+    if plan.pattern is None and named_pool is None and (pair := _two_by_two(question, plan, parsed.rest, parsed)):
         plan.pattern, plan.groups, plan.type = pair
         return plan
     if plan.pattern is None and kind == "trend" and (ratio := _period_ratio(question, parsed.rest, plan)):
@@ -424,8 +453,12 @@ def rule_plan(question: str, index: TableIndex, default_applied: dict[str, str] 
         plan.type = "value"  # "2021년과 2023년 서울과 부산 인구 알려줘": the cells of every named target and period
     if kind == "extreme":
         plan.pick = pick_of(question)
-        plan.over = PERIOD_AXIS if ASKS_PERIOD.search(question) else (_scope(question, index, codes)
-                                                                      or _ranked_axis(index, codes))
+        if _asks_period(question, index, plan.codes):
+            plan.over = PERIOD_AXIS
+        elif named_pool is not None:
+            plan.over, plan.candidates = named_pool
+        else:
+            plan.over = _scope(question, index, codes) or _ranked_axis(index, codes)
         if plan.over is None and len(plan.periods) >= 2:  # loop 4: nothing open but the asked periods: they are ranked
             plan.over = PERIOD_AXIS
         if plan.over is None:
@@ -456,6 +489,10 @@ def _named_average(parsed: Parsed, index: TableIndex, plan: Plan) -> tuple[Patte
     if diff or ratio or CHANGE_ASKED.search(rest) or TREND_WORDS.search(rest):
         return None
     several = [n for n, named in plan.codes.items() if len(named) >= 2]
+    # loop 11: a value per units of another ("종사자 수를 사업체 1개당 평균으로"): the per-unit word already says
+    # what is computed of the two targets, and the average word describes that value (as a label's 평균 does above)
+    if len(several) == 1 and _per_unit(parsed.question, index, several[0], plan.codes[several[0]]) is not None:
+        return None
     if len(p.singles) >= 2 and not several and len(plan.periods) >= 2:
         return "avg", [list(plan.periods)], "trend"
     if len(plan.periods) <= 1 and len(several) == 1 and _named_one_by_one(parsed, several[0], plan.codes[several[0]]):
@@ -588,6 +625,47 @@ def _named_one_by_one(parsed: Parsed, name: str, named: list[str]) -> bool:
         return False
     used = [f for fs in forms.values() for f in fs]
     return len(used) == len(set(used))
+
+
+_HOW_MANY_OF = re.compile(r"^몇\s*([가-힣]+)")
+
+
+def _asks_period(question: str, index: TableIndex, codes: dict[str, list[str]]) -> bool:
+    """A word that asks for a period (shared ASKS_PERIOD). Loop 11: "몇 + a counting word" is the unit of the value
+    asked, not a period, when the cells the question picks are measured in that word (the table's unit of a named
+    code, or of the table's only item: '평균 근속기간 (년)' asked "몇 년"); any other period word still asks one."""
+    units: set[str] = set()
+    for name, named in codes.items():
+        units |= {squash(m[0]) for c in named if name in index.axes and (m := index.measure_of(name, c)) and m[0]}
+    items = index.axes[ITEM_AXIS].labels if ITEM_AXIS in index.axes else {}
+    if not codes.get(ITEM_AXIS) and len(items) == 1 and (m := index.measure_of(ITEM_AXIS, next(iter(items)))) and m[0]:
+        units.add(squash(m[0]))
+    for found in ASKS_PERIOD.finditer(question):
+        word = _HOW_MANY_OF.match(found.group(0))
+        if word is None or word.group(1) not in units:
+            return True
+    return False
+
+
+def _named_pool(parsed: Parsed, index: TableIndex, codes: dict[str, list[str]]) -> tuple[str, list[str]] | None:
+    """Loop 11: (category, candidates) when a ranking names its candidates one by one: the one category with two codes
+    or more, each matched by a name of its own (_named_one_by_one, so not a range or an over-wide match), every other
+    category one code at most. A named group that holds the others ("서울 종로구, 중구, 강남구 중") is where they are,
+    not a candidate. Items may be the candidates too."""
+    several = [n for n, named in codes.items() if len(named) >= 2]
+    if len(several) != 1 or several[0] not in index.axes:
+        return None
+    name = several[0]
+    if not _named_one_by_one(parsed, name, codes[name]):
+        return None
+    named = codes[name]
+    pool = [c for c in named if not any(o != c and _holds(index, name, c, o) for o in named)]
+    return (name, pool) if len(pool) >= 2 else None
+
+
+def _pool_of(plan: Plan, index: TableIndex, name: str) -> list[str]:
+    """The candidates of a ranking over a category: the ones the question names one by one (loop 11), else _pool."""
+    return list(plan.candidates) if plan.candidates and plan.over == name else _pool(index, name, plan.codes.get(name))
 
 
 def _listing(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | None) -> Built:
@@ -774,7 +852,13 @@ def _total(index: TableIndex, name: str) -> str | None:
     '취업자-계'), else the first total name."""
     axis = index.axes[name]
     totals = [c for c, label in axis.labels.items() if is_total(label)]
-    return next((c for c in totals if axis.parents.get(c) is None), totals[0] if totals else None)
+    if top := next((c for c in totals if axis.parents.get(c) is None), None):
+        return top
+    # loop 11: one name every other name nests under (an unmarked whole the index linked: '취업자' over its subtotals)
+    roots = [c for c in axis.labels if axis.parents.get(c) is None]
+    if len(roots) == 1 and len(axis.labels) > 1:
+        return roots[0]
+    return totals[0] if totals else None
 
 
 class _Lookup:
@@ -1034,6 +1118,11 @@ def _share_axis(plan: Plan, index: TableIndex) -> tuple[str, list[str], str] | N
             continue
         axis = index.axes[name]
         named = plan.codes.get(name, [])
+        # loop 11: a category whose only code the question names right before a word of looking inside ("정규직 중
+        # 여자 비중") is where the share is taken (fixed), not the parts' category, when another category names a part
+        if len(named) == 1 and named[0] in _within(plan.question, index, name) and any(
+                c != _total(index, o) for o in plan.codes if o != name and o in index.axes for c in plan.codes[o]):
+            continue
         parents = {axis.parents.get(c) for c in named if axis.parents.get(c) in axis.labels}
         parent = next(iter(parents)) if len(parents) == 1 else None
         total = _total(index, name)
@@ -1043,6 +1132,17 @@ def _share_axis(plan: Plan, index: TableIndex) -> tuple[str, list[str], str] | N
         within = _within(plan.question, index, name)
         inner = [c for c in named if c not in within]
         whole = next((w for w in within if inner and all(w in axis.ancestors(c) for c in inner)), whole)
+        # loop 11: the whole the question looks inside may hold the parts as the category's total (an unmarked whole:
+        # _holds), or be a marked subtotal whose details the index could not link ("비임금근로자 중 자영업자"): either
+        # way it is the denominator, not a part
+        # loop 11: the question looks inside a group of other categories only ("서울 남자 중 상용근로자 비중"): the
+        # share is of that whole group, the category's total, not of the parts' nearest subtotal
+        if not within and total is not None and any(
+                _within(plan.question, index, o) for o in plan.codes if o != name and o in index.axes):
+            whole = total
+        if within and inner and whole not in within:
+            whole = next((w for w in within if all(_holds(index, name, w, c) for c in inner)),
+                         next((w for w in within if is_total(axis.labels[w])), whole))
         parts = [c for c in named if c not in (total, whole)]
         if whole and parts:
             return name, parts, whole
@@ -1109,8 +1209,9 @@ def _pool(index: TableIndex, name: str, named: list[str] | None = None) -> list[
     axis = index.axes[name]
     if named and len(named) == 1 and (members := _children(index, name, named[0])):
         return members
-    pool = [c for c, label in axis.labels.items() if axis.parents.get(c) is None and not is_total(label)]
-    if not pool and (whole := _total(index, name)) is not None:
+    whole = _total(index, name)
+    pool = [c for c, label in axis.labels.items() if axis.parents.get(c) is None and not is_total(label) and c != whole]
+    if not pool and whole is not None:
         return _children(index, name, whole)
     if axis.regional and any(is_province(axis.labels[c]) for c in pool):
         pool = [c for c in pool if is_province(axis.labels[c])]
@@ -1158,7 +1259,7 @@ def _extreme_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | No
         fixed = _fixed(plan.model_copy(update={"codes": {k: v for k, v in codes.items() if k != name}}), index, {name}, problems)
         if problems:
             raise Unresolved(problems)
-        pool = _pool(index, name, plan.codes.get(name))
+        pool = _pool_of(plan, index, name)
         sets = [_with(fixed, name, c) for c in pool]
         period = _one_period(plan, lookup, sets[:1])
         groups = [(f, period or "") for f in sets]
@@ -1194,7 +1295,7 @@ def _change_rank_plan(plan: Plan, index: TableIndex, lookup: _Lookup, ends: tupl
     fixed = _fixed(plan.model_copy(update={"codes": {k: v for k, v in plan.codes.items() if k != name}}), index, {name}, problems)
     if problems:
         raise Unresolved(problems)
-    pool = _pool(index, name, plan.codes.get(name))
+    pool = _pool_of(plan, index, name)
     found = lookup.cells([(_with(fixed, name, c), p) for c in pool for p in ends])  # both ends of every candidate at once
     codes = [c for n, c in enumerate(pool)
              if all(cell is not None and cell.value_kind == "ok" for cell in found[2 * n:2 * n + 2])]
@@ -1226,7 +1327,7 @@ def _extremes_plan(plan: Plan, index: TableIndex, lookup: _Lookup, rest: str, no
         fixed = _fixed(plan.model_copy(update={"codes": {k: v for k, v in plan.codes.items() if k != name}}), index, {name}, problems)
         if problems:
             raise Unresolved(problems)
-        sets = [_with(fixed, name, c) for c in _pool(index, name, plan.codes.get(name))]
+        sets = [_with(fixed, name, c) for c in _pool_of(plan, index, name)]
         period = _one_period(plan, lookup, sets[:1])
         wanted = [(f, period or "") for f in sets]
     cells = [c.source_ref for c in lookup.cells(wanted) if c is not None and c.value_kind == "ok"]

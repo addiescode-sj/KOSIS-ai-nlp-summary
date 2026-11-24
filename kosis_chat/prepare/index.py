@@ -91,7 +91,44 @@ def _link_parents(axis: Axis) -> None:
     _link_sections(axis)
 
 
-def _link_sections(axis: Axis) -> None:
+_TITLE_PAREN = re.compile(r"\([^)]*\)")
+_TITLE_TAIL = re.compile(r"[_\s]*(?:시도|시군구|지역|전국)$")
+
+
+def title_noun(title: str) -> str:
+    """Loop 11: the noun a table's title ends with, squashed: the last word once the brackets and the words of a
+    breakdown ('시도별', '산업별') are cut off ('가상 시도별 산업별 취업자' -> '취업자', '취업자(시도별)' -> '취업자');
+    '' when the title ends in no such word."""
+    words = [w for w in re.split(r"[\s,·/]+", _TITLE_PAREN.sub(" ", title or "")) if w and not w.endswith("별")]
+    return _TITLE_TAIL.sub("", words[-1]) if words else ""
+
+
+def _unmarked_whole(axis: Axis, title: str, measures: dict[tuple[str, str], set]) -> bool:
+    """Loop 11: the item category's first name is the whole of the others though it carries no total mark: no code
+    has a parent, the first name (its brackets cut off) is the noun the table's title ends with (the group the table
+    counts: '취업자' in '시도별 산업별 취업자'), and every item is measured as that one is (one unit: not a table of
+    different measures whose first one the title happens to name). '취업자' then holds '농림어업', '제조업', ... ."""
+    codes = list(axis.labels)
+    if len(codes) < 3 or any(axis.parents.get(c) is not None for c in codes) or is_total(axis.labels[codes[0]]):
+        return False
+    noun = title_noun(title)
+    first = re.sub(r"\s+", "", _TITLE_PAREN.sub("", _UNIT_PAREN.sub("", axis.labels[codes[0]])))
+    if len(noun) < 2 or first != re.sub(r"\s+", "", noun):
+        return False
+    units = [measures.get((axis.name, c), set()) for c in codes]
+    return len(units[0]) == 1 and all(u == units[0] for u in units)
+
+
+def _link_whole(axis: Axis) -> None:
+    """Loop 11: the parents under an unmarked whole (_unmarked_whole): the sections _link_sections reads when marked
+    subtotals follow it, else every other name directly under the whole."""
+    if _link_sections(axis, unmarked=True):
+        return
+    whole = next(iter(axis.labels))
+    axis.parents.update({c: whole for c in axis.labels if c != whole})
+
+
+def _link_sections(axis: Axis, unmarked: bool = False) -> bool:
     """Loop 6: the parents of a category whose codes do not nest by prefix but whose names do, in table order: the
     whole first ('취업자-계', or '계'), then subtotals that each carry a total mark ('임금근로자-계') and are followed by
     their details ('상용근로자', '임시근로자'), up to the next subtotal. A subtotal's parent is the whole; a detail's
@@ -99,17 +136,21 @@ def _link_sections(axis: Axis) -> None:
     has a prefix parent, when the first name is not a total, when the whole is a marked name not followed right away
     by a subtotal (that is a list of subtotals: '남자_계', '남자_20대', '여자_계'), or when a subtotal has no detail.
     A code that has a prefix parent keeps it (and counts as a detail of its subtotal: 'B' -> 'B1'); only the codes of
-    the top level are linked so."""
+    the top level are linked so. Loop 11: unmarked, the whole is an unmarked first name (_unmarked_whole) and one
+    marked subtotal is enough. True when the parents were linked."""
     codes = list(axis.labels)
     top = [c for c in codes if axis.parents.get(c) is None]
     if len(codes) < 3 or not top or top[0] != codes[0]:
-        return
+        return False
     marked = {c for c in top if is_total(axis.labels[c])}
     whole = codes[0]
-    if len(marked) < 2 or whole not in marked:
-        return
-    if total_stem(axis.labels[whole]) is not None and top[1] not in marked:
-        return
+    if unmarked:
+        if not marked or whole in marked:
+            return False
+    elif len(marked) < 2 or whole not in marked:
+        return False
+    elif total_stem(axis.labels[whole]) is not None and top[1] not in marked:
+        return False
     parents: dict[str, str] = {}
     current, details = None, 0
     for code in codes[1:]:
@@ -118,15 +159,16 @@ def _link_sections(axis: Axis) -> None:
             continue
         if code in marked:
             if current is not None and not details:
-                return
+                return False
             current, details = code, 0
             parents[code] = whole
         else:
             parents[code] = current or whole
             details += current is not None
     if current is None or not details:
-        return
+        return False
     axis.parents.update(parents)
+    return True
 
 
 # ponytail: S2 keeps this cache: a pure function of its value arguments (not of a table object), bounded, and
@@ -222,6 +264,8 @@ def index_from(table: TableInput, cells: Iterable[Cell], periods: Iterable[str] 
             measures.setdefault((name, code), set()).add(measure)
     for axis in axes.values():
         _link_parents(axis)
+    if _unmarked_whole(axes[ITEM_AXIS], getattr(table.meta, "tbl_nm", "") or "", measures):  # loop 11
+        _link_whole(axes[ITEM_AXIS])
     item_named = len(item_codes) > 1 or first is None or not any("항목" in name for name in first.dims)
     return TableIndex(table=table, axes=axes, periods=sorted(found), measures=measures, item_named=item_named,
                       units=sorted(units))

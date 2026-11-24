@@ -11,7 +11,7 @@ from kosis_chat.shared.patterns import COUNT_WORD, DIVIDE, DIVISOR_AFTER, REGION
 _REFERENCE_AFTER = re.compile(r"^(?:평균)?(?:보다|대비|에비해|의몇배|의)")
 _OF_PERCENT = re.compile(r"^의몇(?:퍼센트|%|프로)")  # loop 8: "서울의 몇 퍼센트"
 # loop 3: also the adverbs (적게, 작게), 최솟값, and the bottom of a ranking (하위, 아래·밑·뒤에서 세어).
-_MIN_WORDS = re.compile(r"낮|적은|적었|적게|최저|최소|최솟|작은|작았|작게|꼴찌|하위|(?:아래|밑|뒤)에서")
+_MIN_WORDS = re.compile(r"낮|짧|적은|적었|적게|최저|최소|최솟|작은|작았|작게|꼴찌|하위|(?:아래|밑|뒤)에서")
 # T1-28 S2b: was r"(?:특별시|광역시|특별자치시|특별자치도|도)$", the same literal suffixes anchored at the end in another
 # order and without the group; is_province only asks whether one matches, which neither changes.
 _PROVINCE = REGION_SUFFIX

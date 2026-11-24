@@ -93,9 +93,56 @@ def resolve(index: TableIndex, parsed: Parsed) -> Resolved:
                 options = [f"{axis.labels.get(axis.parents[c] or '', '')} {label}".strip() for c in group]
                 ambiguous.append((label, options))
                 kept |= set(group)
-        kept -= {a for c in kept for a in axis.ancestors(c)}
+        held = {a for c in kept for a in axis.ancestors(c)}
+        # loop 11: a parent the question also names apart from its children ("취업자와 제조업 취업자", "취업자는 제조업의
+        # 몇 배") is a target of its own; it is dropped when every place that names it is joined to a child's name
+        # ("서울 종로구", "제조업 취업자", "제조업의 취업자")
+        kept -= {a for a in held if not _named_apart(parsed, matches, axis, a, kept)}
         codes[name] = kept
     return Resolved(codes=codes, ambiguous=ambiguous)
+
+
+def _spans(q: str, match) -> list[tuple[int, int]]:
+    out = []
+    for text in match.parts or (match.form,):
+        at = q.find(text) if text else -1
+        while at >= 0:
+            out.append((at, at + len(text)))
+            at = q.find(text, at + 1)
+    return out
+
+
+def _named_apart(parsed: Parsed, matches: list, axis, parent: str, kept: set[str]) -> bool:
+    """Loop 11: whether the squashed question names `parent` somewhere that is not joined to a name of a kept child:
+    not inside it, and not next to it with only other names the question gives, or a 의, between them."""
+    q = squash(parsed.question)
+    forms = sorted({t for m in parsed.matches for t in (m.parts or (m.form,)) if t}, key=len, reverse=True)
+    own = [s for m in matches if m.code == parent for s in _spans(q, m)]
+    children = [s for m in matches if m.code in kept and parent in axis.ancestors(m.code) for s in _spans(q, m)]
+    if not own or not children:
+        return False
+
+    def joined(text: str) -> bool:
+        while text:
+            if text.startswith("의"):
+                text = text[1:]
+                continue
+            nxt = next((f for f in forms if text.startswith(f)), None)
+            if nxt is None:
+                return False
+            text = text[len(nxt):]
+        return True
+
+    def attached(a: tuple[int, int]) -> bool:
+        for b in children:
+            if a[0] < b[1] and b[0] < a[1]:  # overlapping: one name inside the other
+                return True
+            gap = q[a[1]:b[0]] if a[1] <= b[0] else q[b[1]:a[0]]
+            if joined(gap):
+                return True
+        return False
+
+    return not all(attached(a) for a in own)
 
 
 def targets(index: TableIndex, parsed: Parsed, resolved: Resolved) -> list[Cell]:

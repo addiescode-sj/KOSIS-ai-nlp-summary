@@ -55,6 +55,8 @@ class Plan(BoundaryModel):
     # per category each, in question order (a compare of the two, or for a share: the part, then the whole)
     pairs: SkipValidation[list[dict[str, str]]] = Field(default_factory=list)
     pair_reference: int | None = None  # the index of the flow compared against (blocks.compare reference)
+    # loop 11: the candidates of a ranking the question names one by one (codes of plan.over); [] = the category's pool
+    candidates: SkipValidation[list[str]] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------- compute/build.py
