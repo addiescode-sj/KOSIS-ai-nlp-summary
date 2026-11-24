@@ -43,6 +43,8 @@ from kosis_chat.prepare.index import (  # noqa: E402, F401
 # LABEL_ALIASES was read from data/scope.py (the judge importing the B0 scope module).
 from kosis_chat.shared.labels import LABEL_ALIASES, interval_forms, squash  # noqa: E402
 from kosis_chat.shared.labels import MEMBER_TAILS, SEX_NAMES  # noqa: E402  # loop 14
+from kosis_chat.shared.labels import DOING_ENDINGS, NATION_AXIS, NATION_WORD  # noqa: E402  # loop 15
+from kosis_chat.shared.patterns import ORDINAL_NAME  # noqa: E402  # loop 15
 from kosis_chat.shared.patterns import COHORT, PAREN, RECENT_N, REGION_SUFFIX, YEAR, YEAR_RANGE, YEAR_SINCE  # noqa: E402
 from kosis_chat.shared.patterns import PREVIOUS_MONTH, PREVIOUS_SAME_MONTH, PREVIOUS_YEAR  # noqa: E402  # loop 5
 from kosis_chat.shared.patterns import COUNT_STEM_SUFFIX, TOTAL_PREFIX  # noqa: E402  # loop 12
@@ -496,6 +498,114 @@ def member_forms(index: TableIndex) -> tuple[dict[tuple[str, str], tuple[str, ..
     return build() if caches is None else caches.get("judge.member_forms", build)
 
 
+def doing_forms(index: TableIndex) -> dict[tuple[str, str], tuple[str, ...]]:
+    """Loop 15: (axis, code) -> the words a question says a name for people by through what they did: a name ending
+    with a person suffix (_PERSON_ENDS: '취업자', '귀농인') whose stem has two Hangul characters or more, said by the
+    stem and a describing ending of a 하다 verb (shared DOING_ENDINGS: '취업한', '귀농하는'). Not when the stem is a
+    name of the table or a word of its title (that name or word keeps it), not a total, not a word two names of one
+    category give."""
+    def build():
+        names = {f for axis in index.axes.values() for label in axis.labels.values() for f in label_forms(label)[0]}
+        title = squash(getattr(index.table.meta, "tbl_nm", "") or "")
+        words = {_PARTICLE.sub("", w) for w in _WORD.findall(getattr(index.table.meta, "tbl_nm", "") or "")}
+        given: dict[str, set[tuple[str, str]]] = {}
+        for axis in index.axes.values():
+            for code, label in axis.labels.items():
+                core = _core(label)
+                stem = core[:-1]
+                if (is_total(label) or core[-1:] not in _PERSON_ENDS or len(stem) < 2 or not _HANGUL.fullmatch(stem)
+                        or stem in names or stem in words or (stem in title and core not in title)):
+                    continue
+                for ending in DOING_ENDINGS:
+                    given.setdefault(stem + ending, set()).add((axis.name, code))
+        out: dict[tuple[str, str], list[str]] = {}
+        for form, owners in given.items():
+            if len(owners) == 1:
+                out.setdefault(next(iter(owners)), []).append(form)
+        return {k: tuple(sorted(v, key=len, reverse=True)) for k, v in out.items()}
+
+    caches = getattr(index.table, "caches", None)
+    return build() if caches is None else caches.get("judge.doing_forms", build)
+
+
+def nation_pairs(index: TableIndex) -> dict[tuple[str, str], tuple[str, ...]]:
+    """Loop 15: (axis, code) -> the two-character word a question says a pair of nations by ('한중' for '중국' in a
+    category '한국인 남편의 아내 국적별'): the first character of the nation fixed by the category's name or the table's
+    title (shared NATION_WORD: '한국인'), then the first character of a name of the category of nations (shared
+    NATION_AXIS). Only when that character starts one name of the category (codes holding the same name count as
+    one), and the fixed nation is no name of the category; not for a total."""
+    def build():
+        out: dict[tuple[str, str], tuple[str, ...]] = {}
+        title = getattr(index.table.meta, "tbl_nm", "") or ""
+        for axis in index.axes.values():
+            if axis.regional or not NATION_AXIS.search(axis.name):
+                continue
+            cores = {code: _core(label) for code, label in axis.labels.items() if not is_total(label)}
+            fixed = {m.group(1) for w in (axis.name + " " + title).split() if (m := NATION_WORD.match(w))}
+            fixed = {f[0] for f in fixed if f not in cores.values()}
+            starts: dict[str, set[str]] = {}
+            for core in cores.values():
+                if _HANGUL.match(core[:1]):
+                    starts.setdefault(core[0], set()).add(core)
+            for code, core in cores.items():
+                if core[:1] in starts and len(starts[core[0]]) == 1:
+                    forms = tuple(f + core[0] for f in sorted(fixed) if f != core[0])
+                    if forms:
+                        out[(axis.name, code)] = forms
+        return out
+
+    caches = getattr(index.table, "caches", None)
+    return build() if caches is None else caches.get("judge.nation_pairs", build)
+
+
+def _said_as_pair(form: str, question: str) -> bool:
+    """Loop 15: a two-character word of a pair of nations said as a word of its own: nothing Hangul before it, and a
+    space, a particle or nothing Hangul after it ('한중 부부', '한중의', not '한미래')."""
+    for m in re.finditer(rf"(?<![가-힣]){re.escape(form)}", question):
+        after = question[m.end():]
+        if not re.match(r"[가-힣]", after) or _WORD_PARTICLE.match(after):
+            return True
+    return False
+
+
+def ordinal_form(label: str) -> str | None:
+    """Loop 15: a name of an ordinal with a person suffix ('둘째아', '넷째아 이상') without the suffix ('둘째', '넷째이상'),
+    squashed; None for another name. The ordinal is read with the count words (shared ORDINAL_NAME)."""
+    core = _core(label)
+    m = ORDINAL_NAME.match(core)
+    if m is None or core[m.end():m.end() + 1] not in _PERSON_ENDS or not core[m.end():]:
+        return None
+    return m.group(1) + core[m.end() + 1:]
+
+
+# A particle or a copula right after a word ("첫째는", "둘째인", "셋째와"), nothing Hangul after it.
+_WORD_PARTICLE = re.compile(r"(?:은|는|이|가|을|를|의|도|만|와|과|랑|이랑|하고|인|이고|이야|이며)(?![가-힣])")
+
+
+def _said_as_ordinal(form: str, end: str, question: str) -> bool:
+    """Loop 15: the question says an ordinal name without its suffix (ordinal_form) as the name, not as a place of a
+    ranking or a count of another thing: a word of its own followed by nothing Hangul, by a particle or a copula, or
+    by a word holding the name's person suffix (end: '둘째 출생아', '첫째 아이'). Not "둘째로 많은" (a ranking), not
+    "셋째 주" (another counting word)."""
+    pattern = r"(?<![가-힣])" + r"\s*".join(re.escape(ch) for ch in form)
+    for m in re.finditer(pattern, question):
+        after = question[m.end():]
+        if not re.match(r"[가-힣]", after.lstrip()):
+            return True
+        if _WORD_PARTICLE.match(after):
+            return True
+        word = re.match(r"\s+([가-힣]+)", after)
+        if word and end in word.group(1):
+            return True
+    return False
+
+
+def _said_as_word(form: str, question: str) -> bool:
+    """Loop 15: the question says form with no Hangul right before or right after it ('아버지가 취업한 자녀', not
+    '미취업한' or '취업한다')."""
+    return re.search(rf"(?<![가-힣]){re.escape(form)}(?![가-힣])", question) is not None
+
+
 def _said_alone(form: str, question: str, before: str) -> bool:
     """Loop 14: the question says form as a word of its own (spaces allowed inside): no Hangul right before it but a
     sex initial (before) that starts the word ('남중학생'). Not '전남학생' (전남 + 학생)."""
@@ -515,6 +625,8 @@ def match_labels(index: TableIndex, question: str) -> list[Match]:
     found: list[Match] = []
     splits = group_parts_of(index)
     members, initials = member_forms(index)
+    doings = doing_forms(index)
+    pairs = nation_pairs(index)
     for axis in index.axes.values():
         split = splits.get(axis.name, {})
         for code, label in axis.labels.items():
@@ -539,6 +651,24 @@ def match_labels(index: TableIndex, question: str) -> list[Match]:
             # loop 14: a name said through its members ('중학생', '남학생', '남고생': member_forms)
             hit = next((f for f in members.get((axis.name, code), ())
                         if f in q and _outside_names(f, q, spans) and _said_alone(f, question, initials)), None)
+            if hit:
+                found.append(Match(axis.name, code, label, hit, True))
+                continue
+            # loop 15: a name for people said by what they did ('취업한': doing_forms)
+            hit = next((f for f in doings.get((axis.name, code), ())
+                        if f in q and _outside_names(f, q, spans) and _said_as_word(f, question)), None)
+            if hit:
+                found.append(Match(axis.name, code, label, hit, True))
+                continue
+            # loop 15: an ordinal name said by the ordinal alone ('둘째' for '둘째아': ordinal_form)
+            if (form := ordinal_form(label)) and form in q and _outside_names(form, q, spans):
+                end = _core(label)[len(ORDINAL_NAME.match(_core(label)).group(1))]
+                if _said_as_ordinal(form, end, question):
+                    found.append(Match(axis.name, code, label, form, True))
+                    continue
+            # loop 15: a nation said in a pair with the nation the category fixes ('한중': nation_pairs)
+            hit = next((f for f in pairs.get((axis.name, code), ())
+                        if f in q and _outside_names(f, q, spans) and _said_as_pair(f, question)), None)
             if hit:
                 found.append(Match(axis.name, code, label, hit, True))
                 continue

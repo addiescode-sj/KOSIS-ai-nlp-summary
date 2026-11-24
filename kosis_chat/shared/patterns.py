@@ -192,6 +192,23 @@ MULTI_WHOLE_AFTER = re.compile(r"^(?:은|는|이|가)?(?:중|가운데|대비|�
 # their own (not 중구, 중학교). The group is a share's whole and a ranking's pool (its members are the candidates).
 WITHIN_AFTER = re.compile(r"^\s*(?:은|는|이|가)?\s*(?:(?:중|가운데)(?:에서|에|의)?(?![가-힣])|(?:안|내)(?:에서|의)(?![가-힣])"
                           r"|에\s*(?:속한|속하는|속해|해당하는|해당한|해당되는))")
+# Loop 15: the word of looking inside of WITHIN_AFTER said as a word of its own after a space ("… 사람들 중", "…
+# 집단 가운데", "… 안에서"), wherever it is in the question.
+_WITHIN_WORD = re.compile(r"(?<=\s)(?:(?:중|가운데)(?:에서|에|의)?(?![가-힣])|(?:안|내)(?:에서|의)(?![가-힣]))")
+
+
+def within_split(question: str) -> tuple[int, int] | None:
+    """Loop 15: (start, end) on the squashed question of the one word of looking inside a group the question says as
+    a word of its own (_WITHIN_WORD); None for none or two. The names before it are where the question looks, the
+    names after it the parts, whatever words come between a name and the word."""
+    found = list(_WITHIN_WORD.finditer(question))
+    if len(found) != 1:
+        return None
+    m = found[0]
+    start = len(re.sub(r"\s+", "", question[: m.start()]))
+    return start, start + len(re.sub(r"\s+", "", m.group(0)))
+
+
 # A difference of two numbers, and the words that ask how much fewer (the reference minus the subject). The
 # one-syllable comparatives are kept out of the words they also start (loop 1 learnings): 적어 줘 (write it down),
 # 작년 (last year), 크기 (size). One list for one table (ASKS_DIFF) and several (MULTI_DIFF).
@@ -236,6 +253,17 @@ def asks_level(rest: str) -> bool:
     question without its labels: a percent asked with no word of a difference or of more / less (not "몇 퍼센트 많아",
     a relative difference) and no change ("몇 퍼센트 늘었어")."""
     return bool(PERCENT.search(rest)) and not MULTI_DIFF.search(rest) and not CHANGE_ASKED.search(rest)
+
+
+def asks_ratio_noun(rest: str) -> bool:
+    """Loop 15: the noun 비율 asked of one target with nothing else that compares or divides two values (no other word
+    of ASKS_RATIO: 몇 배, 나누다; no word of ASKS_DIFF: 대비, 보다, 차이, more / less) and no change, read on the question
+    without its labels (a 비율 inside a name the question names is the name's). The rules read it as a share only of
+    a part of a group the question looks inside (analyze/rules.py _scoped_percent), as they read asks_level."""
+    if "비율" not in rest:
+        return False
+    other = rest.replace("비율", " ")
+    return not ASKS_RATIO.search(other) and not ASKS_DIFF.search(other) and not CHANGE_ASKED.search(rest)
 
 
 # Loop 9: words that compare two values by more / less (the comparatives of MULTI_DIFF: 많, 적, 높, 낮, 크, 작, 넘, 모자,
@@ -301,6 +329,12 @@ ASKS_PERIOD = re.compile(
     r"|(?:(?<=[가-힣][던은는운된한든진])|(?<=큰))\s*(?:해|달|때|분기|시기|시점)(?=[은는이가와과랑의를을에도로]|\s|$|[?,.])")
 # A word that makes a question a ranking without 가장 / 최고 ("세 번째로 많은", "2위 지역", "상위 3개", "순위").
 RANK_WORDS = re.compile(r"상위|하위|순위|번\s*째|(?:첫|둘|셋|넷|다섯)\s*째|\d\s*(?:위|등)(?!급|분)")
+
+
+
+# Loop 15: an ordinal word ('첫째', '둘째', '다섯째'), built from the count words above, at the start of a name
+# ('둘째아', '넷째아 이상'): group 1 the ordinal.
+ORDINAL_NAME = re.compile(r"^((?:" + "|".join(sorted(_COUNT_WORDS, key=len, reverse=True)) + r")째)")
 
 
 def count_of(word: str) -> int:

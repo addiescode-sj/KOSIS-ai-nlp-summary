@@ -50,6 +50,7 @@ from kosis_chat.shared.patterns import ASKS_GAP, ASKS_PERIOD, ASKS_RATIO, CHANGE
 from kosis_chat.shared.patterns import EACH_PERIOD, EXCLUDE, years_step  # isort: skip  # loop 4
 from kosis_chat.shared.patterns import DEST_AFTER, DEST_AXIS, ORIGIN_AFTER, ORIGIN_AXIS, REVERSE  # isort: skip  # loop 5
 from kosis_chat.shared.patterns import WITHIN_AFTER  # isort: skip  # loop 6
+from kosis_chat.shared.patterns import asks_ratio_noun, within_split  # isort: skip  # loop 15
 from kosis_chat.shared.patterns import EACH_TARGET, PERCENT, WHICH_MORE  # isort: skip  # loop 7
 from kosis_chat.shared.patterns import asks_level  # isort: skip  # loop 8
 from kosis_chat.shared.patterns import COUNT_STEM_SUFFIX, TOTAL_AMOUNT, asks_gap_of, asks_relative  # isort: skip  # loop 9
@@ -127,7 +128,8 @@ def _scoped_percent(question: str, index: TableIndex, codes: dict[str, list[str]
     "서울 가운데") and another code named that is not that group (the part). Not of cells already in % (a rate asked
     of a group: the cell's value), not when a code the question names is measured in %, and not "<label>의 몇
     퍼센트" (one target as a percent of another)."""
-    if not asks_level(rest):
+    # loop 15: or the noun 비율 asked of the part (shared asks_ratio_noun: "여자 중 상용근로자의 비율")
+    if not (asks_level(rest) or asks_ratio_noun(rest)):
         return False
     q = squash(question)
     matches = parse(index, question).matches
@@ -929,16 +931,28 @@ def _within(question: str, index: TableIndex, name: str) -> list[str]:
                 return end
             end += len(nxt)
 
+    def places(m: Match) -> list[int]:
+        out, at = [], q.find(m.form)
+        while at >= 0:
+            out.append(at)
+            at = q.find(m.form, at + 1)
+        return out
+
+    # loop 15: one word of looking inside said as a word of its own (shared within_split) with a name after it: every
+    # name said before it is where the question looks, whatever words come between ("여자 근로자로 일하는 사람들 중
+    # 상용근로자", "부산 전체 취업자 중 해운대구"); the names after it are the parts
+    split = within_split(question)
+    if split is not None and not any(p >= split[1] for m in matches for p in places(m)):
+        split = None
     found: list[tuple[int, str]] = []
     for m in matches:
         if m.axis != name:
             continue
-        at = q.find(m.form)
-        while at >= 0:
-            if WITHIN_AFTER.match(question[_spaced_end(question, after_names(at + len(m.form))):]):
+        for at in places(m):
+            if WITHIN_AFTER.match(question[_spaced_end(question, after_names(at + len(m.form))):]) or (
+                    split is not None and at + len(m.form) <= split[0]):
                 found.append((at, m.code))
                 break
-            at = q.find(m.form, at + 1)
     return [c for _, c in sorted(found)]
 
 

@@ -29,6 +29,28 @@ LABEL_ALIASES = {
     "세종특별자치시": ("세종시",),
 }
 
+# Loop 15: a role in a family written as one Hanja character (a parent of a child, a spouse, a child of a parent) and
+# the everyday words for it: the plain word, the familiar one and the two-character Hanja word. The one character
+# itself is not matched (judge/question.py _found takes two characters or more); a word for both roles ('부모') is
+# neither's.
+FAMILY_ROLES = {
+    "부": ("아버지", "아빠", "부친"),
+    "모": ("어머니", "엄마", "모친"),
+    "처": ("아내", "부인"),
+    "자": ("아들",),
+}
+LABEL_ALIASES.update(FAMILY_ROLES)
+
+# Loop 15: the describing endings of a 하다 verb ('취업한', '취업하는', '취업했던'): a name for the people who did a
+# thing ('취업자', '귀농인') is also said by its stem with one of them (judge/question.py doing_forms).
+DOING_ENDINGS = ("한", "하는", "하던", "했던")
+
+# Loop 15: a category of nations, read on its name ('아내 국적별', '국가별', '출신 나라별'), and a word for a nation or
+# its people in a category's name or a table's title ('한국인', '한국', '한국인과의'): group 1 the nation. The words
+# for the nations other than one ('외국인', '타국') name no nation.
+NATION_AXIS = re.compile(r"국적|국가|나라")
+NATION_WORD = re.compile(r"^(?!외국|타국)([가-힣]+국)인?(?:과의|와의|의|과|와|은|는|이|가)?$")
+
 
 # Loop 14: the tail of a name of a place people attend, and the word for the people who attend it: a name ending
 # with the tail is also said by its members ('중학교' as '중학생', '대학교' as '대학생', '대학원' as '대학원생'). The
