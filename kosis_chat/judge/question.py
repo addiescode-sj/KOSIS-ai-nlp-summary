@@ -48,6 +48,7 @@ from kosis_chat.shared.labels import predicate_forms  # noqa: E402  # loop 16
 from kosis_chat.shared.labels import COUPLE_EVENTS, SPOUSE_ROLES  # noqa: E402  # loop 18
 from kosis_chat.shared.patterns import ORDINAL_NAME  # noqa: E402  # loop 15
 from kosis_chat.shared.patterns import BOTH_SEXES, WHOLE_AFTER, count_words_of  # noqa: E402  # loop 16
+from kosis_chat.shared.patterns import ADNOMINAL_END  # noqa: E402  # loop 20
 from kosis_chat.shared.patterns import COHORT, PAREN, RECENT_N, REGION_SUFFIX, YEAR, YEAR_RANGE, YEAR_SINCE  # noqa: E402
 from kosis_chat.shared.patterns import PREVIOUS_MONTH, PREVIOUS_SAME_MONTH, PREVIOUS_YEAR  # noqa: E402  # loop 5
 from kosis_chat.shared.patterns import COUNT_STEM_SUFFIX, TOTAL_PREFIX  # noqa: E402  # loop 12
@@ -847,7 +848,11 @@ def both_sexes_whole(index: TableIndex, question: str) -> list[Match]:
 # Loop 16: what may stand between a name and the noun that says what is counted of it: nothing, a copula ("2명인
 # 가구수") or one describing word ("없이 사는 가구수"). Loop 18: then one noun and the possessive particle ("자녀가 없는
 # 가구의 가구수", "2명인 집의 가구수"): the noun of what is counted of the name's own group.
-_MEASURE_BETWEEN = re.compile(r"(?:인|[가-힣]{0,3}[는던])?(?:[가-힣]{1,3}의)?")
+#
+# Loop 20: a describing word read by its class, not by a list of endings: a syllable closed by ㄴ ends the adnominal
+# form of a verb or the copula (없는, 살던, 키운, 산, 가진, 2명인). One set, read by both expressions below.
+_ADNOMINAL_END = ADNOMINAL_END  # shared/patterns.py: the rules read the same set
+_MEASURE_BETWEEN = re.compile(rf"(?:[가-힣]{{0,3}}{_ADNOMINAL_END})?(?:[가-힣]{{1,3}}의)?")
 
 
 def _measured_whole(found: list[Match], q: str) -> list[Match]:
@@ -875,7 +880,9 @@ def _measured_whole(found: list[Match], q: str) -> list[Match]:
 
 
 # Loop 16: a describing word right before a place (its ending: 는, 던, or the copula 인).
-_DESCRIBED = re.compile(r"(?:[가-힣][는던]|인)$")
+# Loop 20: or a verb's adnominal form right after a subject or object particle ("자녀가 독립한", "차를 판"): with no name
+# before it, a word closed by ㄴ is read only there, so a noun ('인천', '2023년') does not pass for one.
+_DESCRIBED = re.compile(rf"(?:[가-힣][는던]|인|[이가을를][가-힣]{{0,2}}{_ADNOMINAL_END})$")
 
 
 def _places(form: str, text: str) -> list[int]:

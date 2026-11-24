@@ -351,6 +351,8 @@ TOTAL_PREFIX = re.compile(r"^(?:총|전체)")
 _COUNT_WORDS = {"하나": 1, "한": 1, "첫": 1, "두": 2, "둘": 2, "세": 3, "셋": 3, "네": 4, "넷": 4, "다섯": 5, "여섯": 6,
                 "일곱": 7, "여덟": 8, "아홉": 9, "열": 10}
 _COUNT = r"(\d+|" + "|".join(sorted(_COUNT_WORDS, key=len, reverse=True)) + r")"
+# Loop 20: the native number words that count (not the ordinal stem 첫), longest first, as one alternation.
+NATIVE_COUNT = "|".join(sorted((w for w in _COUNT_WORDS if w != "첫"), key=len, reverse=True))
 # One place: "3번째", "세 번째로", "둘째로", "3위", "2등" (not 3위까지 / 3위 안: several; not 1등급).
 RANK_PLACE = re.compile(rf"{_COUNT}\s*번\s*째|{_COUNT}\s*째|(\d+)\s*(?:위|등)(?!\s*(?:까지|안|이내|권|내|부터)|급|분)")
 # The first n places: "상위 3개", "하위 다섯 곳", "위에서 세 번째까지", "1~3위", "1위부터 3위까지", "3위까지", "3위 안",
@@ -393,6 +395,8 @@ def rank_places(question: str) -> tuple[str, int] | None:
     if m := RANK_TOP.search(question):
         n = count_of(next(g for g in m.groups() if g))
         return ("places", n) if n >= 2 else None
+    if (n := _count_after_candidates(question)) is not None:
+        return ("places", n) if n >= 2 else None
     if m := RANK_PLACE.search(question):
         n = count_of(next(g for g in m.groups() if g))
         return ("place", n) if n >= 2 else None
@@ -416,6 +420,29 @@ def _adnominal(word: str) -> bool:
     """A describing word that ends with ㄴ or 던 ("많은", "큰", "높았던", "늘어난"): it modifies the noun after it."""
     last = word[-1]
     return last == "던" or ("가" <= last <= "힣" and (ord(last) - 0xAC00) % 28 == 4)
+
+
+# Loop 20: a syllable closed by ㄴ, or 던: the end of a describing word (as _adnominal reads one word). One set,
+# read by the rules here and by the judge (judge/question.py _MEASURE_BETWEEN, _DESCRIBED).
+ADNOMINAL_END = "[던" + "".join(chr(c) for c in range(0xAC00, 0xD7A4) if (c - 0xAC00) % 28 == 4) + "]"
+# Loop 20: a ranking word, a describing word right after it (within a few letters: "가장 많은", "제일 인구가 적은"),
+# the noun it modifies (one to four letters, not closed by a particle) and a count of places, on the squashed
+# question: "가장많은시도세곳의", "제일적은지역2곳의".
+_COUNT_AFTER_NOUN = re.compile(
+    rf"(?:가장|제일|최고|최저|최대|최소|꼴찌)[가-힣]{{0,6}}?{ADNOMINAL_END}([가-힣]{{1,4}}?){_COUNT}(?:개|곳|군데)(?!월)")
+
+
+def _count_after_candidates(question: str) -> int | None:
+    """Loop 20: a count of places said after the noun a ranking word's describing word modifies (the place
+    candidate_nouns reads: "가장 많은 시도 세 곳의 인구", "인구가 제일 적은 지역 3곳의"): the first n places, whatever
+    particle follows. RANK_TOP leaves a count before 의 / 중 alone: there it names the pool, said before the ranking
+    word ("17개 시도 중 가장 많은 곳"), which this does not read."""
+    q = re.sub(r"\s+", "", question)
+    for m in _COUNT_AFTER_NOUN.finditer(q):
+        if MOST_RECENT.match(q, m.start()) or re.search(r"[의을를은는에]$", m.group(1)):
+            continue
+        return count_of(m.group(2))
+    return None
 
 
 def candidate_nouns(question: str) -> list[str]:

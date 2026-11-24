@@ -58,6 +58,7 @@ from kosis_chat.shared.patterns import candidate_nouns  # isort: skip  # loop 12
 from kosis_chat.shared.patterns import ROLE_AXES, STAY_AXIS, VISIT_AXIS, role_kind  # isort: skip  # loop 12
 from kosis_chat.shared.patterns import BOTH_SEXES, WHOLE_AFTER  # isort: skip  # loop 16
 from kosis_chat.shared.patterns import GAP_CHANGE, GAP_WORDS  # isort: skip  # loop 18
+from kosis_chat.shared.patterns import NATIVE_COUNT, count_of  # isort: skip  # loop 20
 
 PERIOD_AXIS = "시점"  # Plan.over when an extreme question ranks periods ("가장 낮았던 해")
 RECENT_POINTS = 5
@@ -206,7 +207,7 @@ def _number_range(question: str, index: TableIndex) -> tuple[str, list[str]] | N
     one word ('20대') -> the interval names it is made of (_ten_group)."""
     m = _NUM_RANGE.search(question)
     if not m:
-        return _ten_group(question, index)
+        return _counted_range(question, index) or _ten_group(question, index)
     n, unit, how = int(m.group(1)), m.group(2), m.group(3)
     for name, axis in index.axes.items():
         numbered = {}
@@ -228,6 +229,59 @@ def _number_range(question: str, index: TableIndex) -> tuple[str, list[str]] | N
         end = tail[0] if tail else max(exact.values()) + 1
         picked = sorted((c for c, k in exact.items() if low <= k < end), key=exact.get)
         return name, picked + ([tail[1]] if tail else [])
+    return None
+
+
+# Loop 20: a lower end said of numbered names with any counting word ("2명 이상", "3대 초과"), the number a digit or a
+# native number word ("둘 이상", "두 명 이상"); 한 / 두 / 세 / 네 only before a counting word. The counting word is
+# read from the table's names (_COUNTED_LABEL), not from a list.
+_COUNTED_RANGE = re.compile(rf"(?<![가-힣\d])(\d+|{NATIVE_COUNT})\s*([가-힣]{{1,2}}?)?\s*(이상|초과)")
+_COUNTED_LABEL = re.compile(r"^(\d+)\s*([가-힣]{1,2})\s*(이상)?(?:\s*\(.*\))?$")
+_DETERMINERS = ("한", "두", "세", "네")
+
+
+def _counted_range(question: str, index: TableIndex) -> tuple[str, list[str]] | None:
+    """Loop 20: (axis, codes) for a lower end over the numbered names of one counting word (_COUNTED_LABEL: '1명',
+    '2명', '3명 이상'): the single names from the end up and the open name above them, as _number_range picks for
+    '인' and '세'. Only a category with two single names or more of that counting word; with no counting word said
+    ("둘 이상"), only a category whose numbered names have one counting word. Not when the pick is empty (an end the
+    table does not hold), not when the question names another name of that category outside the pick (it is
+    named on its own: "1명 가구와 3명 이상 가구"), and not when two categories could take the end."""
+    for m in _COUNTED_RANGE.finditer(question):
+        word, unit, how = m.group(1), m.group(2), m.group(3)
+        if not word.isdigit() and not unit and word in _DETERMINERS:
+            continue
+        n = count_of(word)
+        found = []
+        for name, axis in index.axes.items():
+            numbered = {code: (int(lm.group(1)), lm.group(2), bool(lm.group(3)))
+                        for code, label in axis.labels.items() if (lm := _COUNTED_LABEL.match(label.strip()))}
+            units = {u for _, u, _ in numbered.values()}
+            if unit is None and len(units) != 1:
+                continue
+            said = unit if unit is not None else next(iter(units), None)
+            exact = {c: k for c, (k, u, o) in numbered.items() if u == said and not o}
+            opened = {c: k for c, (k, u, o) in numbered.items() if u == said and o}
+            if len(exact) < 2:
+                continue
+            low = n if how == "이상" else n + 1
+            if same := sorted(c for c, k in opened.items() if k == low):
+                picked = same[:1]
+            else:
+                tail = min(((k, c) for c, k in opened.items() if k > low), default=None)
+                end = tail[0] if tail else max(exact.values()) + 1
+                picked = sorted((c for c, k in exact.items() if low <= k < end), key=exact.get)
+                picked += [tail[1]] if tail and picked else []
+            if not picked:
+                continue
+            total = _total(index, name)
+            bound = {c for c, (k, u, o) in numbered.items() if k == n and u == said}  # the end's own name ("1대 초과")
+            if any(x.axis == name and x.code not in picked and x.code != total and x.code not in bound
+                   for x in parse(index, question).matches):
+                continue
+            found.append((name, picked))
+        if len(found) == 1:  # two categories of that counting word: which one is meant is not read
+            return found[0]
     return None
 
 
@@ -478,7 +532,8 @@ def rule_plan(question: str, index: TableIndex, default_applied: dict[str, str] 
     if found := _number_range(question, index):
         codes[found[0]] = found[1]
         ranged = found[0]
-    grouped = found is not None and not _NUM_RANGE.search(question)  # loop 14: a ten group (_ten_group)
+    # loop 14: a ten group (_ten_group); loop 20: or a lower end of counted names (_counted_range), one target too
+    grouped = found is not None and not _NUM_RANGE.search(question) and len(found[1]) >= 2
     _both_sexes(question, index, codes)
     _drop_children(index, codes)
     _percent_only(question, index, codes)

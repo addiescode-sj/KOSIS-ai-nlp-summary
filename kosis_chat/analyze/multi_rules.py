@@ -220,7 +220,7 @@ def _assign_items(sides: list[_Side], question: str) -> None:
                        for code, (spans, _) in o.items.items()} for o in sides}
     wholes = {id(o): {code for code, (_, by_name) in o.items.items()
                       if not by_name and total_stem(o.index.axes[ITEM_AXIS].labels[code])} for o in sides}
-    ends = {b for o in sides for code, spans in cleared[id(o)].items() if code not in wholes[id(o)] for _, b in spans}
+    ends = {s for o in sides for code, spans in cleared[id(o)].items() if code not in wholes[id(o)] for s in spans}
     for side in sides:
         others = [s for o in sides if o is not side for spans in cleared[id(o)].values() for s in spans]
         kept = {code: [s for s in spans if not _covered(s, others)] for code, spans in cleared[id(side)].items()}
@@ -251,12 +251,16 @@ def _closes_other(span: tuple[int, int], apart: set[tuple[int, int]], others: li
     return span in apart and any(a <= x and y == b and y - x < b - a for x, y in others)
 
 
-def _measure_noun(places: list[tuple[int, int]], ends: set[int], q: str) -> bool:
+def _measure_noun(places: list[tuple[int, int]], named: set[tuple[int, int]], q: str) -> bool:
     """Loop 18: every place q says a whole's stem comes right after the end of a matched name of some table (with what
     judge.question._MEASURE_BETWEEN lets stand between) or after a describing word (_DESCRIBED): the stem is the noun
-    of what is counted, as one table's judge.question._measured_whole reads it."""
+    of what is counted, as one table's judge.question._measured_whole reads it.
+
+    Loop 20: or the stem's place starts inside a matched name of another table and runs past its end: that name ends
+    with the stem's first letters and q writes on only the rest of the stem ("맞벌이가구수": 맞벌이가구 + 가구수)."""
     return all(_DESCRIBED.search(q[:at]) is not None
-               or any(e <= at and _MEASURE_BETWEEN.fullmatch(q[e:at]) for e in ends) for at, _ in places)
+               or any((e <= at and _MEASURE_BETWEEN.fullmatch(q[e:at])) or s < at < e < b for s, e in named)
+               for at, b in places)
 
 
 # ---------------------------------------------------------------- what is computed
