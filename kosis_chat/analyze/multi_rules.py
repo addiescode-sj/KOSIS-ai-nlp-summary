@@ -39,7 +39,7 @@ from typing import Literal
 from pydantic import Field, SkipValidation
 
 from kosis_chat.analyze import blocks as build
-from kosis_chat.analyze.rules import _fixed, _lookup, rule_plan
+from kosis_chat.analyze.rules import _fixed, _lookup, _named_one_by_one, rule_plan
 from kosis_chat.analyze.schemas import Built, Plan
 from kosis_chat.judge.question import (
     AVG_WORDS,
@@ -49,6 +49,7 @@ from kosis_chat.judge.question import (
     asked_periods,
     label_forms,
     match_labels,
+    parse,
     squash,
 )
 from kosis_chat.schemas.resources import MultiResources, StatResources
@@ -58,6 +59,7 @@ from kosis_chat.shared.patterns import (
     CHANGE_ASKED,
     COUNT_STEM_SUFFIX,
     EACH_PERIOD,
+    EACH_TARGET,
     RATE_OF_CHANGE,
     MULTI_DIFF,
     MULTI_FEWER,
@@ -67,6 +69,8 @@ from kosis_chat.shared.patterns import (
     PER_UNIT,
     TOTAL_PREFIX,
     TOTAL_AMOUNT,
+    AGAINST,
+    asks_relative,
     per_scale,
 )
 
@@ -75,7 +79,7 @@ from kosis_ai.schemas import AggregateStep, CombineStep, PlanV3, SelectStep  # i
 NO_RULES = "multi_table_rules"  # kept for callers that name it: the rules could not plan the question
 
 # change / rate (loop 2): the change of each table's value between two periods, as an amount or a rate
-Op = Literal["list", "diff", "sum", "ratio", "per", "share", "change", "rate"]
+Op = Literal["list", "diff", "sum", "ratio", "per", "share", "change", "rate", "relative"]
 
 
 class PlanMultiRulesIn(BoundaryModel):
@@ -158,14 +162,23 @@ class _Side:
         self.items = _item_spans(res.index, squash(question), question)
         self.item: str | None = None
         self.at: int | None = None
+        # loop 12: the items a question names one by one and asks for each of ("남자와 여자 각각"): the calculation is
+        # repeated per item (_fixed_sets), as per region
+        self.each_item: list[str] = []
 
     @property
     def tbl_id(self) -> str:
         return self.res.table.meta.tbl_id
 
 
-def _assign_items(sides: list[_Side]) -> None:
-    """Each table's item: an item named only inside another table's longer item name is not this table's."""
+def _assign_items(sides: list[_Side], question: str) -> None:
+    """Each table's item: an item named only inside another table's longer item name is not this table's.
+
+    Loop 12: two items or more of one table, each named by a name of its own (rules._named_one_by_one, so not an
+    over-wide match of one word) with a word asking for each (shared EACH_TARGET: "남자와 여자 각각"), are the targets
+    the calculation between the tables is repeated for, in question order (_fixed_sets, _repeated), as two regions
+    are. The table is placed where the first of them is named."""
+    each = bool(EACH_TARGET.search(_masked(question, sides)))
     for side in sides:
         others = [s for o in sides if o is not side for spans, _ in o.items.values() for s in spans]
         kept = {code: [s for s in spans if not _covered(s, others)] for code, (spans, _) in side.items.items()}
@@ -176,6 +189,9 @@ def _assign_items(sides: list[_Side]) -> None:
             spans = kept.get(side.item, [])
         elif len(kept) == 1:
             side.item, spans = next(iter(kept.items()))
+        elif len(kept) >= 2 and each and _named_one_by_one(parse(side.index, question), ITEM_AXIS, list(kept)):
+            side.each_item = sorted(kept, key=lambda c: min(a for a, _ in kept[c]))
+            spans = [s for c in kept for s in kept[c]]
         else:
             spans = []
         side.at = min(a for a, _ in spans) if spans else None
@@ -216,6 +232,15 @@ def _whole(order: list[_Side], q: str) -> _Side:
     return next((s for s in order if s.at is not None and MULTI_WHOLE_AFTER.match(q[_end(s):])), order[-1])
 
 
+def _in_percent(sides: list[_Side]) -> bool:
+    """Some table's item is measured in percent (its unit, as the one-table rules read it: analyze/rules.py)."""
+    for side in sides:
+        for item in side.each_item or ([side.item] if side.item else []):
+            if (side.index.measure_of(ITEM_AXIS, item) or (None,))[0] in ("%", "퍼센트"):
+                return True
+    return False
+
+
 def _operation(question: str, sides: list[_Side], several_periods: bool = False,
                aggregated: bool = False) -> tuple[Op, list[_Side], float | None, bool]:
     """(what is computed, the tables in the order the formula reads them, the per scale, whether that order is the
@@ -238,6 +263,13 @@ def _operation(question: str, sides: list[_Side], several_periods: bool = False,
             numerator = next(s for s in sides if s is not denominator)
             scale = per_scale(m)
             return ("ratio" if scale == 1 else "per"), [numerator, denominator], scale, True
+        # loop 12: "출생아는 사망자보다 몇 퍼센트 많아": the difference as a percent of the reference, read as the one-table
+        # rules read it (shared asks_relative: a percent and a word of more / less, no difference named, no ratio, no
+        # change), before the percent is read as a share. The reference is the table named before the word naming it
+        # (보다, 대비, 에 비해). Not of values already in %, where a percent may be a difference in points.
+        if asks_relative(q) and not _in_percent(sides):
+            if (m := AGAINST.search(q)) and (reference := _before(sides, m.start())) is not None:
+                return "relative", [next(s for s in sides if s is not reference), reference], None, True
         if MULTI_SHARE.search(q):
             whole = _whole(order, q)
             return "share", [next(s for s in sides if s is not whole), whole], None, True
@@ -274,12 +306,14 @@ def _fixed_sets(side: _Side) -> list[dict[str, str]]:
     """One code per category, and every combination of the codes a category names several of (in question order):
     the targets a list shows, or the targets a calculation is repeated for (loop 2, _repeated)."""
     codes = dict(side.plan.codes)
-    if side.item is None:
+    if side.each_item:
+        codes[ITEM_AXIS] = list(side.each_item)  # loop 12: the items asked for each (_assign_items)
+    elif side.item is None:
         if ITEM_AXIS in side.index.axes and len(side.index.axes[ITEM_AXIS].labels) > 1:
             raise _Open(f"{side.tbl_id}: 항목")
     else:
         codes[ITEM_AXIS] = [side.item]
-    several = {n: v for n, v in codes.items() if len(v) > 1 and n != ITEM_AXIS}
+    several = {n: v for n, v in codes.items() if len(v) > 1 and (n != ITEM_AXIS or side.each_item)}
     problems: list[str] = []
     base = _fixed(side.plan.model_copy(update={"codes": {k: v for k, v in codes.items() if k not in several}}),
                   side.index, set(several), problems)
@@ -336,6 +370,8 @@ def _combined(op: Op, ids: list[str], scale: float | None, directed: bool, tag: 
         return [CombineStep(id=f"r{tag}", a=a, b=b, fn="share", note="비중")], f"r{tag}", "share"
     if op == "per":
         return [CombineStep(id=f"r{tag}", a=a, b=b, fn="per", scale=scale, note=f"{b} {scale:g}당")], f"r{tag}", "compare"
+    if op == "relative":  # loop 12: (subject - reference) / reference * 100, as one table's build.relative
+        return [CombineStep(id=f"q{tag}", a=a, b=b, fn="pct_change", note="기준 대비 상대 차이")], f"q{tag}", "compare"
     return [CombineStep(id=f"r{tag}", a=a, b=b, fn="ratio", note="비율")], f"r{tag}", "compare"
 
 
@@ -458,7 +494,7 @@ def _split_plan(question: str, sides: list[_Side], fixed: dict, asked: dict) -> 
 
 def _plan(question: str, res: MultiResources) -> Built:
     sides = [_Side(r, question) for r in res.tables]
-    _assign_items(sides)
+    _assign_items(sides, question)
     fixed = {id(s): _fixed_sets(s) for s in sides}
     if (split := _split_periods(sides)) is not None:
         return _split_plan(question, sides, fixed, split)

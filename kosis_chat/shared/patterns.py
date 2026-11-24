@@ -129,6 +129,28 @@ DEST_AFTER = re.compile(r"^(?:으로|로|에|까지)(?!서)"
                         r"|^(?:을|를|이|가|의|은|는)?(?:들어오|들어온|들어간|들어가|옮겨온|옮겨간|유입|전입|도착)")
 # A second flow named only as the first one turned around: "그 반대", "반대로", "거꾸로", "역방향", "역으로".
 REVERSE = re.compile(r"반대|거꾸로|역방향|역으로")
+# Loop 12: the roles a category of places plays, read on its name, as four kinds: where a flow leaves (ORIGIN_AXIS),
+# where it arrives (DEST_AXIS), where people stay (거주지, 상주지, 주소지) and where they go to and from each day
+# (통근지, 통학지, 종사지, 근무지, 직장). A pair is read in the pair: the place people stay is the end of a flow of
+# moving (출신지 × 거주지) and the start of a flow of going to and from (상주지 × 통근통학지).
+STAY_AXIS = re.compile(r"거주|상주|주소")
+VISIT_AXIS = re.compile(r"통근|통학|종사지|근무지|직장|등교|방문지")
+# Loop 12: the verb after a name and its particle that says which of those roles the name plays ("서울에 사는", "부산에
+# 거주하는", "서울로 통근하는", "인천에서 출근하는" is a stay only by its particle: the verb is of going). The kind of the
+# verb decides; with no such verb the particle does (ORIGIN_AFTER, DEST_AFTER).
+_ROLE_PARTICLE = r"^(?:에서|에|으로|로|을|를|이|가|의|은|는)?"
+ROLE_VERBS = {
+    "leave": re.compile(_ROLE_PARTICLE + r"(?:떠나|떠난|나간|나가|빠져나|유출|전출|출발|출신)"),
+    "arrive": re.compile(_ROLE_PARTICLE + r"(?:들어오|들어온|들어간|들어가|옮겨온|옮겨간|유입|전입|도착)"),
+    "stay": re.compile(_ROLE_PARTICLE + r"(?:사는|살고|살면서|살며|살던|산다|거주|머무|머문|머물|상주)"),
+    "visit": re.compile(_ROLE_PARTICLE + r"(?:통근|출근|통학|등교|다니|다닌|다녀|오가|오간|오고가|일하|근무|방문)"),
+}
+ROLE_AXES = {"leave": ORIGIN_AXIS, "arrive": DEST_AXIS, "stay": STAY_AXIS, "visit": VISIT_AXIS}
+
+
+def role_kind(after: str) -> str | None:
+    """Loop 12: the kind of role (ROLE_VERBS) the verb right after a name and its particle says, or None."""
+    return next((kind for kind, verb in ROLE_VERBS.items() if verb.match(after)), None)
 
 # Years asked at a regular interval: "2년 간격으로", "5년마다", "3년 주기로", "5년 단위로", "격년으로" (loop 4).
 # Group 1 the number of years (none: 격년, every other year).
@@ -187,6 +209,24 @@ MULTI_FEWER = re.compile(r"적(?!어\s*(?:줘|주|봐|달|둬))|낮|작(?!년)|�
 DIVIDE = re.compile(r"나누|나눈|나눠|나눴")
 DIVISOR_AFTER = re.compile(r"^(?:으로|로)")
 COUNT_WORD = re.compile(r"^(?:건수|가구수|인구수|수|명|건|가구|개|곳)")
+# What follows the label a comparison is made against, on the squashed question (was analyze/roles.py
+# _REFERENCE_AFTER and _OF_PERCENT; loop 12: the judge reads them too): "전국보다", "전국 대비", "전국 평균의 몇 배",
+# "전국에 비해", and a 의 that is read as a reference only before 몇 배 or 몇 퍼센트 (REFERENCE_OF).
+REFERENCE_AFTER = re.compile(r"^(?:평균)?(?:보다|대비|에비해|의몇배|의)")
+OF_PERCENT = re.compile(r"^의몇(?:퍼센트|%|프로)")
+# Loop 12: a particle that joins two names as targets side by side ("서울과 종로구", "취업자 및 제조업", "서울이랑",
+# "서울하고", "서울, 종로구"), right after the first name on the squashed question.
+JOIN_AFTER = re.compile(r"^(?:와|과|및|하고|이랑|랑|그리고|또는|,|·)")
+# Loop 12: the subject particles after a name ("서울은", "서울이"), on the squashed question.
+SUBJECT_AFTER = re.compile(r"^(?:은|는|이|가)")
+
+
+def refers_after(rest: str) -> bool:
+    """Whether the squashed text right after a label makes it the reference of a comparison (REFERENCE_AFTER, a 의
+    only before 몇 배 / 몇 퍼센트) or the divisor of a division said with its verb ("B로 나누면")."""
+    if REFERENCE_AFTER.match(rest):
+        return not rest.startswith("의") or "배" in rest[:6] or bool(OF_PERCENT.match(rest))
+    return bool(DIVISOR_AFTER.match(rest)) and bool(DIVIDE.search(rest))
 
 
 def asks_level(rest: str) -> bool:
@@ -201,6 +241,7 @@ def asks_level(rest: str) -> bool:
 _MORE_LESS = re.compile(_COMPARATIVE)
 # Loop 9: a word naming the reference of a comparison ("보다", "에 비해", "대비", "와 비교해"), on the squashed rest.
 _AGAINST = re.compile(r"보다|에비해|대비|와비교|과비교")
+AGAINST = _AGAINST  # loop 12: the multi-table rules find the reference of a relative difference by it
 
 
 def asks_relative(rest: str) -> bool:
@@ -283,3 +324,33 @@ CHANGE_DOWN = re.compile(r"줄었|줄어|줄은|감소|떨어|하락|내려|내�
 RANKING = re.compile(r"가장|제일|최고|최저|최대|최소|최댓|최솟|꼴찌|" + RANK_WORDS.pattern)
 # "가장 최근 ~" names a period, not a ranking (was analyze/rules.py MOST_RECENT).
 MOST_RECENT = re.compile(r"(?:가장|제일)\s*최근")
+
+# Loop 12: the words that pick one of a kind ("어느 산업", "어떤 연령대", "무슨 업종").
+WHICH_OF = re.compile(r"(?<![가-힣])(?:어느|어떤|무슨)\s+")
+_WORDS_AFTER = re.compile(r"[가-힣]+")
+
+
+def _adnominal(word: str) -> bool:
+    """A describing word that ends with ㄴ or 던 ("많은", "큰", "높았던", "늘어난"): it modifies the noun after it."""
+    last = word[-1]
+    return last == "던" or ("가" <= last <= "힣" and (ord(last) - 0xAC00) % 28 == 4)
+
+
+def candidate_nouns(question: str) -> list[str]:
+    """Loop 12: the nouns a ranking question names its candidates by, squashed with what follows them in their phrase:
+    the noun a ranking word's describing word modifies ("가장 많은 산업은" -> '산업은...', "제일 적은 대표자 연령대는" ->
+    '대표자연령대는...'; the describing word within two words after the ranking word) and the noun after a word that
+    picks one of a kind ("어느 산업의" -> '산업의...'). A noun elsewhere in the question (a condition: "산업 구분 없이")
+    is not one."""
+    out: list[str] = []
+    for m in RANKING.finditer(question):
+        if MOST_RECENT.match(question, m.start()):
+            continue
+        words = list(_WORDS_AFTER.finditer(question, m.end()))
+        for k, w in enumerate(words[:3]):
+            if _adnominal(w.group(0)) and k + 1 < len(words):
+                out.append(re.sub(r"\s+", "", question[words[k + 1].start():])[:16])
+                break
+    for m in WHICH_OF.finditer(question):
+        out.append(re.sub(r"\s+", "", question[m.end():])[:16])
+    return out

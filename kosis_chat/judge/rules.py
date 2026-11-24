@@ -42,6 +42,9 @@ from kosis_ai.schemas import Outcome, Refusal  # isort: skip  (question.py puts 
 from kosis_chat.judge.schemas import Resolved, Verdict  # isort: skip  # re-export: moved in T1-28 S1b
 from kosis_chat.shared import defaults as default_strings  # isort: skip  # T1-28 S2b: the default_applied strings
 from kosis_chat.shared.patterns import ASKS_PERIOD, MOST_RECENT, RANKING, UNIT_PAREN  # isort: skip
+from kosis_chat.shared.patterns import (  # isort: skip  # loop 12: a parent named as a target (_named_apart)
+    COUNT_WORD, JOIN_AFTER, SUBJECT_AFTER, WITHIN_AFTER, refers_after,
+)
 from kosis_chat.shared.periods import period_text  # isort: skip
 
 _UNIT_SUFFIX = UNIT_PAREN  # old name (T1-28 S2b: one trailing '(...)' pattern)
@@ -112,15 +115,56 @@ def _spans(q: str, match) -> list[tuple[int, int]]:
     return out
 
 
+def _spaced(question: str, squashed_at: int) -> int:
+    """The index in the question as written of the squashed index `squashed_at` (the next character that is no space)."""
+    seen = 0
+    for at, ch in enumerate(question):
+        if ch.isspace():
+            continue
+        if seen == squashed_at:
+            return at
+        seen += 1
+    return len(question)
+
+
 def _named_apart(parsed: Parsed, matches: list, axis, parent: str, kept: set[str]) -> bool:
-    """Loop 11: whether the squashed question names `parent` somewhere that is not joined to a name of a kept child:
-    not inside it, and not next to it with only other names the question gives, or a 의, between them."""
+    """Whether the question names `parent` as a target of its own beside its kept children, not as where they are.
+
+    Loop 11 kept a parent whenever one place naming it was not joined to a child's name; any other word between
+    them ("서울시 종로구", "서울에 있는 종로구", "부산 지역 해운대구") kept it too. Loop 12 reads the other way round: the
+    parent is a target only where a place naming it (not joined to a child's name: not inside it, not next to it with
+    only other names or a 의 between) is said as one, and is dropped otherwise, as before loop 11:
+    - side by side with another name, a joining particle between (shared JOIN_AFTER: "서울과 종로구", "취업자와 제조업");
+    - the reference of a comparison (shared refers_after: "서울보다", "서울 대비", "서울의 몇 배");
+    - the subject of one, a subject particle after it and a child named as the reference ("서울은 종로구의 몇 배");
+    - the group looked inside (shared WITHIN_AFTER: "서울 중", "서울 안에서": a share's whole, a ranking's pool).
+    Other names and counting words may come between the parent and the word ("서울 인구는", "서울 인구 대비")."""
     q = squash(parsed.question)
     forms = sorted({t for m in parsed.matches for t in (m.parts or (m.form,)) if t}, key=len, reverse=True)
     own = [s for m in matches if m.code == parent for s in _spans(q, m)]
     children = [s for m in matches if m.code in kept and parent in axis.ancestors(m.code) for s in _spans(q, m)]
     if not own or not children:
         return False
+    own = [a for a in own if not any(a[0] < b[1] and b[0] < a[1] for b in children)]  # not inside a child's name
+
+    def past_names(end: int) -> int:
+        while True:
+            nxt = next((f for f in forms if q.startswith(f, end)), None)
+            if nxt is None and (m := COUNT_WORD.match(q[end:])):
+                nxt = m.group(0)
+            if nxt is None:
+                return end
+            end += len(nxt)
+
+    def target(a: tuple[int, int]) -> bool:
+        if JOIN_AFTER.match(q[a[1]:]) or any(b[1] <= a[0] and JOIN_AFTER.fullmatch(q[b[1]:a[0]]) for b in children):
+            return True
+        end = past_names(a[1])
+        if refers_after(q[end:]) or refers_after(q[a[1]:]):
+            return True
+        if SUBJECT_AFTER.match(q[end:]) and any(b[0] > a[1] and refers_after(q[past_names(b[1]):]) for b in children):
+            return True
+        return bool(WITHIN_AFTER.match(parsed.question[_spaced(parsed.question, end):]))
 
     def joined(text: str) -> bool:
         while text:
@@ -142,7 +186,7 @@ def _named_apart(parsed: Parsed, matches: list, axis, parent: str, kept: set[str
                 return True
         return False
 
-    return not all(attached(a) for a in own)
+    return any(not attached(a) and target(a) for a in own)
 
 
 def targets(index: TableIndex, parsed: Parsed, resolved: Resolved) -> list[Cell]:

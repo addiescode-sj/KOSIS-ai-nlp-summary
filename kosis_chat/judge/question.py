@@ -44,6 +44,7 @@ from kosis_chat.prepare.index import (  # noqa: E402, F401
 from kosis_chat.shared.labels import LABEL_ALIASES, interval_forms, squash  # noqa: E402
 from kosis_chat.shared.patterns import COHORT, PAREN, RECENT_N, REGION_SUFFIX, YEAR, YEAR_RANGE, YEAR_SINCE  # noqa: E402
 from kosis_chat.shared.patterns import PREVIOUS_MONTH, PREVIOUS_SAME_MONTH, PREVIOUS_YEAR  # noqa: E402  # loop 5
+from kosis_chat.shared.patterns import COUNT_STEM_SUFFIX, TOTAL_PREFIX  # noqa: E402  # loop 12
 
 COUNT_KINDS = ("count_stock", "count_flow")
 
@@ -359,6 +360,66 @@ def group_parts(axis: Axis, elsewhere) -> dict[str, tuple[str, str]]:
     return out
 
 
+def head_parts(axis: Axis, elsewhere) -> dict[str, tuple[str, str, str]]:
+    """Loop 12: code -> (attribute, head, stem) for the names of a category made the other way round from group_parts:
+    an attribute before a head noun two names or more end with ('개인사업체수', '법인사업체수' beside '총사업체수'; '맞벌이
+    가구', '외벌이 가구' beside '전체 가구'). The head is the longest end (spaces left out) that two names or more share
+    and whose stem (the head without a counting word, shared COUNT_STEM_SUFFIX) has two characters or more, so names
+    that share only a counting word or a person ending ('전입자수', '전출자수') are not split. Every name with that end
+    puts an attribute of two Hangul characters or more before it, or a word of the whole (shared TOTAL_PREFIX: 총,
+    전체): that name is the whole, attribute ''. An attribute another category names (elsewhere) is that category's,
+    and a head (or stem) that is a name of its own of the category is that name's: neither is split. Not a regional
+    category, not a total name."""
+    if axis.regional:
+        return {}
+    cores = {code: _core(label) for code, label in axis.labels.items() if not is_total(label)}
+    if len(cores) < 2:
+        return {}
+    own = set(cores.values())
+    # a name that is another name, or a total's stem, with an attribute after it is group_parts' shape, not this one
+    own |= {squash(s) for label in axis.labels.values() if (s := total_stem(label))}
+    out: dict[str, tuple[str, str, str]] = {}
+    for code, core in cores.items():
+        text = _UNIT_PAREN.sub("", axis.labels[code]).strip().lstrip("-").strip()
+        spaced = " " in text  # a name written in words is cut only where a word starts ('맞벌이 가구')
+        starts = {len(squash(text[: m.start()])) for m in re.finditer(r"\S+", text)}
+        best: tuple[int, int, str, str] | None = None
+        for k in range(1, len(core) - 1):
+            head = core[k:]
+            stem = COUNT_STEM_SUFFIX.sub("", head)
+            sharing = [c for c in cores.values() if c.endswith(head) and len(c) > len(head)]
+            if (len(sharing) < 2 or len(stem) < 2 or not _HANGUL.fullmatch(head) or head in own or stem in own
+                    or (spaced and k not in starts)):
+                continue
+            attrs = [c[: -len(head)] for c in sharing]
+            if all(TOTAL_PREFIX.fullmatch(a) or (len(a) >= 2 and _HANGUL.fullmatch(a) and a not in own) for a in attrs):
+                # the end the most names share, then the longest ('사업체수' over '인사업체수', '가구' over '이가구')
+                if best is None or (len(sharing), len(head)) > best[:2]:
+                    best = (len(sharing), len(head), head, stem)
+        if best is not None:
+            attr = core[: -len(best[2])]
+            out[code] = ("" if TOTAL_PREFIX.fullmatch(attr) else attr, best[2], best[3])
+    if out:
+        taken = elsewhere()
+        out = {code: parts for code, parts in out.items() if parts[0] not in taken}
+    if sum(1 for a, _, _ in out.values() if a) < 2:  # one attribute is no split of names
+        return {}
+    return out
+
+
+def head_parts_of(index: TableIndex) -> dict[str, dict[str, tuple[str, str, str]]]:
+    """head_parts of every category of the table, once per table (TableInput.caches)."""
+    def build() -> dict[str, dict[str, tuple[str, str, str]]]:
+        def other_forms(name: str) -> set[str]:
+            return set().union(*(label_forms(label)[0] for n in index.axes if n != name
+                                 for label in index.axes[n].labels.values()))
+
+        return {name: head_parts(axis, lambda name=name: other_forms(name)) for name, axis in index.axes.items()}
+
+    caches = getattr(index.table, "caches", None)
+    return build() if caches is None else caches.get("judge.head_parts", build)
+
+
 def group_parts_of(index: TableIndex) -> dict[str, dict[str, tuple[str, str]]]:
     """group_parts of every category of the table, once per table (TableInput.caches)."""
     def build() -> dict[str, dict[str, tuple[str, str]]]:
@@ -409,7 +470,41 @@ def match_labels(index: TableIndex, question: str) -> list[Match]:
                 said = next((f for f in (attr, *(squash(a) for a in LABEL_ALIASES.get(attr, ()))) if seen(f)), None)
                 if seen(group) and said:
                     found.append(Match(axis.name, code, label, group + attr, False, parts=(group, said)))
+                    continue
+            # loop 12: an attribute before a head noun the names share (head_parts): the name is asked by its
+            # attribute with the head's stem ("개인 사업체"), by the attribute alone ("법인은"), or with the stem said
+            # apart; the whole by the head or its stem alone ("사업체 수")
+            if code in (heads := head_parts_of(index).get(axis.name, {})):
+                if (hit := _said_by_head(heads[code], question, q, spans, heads)) is not None:
+                    form, parts = hit
+                    found.append(Match(axis.name, code, label, form, True, parts=parts))
     return _dedupe(found, q)
+
+
+def _said_by_head(parts: tuple[str, str, str], question: str, q: str, spans,
+                  heads: dict[str, tuple[str, str, str]]) -> tuple[str, tuple[str, ...]] | None:
+    """(form, parts) a question names a head_parts name by, or None. The whole is named by its head only when no
+    attribute of that head is named (in "맞벌이 가구는 몇 가구야" the head is the attribute's and a counting word)."""
+    attr, head, stem = parts
+
+    def seen(f: str) -> bool:
+        return _found(f, question, q, True) and _outside_names(f, q, spans)
+
+    def attr_said(a: str) -> str | None:
+        return next((f for f in (a, *(squash(x) for x in LABEL_ALIASES.get(a, ()))) if seen(f)), None)
+
+    if not attr:
+        if any(a and h == head and attr_said(a) for a, h, _ in heads.values()):
+            return None
+        return next(((f, ()) for f in (head, stem) if seen(f)), None)
+    said = attr_said(attr)
+    if said is None:
+        return None
+    joined = next((said + f for f in (head, stem) if seen(said + f)), None)
+    if joined:
+        return joined, ()
+    apart = next((f for f in (head, stem) if seen(f)), None)
+    return (said + apart, (said, apart)) if apart else (said, ())
 
 
 def _inside_longer(form: str, longer: list[str] | list[Match], q: str) -> bool:

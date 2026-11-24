@@ -321,6 +321,34 @@ def changes_each(pairs: list[tuple[str, str]], rate: bool, note: str | None = No
     return Built(_plan(steps, show, "trend", note), "plan")
 
 
+def repeated(builts: list[Built]) -> Built:
+    """Loop 12: one plan of the same shape built once per target ("남자와 여자 각각"), run side by side: each plan's
+    step ids (and the ids its steps read) get the target's number, the shown ids follow in target order. The shape
+    and the reference are the first plan's (each plan was built by the same rule)."""
+    if not builts:
+        raise ValueError("repeated needs one plan or more")
+    if len(builts) == 1:
+        return builts[0]
+    steps: list = []
+    show: list[str] = []
+    for n, built in enumerate(builts, start=1):
+        ids = {s.id for s in built.plan.steps}
+
+        def renamed(x, n=n, ids=ids):
+            return f"{x}_{n}" if isinstance(x, str) and x in ids else x
+
+        for step in built.plan.steps:
+            update = {"id": f"{step.id}_{n}"}
+            for field in ("a", "b", "of"):
+                if hasattr(step, field):
+                    update[field] = renamed(getattr(step, field))
+            steps.append(step.model_copy(update=update))
+        show += [renamed(i) for i in built.plan.show]
+    first = builts[0]
+    plan = first.plan.model_copy(update={"steps": steps, "show": show})
+    return Built(plan, first.pattern, reference=first.reference)
+
+
 # ---------------------------------------------------------------- a plan the model wrote (S5b)
 
 

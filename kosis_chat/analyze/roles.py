@@ -5,11 +5,12 @@ from __future__ import annotations
 import re
 
 from kosis_chat.judge.question import label_forms, squash
-from kosis_chat.shared.patterns import COUNT_WORD, DIVIDE, DIVISOR_AFTER, REGION_SUFFIX
+from kosis_chat.shared.patterns import COUNT_WORD, OF_PERCENT, REFERENCE_AFTER, REGION_SUFFIX, refers_after
 
-# "전국보다", "전국 대비", "전국 평균의 몇 배", "전국에 비해": the label before these is the reference.
-_REFERENCE_AFTER = re.compile(r"^(?:평균)?(?:보다|대비|에비해|의몇배|의)")
-_OF_PERCENT = re.compile(r"^의몇(?:퍼센트|%|프로)")  # loop 8: "서울의 몇 퍼센트"
+# "전국보다", "전국 대비", "전국 평균의 몇 배", "전국에 비해": the label before these is the reference (loop 12: the
+# patterns are shared with the judge, shared/patterns.py).
+_REFERENCE_AFTER = REFERENCE_AFTER
+_OF_PERCENT = OF_PERCENT  # loop 8: "서울의 몇 퍼센트"
 # loop 3: also the adverbs (적게, 작게), 최솟값, and the bottom of a ranking (하위, 아래·밑·뒤에서 세어).
 _MIN_WORDS = re.compile(r"낮|짧|적은|적었|적게|최저|최소|최솟|작은|작았|작게|꼴찌|하위|(?:아래|밑|뒤)에서")
 # T1-28 S2b: was r"(?:특별시|광역시|특별자치시|특별자치도|도)$", the same literal suffixes anchored at the end in another
@@ -31,11 +32,9 @@ def _skip_names(q: str, end: int, between: tuple[str, ...]) -> int:
 
 
 def _refers(rest: str, q: str) -> bool:
-    if _REFERENCE_AFTER.match(rest):
-        # "의" alone is a possessive ("서울의 출생아"); count it only before 몇 배 (loop 8: or 몇 퍼센트).
-        return not rest.startswith("의") or "배" in rest[:6] or bool(_OF_PERCENT.match(rest))
-    # loop 8: the divisor of a division said with its verb ("B로 나누면")
-    return bool(DIVISOR_AFTER.match(rest)) and bool(DIVIDE.search(rest))
+    # "의" alone is a possessive ("서울의 출생아"); counted only before 몇 배 (loop 8: or 몇 퍼센트); loop 8: also the
+    # divisor of a division said with its verb ("B로 나누면"). Loop 12: one body in shared/patterns.py refers_after.
+    return refers_after(rest)
 
 
 def reference_index(question: str, labels: list[str], between: tuple[str, ...] | list[str] = ()) -> int | None:

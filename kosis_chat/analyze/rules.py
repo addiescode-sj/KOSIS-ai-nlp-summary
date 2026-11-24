@@ -50,6 +50,8 @@ from kosis_chat.shared.patterns import WITHIN_AFTER  # isort: skip  # loop 6
 from kosis_chat.shared.patterns import EACH_TARGET, PERCENT, WHICH_MORE  # isort: skip  # loop 7
 from kosis_chat.shared.patterns import asks_level  # isort: skip  # loop 8
 from kosis_chat.shared.patterns import COUNT_STEM_SUFFIX, TOTAL_AMOUNT, asks_gap_of, asks_relative  # isort: skip  # loop 9
+from kosis_chat.shared.patterns import candidate_nouns  # isort: skip  # loop 12
+from kosis_chat.shared.patterns import ROLE_AXES, STAY_AXIS, VISIT_AXIS, role_kind  # isort: skip  # loop 12
 
 PERIOD_AXIS = "시점"  # Plan.over when an extreme question ranks periods ("가장 낮았던 해")
 RECENT_POINTS = 5
@@ -458,7 +460,7 @@ def rule_plan(question: str, index: TableIndex, default_applied: dict[str, str] 
         elif named_pool is not None:
             plan.over, plan.candidates = named_pool
         else:
-            plan.over = _scope(question, index, codes) or _ranked_axis(index, codes)
+            plan.over = _scope(question, index, codes) or _ranked_axis(index, codes, question)
         if plan.over is None and len(plan.periods) >= 2:  # loop 4: nothing open but the asked periods: they are ranked
             plan.over = PERIOD_AXIS
         if plan.over is None:
@@ -527,19 +529,46 @@ def _values_only(parsed: Parsed, kind: QuestionType, codes: dict[str, list[str]]
     return not asks
 
 
+_ONLY_ONE_SIDE = 2  # loop 12: names one category of a pair may hold that the other does not ('기타', '국외')
+
+
 def _twin_axes(index: TableIndex) -> tuple[str, str] | None:
     """(the start category, the end category) of a table with two categories that hold the same names (three or
-    more) in two roles, the roles read on the categories' names (shared ORIGIN_AXIS, DEST_AXIS)."""
+    more) in two roles, the roles read on the categories' names (shared ORIGIN_AXIS, DEST_AXIS).
+
+    Loop 12: the same names but one or two that only one of them holds (a place outside the others: '기타 지역',
+    '국외'). The roles are read in the pair (shared STAY_AXIS, VISIT_AXIS): a start that is left and an end that is
+    arrived at or stayed at (전출지 × 전입지, 출신지 × 거주지), or a place stayed at and a place gone to and from each
+    day (상주지 × 통근통학지: the place stayed at is the start)."""
     names = [n for n, a in index.axes.items() if n != ITEM_AXIS and len(a.labels) >= 3]
     for a, b in ((a, b) for i, a in enumerate(names) for b in names[i + 1:]):
         labels_a = {squash(x) for x in index.axes[a].labels.values()}
-        if labels_a != {squash(x) for x in index.axes[b].labels.values()}:
+        labels_b = {squash(x) for x in index.axes[b].labels.values()}
+        if len(labels_a & labels_b) < 3 or len(labels_a ^ labels_b) > _ONLY_ONE_SIDE:
             continue
         if ORIGIN_AXIS.search(a) and DEST_AXIS.search(b) and not DEST_AXIS.search(a):
             return a, b
         if ORIGIN_AXIS.search(b) and DEST_AXIS.search(a) and not DEST_AXIS.search(b):
             return b, a
+        for x, y in ((a, b), (b, a)):
+            if STAY_AXIS.search(x) and VISIT_AXIS.search(y) and not VISIT_AXIS.search(x) and not STAY_AXIS.search(y):
+                return x, y
     return None
+
+
+def _role_of(after: str, twins: tuple[str, str]) -> str | None:
+    """Loop 12: the category of the pair a name plays (it is followed by `after`, squashed): the one whose name is of
+    the kind the verb after the name's particle says (shared role_kind, ROLE_AXES: "서울에 사는" is the place stayed
+    at, "서울로 통근하는" the place gone to); with no such verb, or none of the pair of that kind, the particle's role
+    as before (ORIGIN_AFTER: the start, DEST_AFTER: the end)."""
+    start, end = twins
+    if (kind := role_kind(after)) is not None:
+        of_kind = [n for n in twins if ROLE_AXES[kind].search(n)]
+        if kind == "arrive":  # a place stayed at is arrived at too (DEST_AXIS holds 거주), unless the pair says apart
+            of_kind = [n for n in of_kind if not STAY_AXIS.search(n)] or of_kind
+        if len(of_kind) == 1:
+            return of_kind[0]
+    return start if ORIGIN_AFTER.match(after) else end if DEST_AFTER.match(after) else None
 
 
 def _flows(question: str, index: TableIndex, parsed: Parsed, kind: QuestionType
@@ -575,8 +604,7 @@ def _flows(question: str, index: TableIndex, parsed: Parsed, kind: QuestionType
     where: list[int] = []
     current: dict[str, str] = {}
     for at, stop, form in found:
-        after = q[stop:]
-        role = start if ORIGIN_AFTER.match(after) else end if DEST_AFTER.match(after) else None
+        role = _role_of(q[stop:], twins)  # loop 12: the verb's kind first, then the particle
         if role is None or role not in codes_of[form]:
             return None
         if role in current:
@@ -837,11 +865,31 @@ def _scope(question: str, index: TableIndex, codes: dict[str, list[str]]) -> str
     return None
 
 
-def _ranked_axis(index: TableIndex, codes: dict[str, list[str]]) -> str | None:
-    """The category an extreme question ranks: the regional one it does not pin down, else any other open one."""
+def _ranked_axis(index: TableIndex, codes: dict[str, list[str]], question: str = "") -> str | None:
+    """The category an extreme question ranks: the regional one it does not pin down, else any other open one.
+
+    Loop 12: unless the noun that names the candidates (shared candidate_nouns: the noun a ranking word's describing
+    word modifies, the noun after 어느 / 어떤) is an open category's: its name's stem (the name without 별 and its
+    brackets, two characters or more) starts that noun, or the noun's first word starts the stem ("가장 많은 산업은"
+    for 산업별, "제일 적은 대표자 연령대" for 대표자연령별). Only one such category; a noun of a region ("시도", "지역",
+    "곳") keeps the regional one, and so does a stem said elsewhere in the question (a condition)."""
     open_axes = [n for n, a in index.axes.items() if n != ITEM_AXIS and len(a.labels) > 1 and len(codes.get(n, [])) != 1]
     regional = [n for n in open_axes if index.axes[n].regional]
+    nouns = candidate_nouns(question) if question else []
+    named = [n for n in open_axes if not index.axes[n].regional and any(_names_axis(noun, n) for noun in nouns)]
+    if len(named) == 1:
+        return named[0]
     return (regional or open_axes or [None])[0]
+
+
+def _names_axis(noun: str, name: str) -> bool:
+    """Loop 12: a candidate noun (squashed, with what follows it) names the category `name` (_ranked_axis)."""
+    stem = squash(re.sub(r"\([^)]*\)", "", name))
+    stem = stem[:-1] if stem.endswith("별") else stem
+    if len(stem) < 2:
+        return False
+    word = re.match(r"[가-힣]+?(?=은|는|이|가|을|를|의|와|과|에|도|$)", noun)
+    return noun.startswith(stem) or bool(word and len(word.group(0)) >= 2 and stem.startswith(word.group(0)))
 
 
 # ---------------------------------------------------------------- plan -> blocks
@@ -967,6 +1015,31 @@ def _note(plan: Plan) -> str | None:
     return "; ".join(notes) or None
 
 
+def _compared_each(plan: Plan, index: TableIndex) -> tuple[str, str] | None:
+    """Loop 12: (the category compared, the category the comparison is repeated for) when a comparison of two codes
+    of one category is asked for each of the codes of another ("서울은 부산보다 남자와 여자가 각각 몇 명 많아"): two
+    categories hold two codes or more; of those holding two, exactly one has a code the question compares against
+    (roles.reference_index, the word that names the reference: 보다, 대비, 의 몇 배); the one other category's codes
+    are each named by a name of their own (_named_one_by_one) and a word asks for each (shared EACH_TARGET). The
+    comparison is the one a single target gets (build_plan), once per code in question order (Plan.codes' order).
+    None otherwise (a pair of two names, no word for each: as before)."""
+    several = [n for n, named in plan.codes.items() if len(named) >= 2]
+    if len(several) != 2:
+        return None
+    parsed = parse(index, plan.question)
+    if not EACH_TARGET.search(parsed.rest):
+        return None
+    between = [m.form for m in parsed.matches] + _table_words(index)
+    compared = [n for n in several if len(plan.codes[n]) == 2 and reference_index(
+        plan.question, [index.axes[n].labels[c] for c in plan.codes[n]], between) is not None]
+    if len(compared) != 1:
+        return None
+    repeat = next(n for n in several if n != compared[0])
+    if not _named_one_by_one(parsed, repeat, plan.codes[repeat]):
+        return None
+    return compared[0], repeat
+
+
 def build_plan(plan: Plan, index: TableIndex, table: TableInput) -> Built:
     """The blocks for the plan (build.py), or Unresolved naming what is missing (for the LLM step)."""
     if plan.unresolved:
@@ -1009,6 +1082,10 @@ def build_plan(plan: Plan, index: TableIndex, table: TableInput) -> Built:
         return build.value(ref, _refs(lookup, [(fixed, p) for p in newer], []), note)
     if plan.pairs and kind in ("compare", "share"):
         return _pairs_plan(plan, index, lookup, note)
+    if kind == "compare" and (each := _compared_each(plan, index)) is not None:
+        side, repeat = each
+        return build.repeated([build_plan(plan.model_copy(update={"codes": {**plan.codes, repeat: [code]}}), index, table)
+                               for code in plan.codes[repeat]])
     if kind == "compare":
         side = next((n for n, named in plan.codes.items() if len(named) == 2), None)
         if side is None:
@@ -1046,7 +1123,8 @@ def build_plan(plan: Plan, index: TableIndex, table: TableInput) -> Built:
     raise Unresolved(["질문 유형"])
 
 
-_REFERENCE_WORD = re.compile(r"보다|에비해|대비|와비교|과비교|을기준|를기준")
+# loop 12: also "B의 몇 배" (the 의 the shared REFERENCE_AFTER reads as a reference only before 몇 배)
+_REFERENCE_WORD = re.compile(r"보다|에비해|대비|와비교|과비교|을기준|를기준|의몇배")
 _BY_SUFFIX = re.compile(r"(?:별|단위)$")
 
 

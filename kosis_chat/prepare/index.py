@@ -93,27 +93,61 @@ def _link_parents(axis: Axis) -> None:
 
 _TITLE_PAREN = re.compile(r"\([^)]*\)")
 _TITLE_TAIL = re.compile(r"[_\s]*(?:시도|시군구|지역|전국)$")
+# Loop 12: a tail that names the regional unit of the breakdown, joined to the end of a title by a dash, an underscore
+# or a space ('경제활동인구 - 시도', '취업자_시군구', '취업자 (시도)'), repeated ('- 시도/시군구').
+_REGION_UNIT = r"(?:시도|시군구|읍면동|시군|지역|전국|광역시도)(?:별)?"
+_REGION_TAIL = re.compile(rf"(?:\s*[-–_/·]\s*|\s+|\s*\(\s*){_REGION_UNIT}\s*\)?\s*$")
+_NAME_WORDS = re.compile(r"[0-9A-Za-z가-힣]+")
+
+
+def _title_body(title: str) -> str:
+    """The title without its regional tails (_REGION_TAIL) and the dashes, underscores and spaces left at its end."""
+    text = (title or "").strip()
+    while True:
+        cut = _REGION_TAIL.sub("", text).rstrip(" -–_/·")
+        if cut == text:
+            return text
+        text = cut
 
 
 def title_noun(title: str) -> str:
     """Loop 11: the noun a table's title ends with, squashed: the last word once the brackets and the words of a
     breakdown ('시도별', '산업별') are cut off ('가상 시도별 산업별 취업자' -> '취업자', '취업자(시도별)' -> '취업자');
-    '' when the title ends in no such word."""
-    words = [w for w in re.split(r"[\s,·/]+", _TITLE_PAREN.sub(" ", title or "")) if w and not w.endswith("별")]
+    '' when the title ends in no such word. Loop 12: also once a tail naming the regional unit is cut off
+    (_REGION_TAIL: '산업별 취업자 - 시도', '취업자_시군구')."""
+    words = [w for w in re.split(r"[\s,·/\-–_]+", _TITLE_PAREN.sub(" ", _title_body(title))) if w and not w.endswith("별")]
     return _TITLE_TAIL.sub("", words[-1]) if words else ""
+
+
+def _name_words(label: str) -> list[str]:
+    """The words of an item name, brackets' words included ('15세 이상 취업자(전체)' -> '15세', '이상', '취업자', '전체')."""
+    return _NAME_WORDS.findall(_UNIT_PAREN.sub("", label))
 
 
 def _unmarked_whole(axis: Axis, title: str, measures: dict[tuple[str, str], set]) -> bool:
     """Loop 11: the item category's first name is the whole of the others though it carries no total mark: no code
     has a parent, the first name (its brackets cut off) is the noun the table's title ends with (the group the table
     counts: '취업자' in '시도별 산업별 취업자'), and every item is measured as that one is (one unit: not a table of
-    different measures whose first one the title happens to name). '취업자' then holds '농림어업', '제조업', ... ."""
+    different measures whose first one the title happens to name). '취업자' then holds '농림어업', '제조업', ... .
+
+    Loop 12: the first name is compared with the title word by word, not letter by letter: it holds the title's noun
+    (title_noun) and each of its words is in the title (spaces left out, words in brackets included: '15세 이상 취업자'
+    beside '취업자(15세 이상)', '경제활동인구' beside '경제 활동 인구'), and no other item's words are all in the title
+    too (a title naming two measures side by side: '출생아 및 사망자')."""
     codes = list(axis.labels)
     if len(codes) < 3 or any(axis.parents.get(c) is not None for c in codes) or is_total(axis.labels[codes[0]]):
         return False
-    noun = title_noun(title)
+    noun = re.sub(r"\s+", "", title_noun(title))
+    flat = re.sub(r"[^0-9A-Za-z가-힣]", "", _title_body(title))
+
+    def in_title(label: str) -> bool:
+        words = _name_words(label)
+        return bool(words) and all(w in flat for w in words)
+
     first = re.sub(r"\s+", "", _TITLE_PAREN.sub("", _UNIT_PAREN.sub("", axis.labels[codes[0]])))
-    if len(noun) < 2 or first != re.sub(r"\s+", "", noun):
+    if len(noun) < 2 or not (first == noun or (noun in first and in_title(axis.labels[codes[0]]))):
+        return False
+    if first != noun and any(in_title(axis.labels[c]) for c in codes[1:]):
         return False
     units = [measures.get((axis.name, c), set()) for c in codes]
     return len(units[0]) == 1 and all(u == units[0] for u in units)
@@ -152,7 +186,7 @@ def _link_sections(axis: Axis, unmarked: bool = False) -> bool:
     elif total_stem(axis.labels[whole]) is not None and top[1] not in marked:
         return False
     parents: dict[str, str] = {}
-    current, details = None, 0
+    current, details, linked = None, 0, 0
     for code in codes[1:]:
         if axis.parents.get(code) is not None:  # a prefix child: its parent stays
             details += current is not None and axis.parents[code] == current
@@ -160,12 +194,15 @@ def _link_sections(axis: Axis, unmarked: bool = False) -> bool:
         if code in marked:
             if current is not None and not details:
                 return False
+            linked += current is not None
             current, details = code, 0
             parents[code] = whole
         else:
             parents[code] = current or whole
             details += current is not None
-    if current is None or not details:
+    # loop 12: under an unmarked whole, a last subtotal with no detail of its own (its details are not in the table)
+    # is a subtotal under the whole all the same; the subtotals before it keep their details
+    if current is None or not (details or (unmarked and linked)):
         return False
     axis.parents.update(parents)
     return True
