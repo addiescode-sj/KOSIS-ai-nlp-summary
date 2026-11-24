@@ -7,6 +7,7 @@ import re
 from kosis_chat.judge.question import label_forms, squash
 from kosis_chat.shared.patterns import COUNT_WORD, OF_PERCENT, REFERENCE_AFTER, REGION_SUFFIX, refers_after
 from kosis_chat.shared.patterns import MIN_WORDS, asks_min  # loop 16
+from kosis_chat.shared.patterns import COPULA_BOUND  # loop 18
 
 # "전국보다", "전국 대비", "전국 평균의 몇 배", "전국에 비해": the label before these is the reference (loop 12: the
 # patterns are shared with the judge, shared/patterns.py).
@@ -26,8 +27,8 @@ def _skip_names(q: str, end: int, between: tuple[str, ...]) -> int:
     forms = sorted({f for f in between if f}, key=len, reverse=True)
     while True:
         nxt = next((f for f in forms if q.startswith(f, end)), None)
-        if nxt is None and (m := COUNT_WORD.match(q[end:])):
-            nxt = m.group(0)
+        if nxt is None and (m := COUNT_WORD.match(q[end:]) or COPULA_BOUND.match(q[end:])):
+            nxt = m.group(0)  # loop 18: also a copula and a bound noun ("여자인 경우보다": shared COPULA_BOUND)
         if nxt is None:
             return end
         end += len(nxt)

@@ -45,6 +45,7 @@ from kosis_chat.shared.labels import LABEL_ALIASES, interval_forms, squash  # no
 from kosis_chat.shared.labels import MEMBER_TAILS, SEX_NAMES  # noqa: E402  # loop 14
 from kosis_chat.shared.labels import DOING_ENDINGS, NATION_AXIS, NATION_WORD  # noqa: E402  # loop 15
 from kosis_chat.shared.labels import predicate_forms  # noqa: E402  # loop 16
+from kosis_chat.shared.labels import COUPLE_EVENTS, SPOUSE_ROLES  # noqa: E402  # loop 18
 from kosis_chat.shared.patterns import ORDINAL_NAME  # noqa: E402  # loop 15
 from kosis_chat.shared.patterns import BOTH_SEXES, WHOLE_AFTER, count_words_of  # noqa: E402  # loop 16
 from kosis_chat.shared.patterns import COHORT, PAREN, RECENT_N, REGION_SUFFIX, YEAR, YEAR_RANGE, YEAR_SINCE  # noqa: E402
@@ -598,6 +599,43 @@ def nation_pairs(index: TableIndex) -> dict[tuple[str, str], tuple[str, ...]]:
     return build() if caches is None else caches.get("judge.nation_pairs", build)
 
 
+def spouse_forms(index: TableIndex) -> dict[tuple[str, str], tuple[str, ...]]:
+    """Loop 18: (axis, code) -> the words a question says a sex by in a table counting events a couple makes one of
+    (shared COUPLE_EVENTS in a word of its title that names no split, or in a name of its items: '혼인', '이혼'; not
+    '혼인상태별 인구'): the spouse's words of that sex (shared
+    SPOUSE_ROLES: '남자' -> '남편', '신랑'). Only for a category whose names other than a total are the two sexes (shared
+    SEX_NAMES), and none when a spouse's word is already in the table's title, a category's name or a name of the
+    table: that name or category keeps it."""
+    def build():
+        raw = getattr(index.table.meta, "tbl_nm", "") or ""
+        title = squash(raw)
+        items = index.axes[ITEM_AXIS].labels.values() if ITEM_AXIS in index.axes else ()
+        # what the table counts: its title's words that name no split ('혼인상태별' splits people by a status) and
+        # its items' names
+        counted = [w for w in _WORD.findall(raw) if not w.endswith("별")] + [squash(label) for label in items]
+        if not any(e in w for e in COUPLE_EVENTS for w in counted):
+            return {}
+        words = {w for ws in SPOUSE_ROLES.values() for w in ws}
+        names = [title, *(squash(n) for n in index.axes),
+                 *(squash(label) for axis in index.axes.values() for label in axis.labels.values())]
+        if any(w in n for w in words for n in names):
+            return {}
+        out: dict[tuple[str, str], tuple[str, ...]] = {}
+        for axis in index.axes.values():
+            sexes = {code: _core(label) for code, label in axis.labels.items() if not is_total(label)}
+            if axis.regional or len(sexes) != 2 or not all(c in SEX_NAMES for c in sexes.values()):
+                continue
+            if len({c[0] for c in sexes.values()}) != 2:
+                continue
+            for code, core in sexes.items():
+                if core[0] in SPOUSE_ROLES:
+                    out[(axis.name, code)] = SPOUSE_ROLES[core[0]]
+        return out
+
+    caches = getattr(index.table, "caches", None)
+    return build() if caches is None else caches.get("judge.spouse_forms", build)
+
+
 def _said_as_pair(form: str, question: str) -> bool:
     """Loop 15: a two-character word of a pair of nations said as a word of its own: nothing Hangul before it, and a
     space, a particle or nothing Hangul after it ('한중 부부', '한중의', not '한미래')."""
@@ -703,6 +741,7 @@ def match_labels(index: TableIndex, question: str) -> list[Match]:
     members, initials = member_forms(index)
     doings = doing_forms(index)
     pairs = nation_pairs(index)
+    spouses = spouse_forms(index)
     for axis in index.axes.values():
         split = splits.get(axis.name, {})
         for code, label in axis.labels.items():
@@ -728,6 +767,13 @@ def match_labels(index: TableIndex, question: str) -> list[Match]:
             # loop 14: a name said through its members ('중학생', '남학생', '남고생': member_forms)
             hit = next((f for f in members.get((axis.name, code), ())
                         if f in q and _outside_names(f, q, spans) and _said_alone(f, question, initials)), None)
+            if hit:
+                found.append(Match(axis.name, code, label, hit, True))
+                continue
+            # loop 18: a sex said by its spouse's word in a table counting a couple's events ('남편': spouse_forms)
+            hit = next((f for f in spouses.get((axis.name, code), ())
+                        if f in q and _outside_names(f, q, spans)
+                        and re.search(rf"(?<![가-힣]){re.escape(f)}", question)), None)
             if hit:
                 found.append(Match(axis.name, code, label, hit, True))
                 continue
@@ -799,8 +845,9 @@ def both_sexes_whole(index: TableIndex, question: str) -> list[Match]:
 
 
 # Loop 16: what may stand between a name and the noun that says what is counted of it: nothing, a copula ("2명인
-# 가구수") or one describing word ("없이 사는 가구수").
-_MEASURE_BETWEEN = re.compile(r"(?:인|[가-힣]{0,3}[는던])?")
+# 가구수") or one describing word ("없이 사는 가구수"). Loop 18: then one noun and the possessive particle ("자녀가 없는
+# 가구의 가구수", "2명인 집의 가구수"): the noun of what is counted of the name's own group.
+_MEASURE_BETWEEN = re.compile(r"(?:인|[가-힣]{0,3}[는던])?(?:[가-힣]{1,3}의)?")
 
 
 def _measured_whole(found: list[Match], q: str) -> list[Match]:

@@ -105,6 +105,11 @@ RATE_OF_CHANGE = re.compile(rf"증가율|감소율|증감률|증감율|변화율
 # A change asked at all (an amount unless RATE_OF_CHANGE says a rate): the verb forms above, the noun 증감 and the
 # verbs of a change with no direction (변했다, 변화, 달라졌다, 바뀌었다).
 CHANGE_ASKED = re.compile(CHANGE_WORDS.pattern + r"|증감(?![률율])|변했|변화(?!율)|달라졌|바뀌었|" + RATE_OF_CHANGE.pattern)
+# How a gap between two values changed between two periods ("격차가 벌어졌어", "차이는 얼마나 변했어"): the gap nouns
+# and the change words read with them. Loop 18: moved from analyze/rules.py (_GAP_WORDS, _GAP_CHANGE: one table's two
+# targets at two periods) so the multi-table rules read the same words (a gap between two tables at two periods).
+GAP_WORDS = re.compile(r"격차|차이")
+GAP_CHANGE = re.compile(r"변했|변화|벌어|좁혀|줄어|늘어|커졌|작아|달라|줄었|늘었")
 # Loop 5 (compute/answer_facts.py, which of a change and a rate of change a trend answer keeps): a percent asked
 # (퍼센트, %, 프로; not a percent point), and an amount asked: 몇 + a counting word ("몇 명", "몇 건", "몇 가구", "몇 세";
 # not 몇 퍼센트, 몇 배, 몇 년, 몇 월, 몇 위) or a percent point (%p, 퍼센트 포인트).
@@ -249,6 +254,11 @@ def asks_min(text: str, spaced: str | None = None) -> bool:
 DIVIDE = re.compile(r"나누|나눈|나눠|나눴")
 DIVISOR_AFTER = re.compile(r"^(?:으로|로)")
 COUNT_WORD = re.compile(r"^(?:건수|가구수|인구수|수|명|건|가구|개|곳)")
+# Loop 18: bound nouns of a case or a side ("남자인 경우", "65세 이상인 쪽"), and a name said with the copula's
+# describing form and one of them (COPULA_BOUND, on the squashed question): what stands between a name and the word
+# that makes it the reference (analyze/roles.py _skip_names), as the counting words do.
+BOUND_NOUNS = ("경우", "쪽", "편", "측")
+COPULA_BOUND = re.compile(r"^(?:인|이던|이었던|였던)(?:" + "|".join(BOUND_NOUNS) + ")")
 # What follows the label a comparison is made against, on the squashed question (was analyze/roles.py
 # _REFERENCE_AFTER and _OF_PERCENT; loop 12: the judge reads them too): "전국보다", "전국 대비", "전국 평균의 몇 배",
 # "전국에 비해", and a 의 that is read as a reference only before 몇 배 or 몇 퍼센트 (REFERENCE_OF).

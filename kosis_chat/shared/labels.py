@@ -41,6 +41,12 @@ FAMILY_ROLES = {
 }
 LABEL_ALIASES.update(FAMILY_ROLES)
 
+# Loop 18: the roles of the two spouses, by the first character of a sex's name (SEX_NAMES: '남', '여'), and the
+# events a couple makes one of (a marriage, a divorce). In a table counting such events, the two sexes are the two
+# spouses: a sex is also said by its spouse's words ("남편이 초혼인 혼인 건수": judge/question.py spouse_forms).
+SPOUSE_ROLES = {"남": ("남편", "신랑"), "여": ("아내", "신부", "부인")}
+COUPLE_EVENTS = ("혼인", "결혼", "이혼", "초혼", "재혼")
+
 # Loop 15: the describing endings of a 하다 verb ('취업한', '취업하는', '취업했던'): a name for the people who did a
 # thing ('취업자', '귀농인') is also said by its stem with one of them (judge/question.py doing_forms).
 DOING_ENDINGS = ("한", "하는", "하던", "했던")

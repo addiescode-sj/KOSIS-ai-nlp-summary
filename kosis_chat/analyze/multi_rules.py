@@ -42,10 +42,13 @@ from kosis_chat.analyze import blocks as build
 from kosis_chat.analyze.rules import _fixed, _lookup, _named_one_by_one, rule_plan
 from kosis_chat.analyze.schemas import Built, Plan
 from kosis_chat.judge.question import (
+    _DESCRIBED,
+    _MEASURE_BETWEEN,
     AVG_WORDS,
     ITEM_AXIS,
     SUM_WORDS,
     TableIndex,
+    total_stem,
     asked_periods,
     label_forms,
     match_labels,
@@ -60,6 +63,8 @@ from kosis_chat.shared.patterns import (
     COUNT_STEM_SUFFIX,
     EACH_PERIOD,
     EACH_TARGET,
+    GAP_CHANGE,
+    GAP_WORDS,
     RATE_OF_CHANGE,
     MULTI_DIFF,
     MULTI_FEWER,
@@ -144,14 +149,23 @@ def _stems(label: str) -> set[str]:
     return out
 
 
-def _item_spans(index: TableIndex, q: str, question: str) -> dict[str, tuple[list[tuple[int, int]], bool]]:
-    """item code -> (where the question names it, by the whole name (True) or only by its stem (False))."""
+def _item_spans(index: TableIndex, q: str, question: str,
+                apart: set[tuple[int, int]] | None = None) -> dict[str, tuple[list[tuple[int, int]], bool]]:
+    """item code -> (where the question names it, by the whole name (True) or only by its stem (False)).
+
+    Loop 18: a whole name matched by its stem only, without its total mark ('가구수' of '가구수-계'), is marked False
+    too (_measure_noun reads it). apart, when given, collects the places of names matched by their parts said apart
+    (Match.parts, the form not in the question: _match_spans), which _closes_other reads."""
     if ITEM_AXIS not in index.axes:
         return {}
     out: dict[str, tuple[list[tuple[int, int]], bool]] = {}
     for m in match_labels(index, question):
         if m.axis == ITEM_AXIS:
-            out.setdefault(m.code, ([], True))[0].extend(_match_spans(m, q))
+            spans = _match_spans(m, q)
+            stem = total_stem(m.label)
+            out.setdefault(m.code, ([], not (stem and m.form == squash(stem))))[0].extend(spans)
+            if apart is not None and m.parts and m.form not in q:
+                apart.update(spans)
     if out:
         return out
     for code, label in index.axes[ITEM_AXIS].labels.items():
@@ -173,7 +187,8 @@ class _Side:
         self.res = res
         self.index = res.index
         self.plan: Plan = rule_plan(question, res.index)
-        self.items = _item_spans(res.index, squash(question), question)
+        self.apart: set[tuple[int, int]] = set()  # loop 18: places of names matched by parts said apart
+        self.items = _item_spans(res.index, squash(question), question, self.apart)
         self.item: str | None = None
         self.at: int | None = None
         # loop 12: the items a question names one by one and asks for each of ("남자와 여자 각각"): the calculation is
@@ -191,13 +206,27 @@ def _assign_items(sides: list[_Side], question: str) -> None:
     Loop 12: two items or more of one table, each named by a name of its own (rules._named_one_by_one, so not an
     over-wide match of one word) with a word asking for each (shared EACH_TARGET: "남자와 여자 각각"), are the targets
     the calculation between the tables is repeated for, in question order (_fixed_sets, _repeated), as two regions
-    are. The table is placed where the first of them is named."""
+    are. The table is placed where the first of them is named.
+
+    Loop 18: a place of a name matched by its parts said apart that runs over another table's place to its end is
+    the other table's (_closes_other). A whole matched by its stem only, said at every place as the noun of what is
+    counted after a matched name (_measure_noun: "자녀가 없는 가구수, 자동차가 1대인 가구수"), beside one other item of
+    its table that is not asked for each, leaves that item the table's."""
     each = bool(EACH_TARGET.search(_masked(question, sides)))
+    q = squash(question)
+    raw = {id(o): [s for spans, _ in o.items.values() for s in spans] for o in sides}
+    cleared = {id(o): {code: [s for s in spans
+                              if not _closes_other(s, o.apart, [x for p in sides if p is not o for x in raw[id(p)]])]
+                       for code, (spans, _) in o.items.items()} for o in sides}
+    wholes = {id(o): {code for code, (_, by_name) in o.items.items()
+                      if not by_name and total_stem(o.index.axes[ITEM_AXIS].labels[code])} for o in sides}
+    ends = {b for o in sides for code, spans in cleared[id(o)].items() if code not in wholes[id(o)] for _, b in spans}
     for side in sides:
-        others = [s for o in sides if o is not side for spans, _ in o.items.values() for s in spans]
-        kept = {code: [s for s in spans if not _covered(s, others)] for code, (spans, _) in side.items.items()}
+        others = [s for o in sides if o is not side for spans in cleared[id(o)].values() for s in spans]
+        kept = {code: [s for s in spans if not _covered(s, others)] for code, spans in cleared[id(side)].items()}
         kept = {code: spans for code, spans in kept.items() if spans}
         labels = side.index.axes[ITEM_AXIS].labels if ITEM_AXIS in side.index.axes else {}
+        counted = [c for c in kept if c in wholes[id(side)] and _measure_noun(kept[c], ends, q)]
         if len(labels) == 1:
             side.item = next(iter(labels))
             spans = kept.get(side.item, [])
@@ -206,9 +235,28 @@ def _assign_items(sides: list[_Side], question: str) -> None:
         elif len(kept) >= 2 and each and _named_one_by_one(parse(side.index, question), ITEM_AXIS, list(kept)):
             side.each_item = sorted(kept, key=lambda c: min(a for a, _ in kept[c]))
             spans = [s for c in kept for s in kept[c]]
+        elif len(kept) == 2 and len(counted) == 1:
+            side.item, spans = next((c, s) for c, s in kept.items() if c not in counted)
         else:
             spans = []
         side.at = min(a for a, _ in spans) if spans else None
+
+
+def _closes_other(span: tuple[int, int], apart: set[tuple[int, int]], others: list[tuple[int, int]]) -> bool:
+    """Loop 18: a place of a name matched by its parts said apart (Match.parts, its form not in the question) that
+    holds another table's shorter place and ends where it ends: the last part is the other table's ("자동차가 1대인
+    가구수, 반려동물이 없는 가구수": '없는' closes 반려동물-없음, not 자동차-없음). Only such places: a name said as it is
+    keeps its place (_covered reads those)."""
+    a, b = span
+    return span in apart and any(a <= x and y == b and y - x < b - a for x, y in others)
+
+
+def _measure_noun(places: list[tuple[int, int]], ends: set[int], q: str) -> bool:
+    """Loop 18: every place q says a whole's stem comes right after the end of a matched name of some table (with what
+    judge.question._MEASURE_BETWEEN lets stand between) or after a describing word (_DESCRIBED): the stem is the noun
+    of what is counted, as one table's judge.question._measured_whole reads it."""
+    return all(_DESCRIBED.search(q[:at]) is not None
+               or any(e <= at and _MEASURE_BETWEEN.fullmatch(q[e:at]) for e in ends) for at, _ in places)
 
 
 # ---------------------------------------------------------------- what is computed
@@ -413,20 +461,68 @@ def _changes(op: Op, order: list[_Side], fixed: dict, asked: dict, targets: int)
     return build.written(PlanV3(steps=steps, show=show, present="trend"))
 
 
+def _between_change(question: str, sides: list[_Side], several_periods: bool,
+                    aggregated: bool) -> tuple[Op, list[_Side], float | None, bool, str] | None:
+    """Loop 18: (what is computed, the tables in formula order, the per scale, whether that order is the question's,
+    the change: "diff" or "pct_change") when a calculation between two tables is asked at two periods together with
+    how it changed, else None: the calculation at each period and the later result against the earlier one.
+
+    The calculation between the tables is read as _operation reads it: a value per unit of another or a ratio
+    (PER_UNIT, MULTI_RATIO) with a change word (CHANGE_ASKED, GAP_CHANGE); a gap named by its noun with a word of how
+    it changed (shared GAP_WORDS and GAP_CHANGE, the words one table's gap change reads: analyze/rules.py _two_by_two);
+    or a table named right before a comparing word (보다, 대비, 에 비해) and a word of more or less after it, with a
+    change word. A comparing word right after a period compares the periods: each table's change, as before. Not over
+    a range summed or averaged per table (a sum or an average word)."""
+    if not several_periods or len(sides) != 2:
+        return None
+    q = _masked(question, sides)
+    if aggregated and (SUM_WORDS.search(q) or AVG_WORDS.search(q)):
+        return None
+    if not (CHANGE_ASKED.search(q) or GAP_CHANGE.search(q)):
+        return None
+    rate = "pct_change" if RATE_OF_CHANGE.search(q) else "diff"
+    if PER_UNIT.search(question) or MULTI_RATIO.search(q):
+        op, order, scale, directed = _operation(question, sides)
+        return (op, order, scale, directed, rate) if op in ("per", "ratio") else None
+    for m in AGAINST.finditer(q):
+        reference = _before(sides, m.start())
+        if reference is None or reference.item is None or not MULTI_DIFF.search(q[m.end():]):
+            continue
+        ends = [b for _, b in reference.items.get(reference.item, ([], True))[0] if b <= m.start()]
+        if any(_JOINED.fullmatch(q[b:m.start()]) for b in ends):
+            subject = next(s for s in sides if s is not reference)
+            fewer = bool(MULTI_FEWER.search(q[m.end():]))
+            return "diff", ([reference, subject] if fewer else [subject, reference]), None, True, "diff"
+    if GAP_WORDS.search(q) and GAP_CHANGE.search(q):
+        return "diff", _ordered(sides), None, False, "diff"
+    return None
+
+
+# Loop 18: what may stand between a table's name and the comparing word after it: a particle or a counting word.
+_JOINED = re.compile(r"[가-힣]{0,2}")
+
+
 def _repeated(op: Op, order: list[_Side], fixed: dict, asked: dict, scale: float | None, directed: bool,
-              aggregate: str | None) -> Built:
+              aggregate: str | None, change: str | None = None) -> Built:
     """The calculation between the tables once per named target and, unless the periods are aggregated, once per
     named period (loop 2): "서울과 부산의 혼인 1건당 출생아 수", "2020년과 2023년 ~ 차이". With aggregate ("sum" or
     "avg"), each table's cells over the asked range are aggregated first and the calculation is made on the results
     ("2019~2021년 출생아 수 합계를 혼인 건수 합계로 나누면"). One group of one target and one period is the plan of
-    loop 1 (ids t0, t1, then d / r / s1)."""
+    loop 1 (ids t0, t1, then d / r / s1).
+
+    Loop 18, change ("diff" or "pct_change", _between_change): asked holds each table's earliest and latest period;
+    per target, the later period's result against the earlier one's is added (ids c_k). A difference with no
+    reference named is taken in one direction at both periods: the table larger at the later period first."""
     targets = _aligned([len(fixed[id(s)]) for s in order], "대상")
     periods = 1 if aggregate else _aligned([len(asked[id(s)]) for s in order], "시점")
     if aggregate and op == "share":
         raise _Open("기간 합의 비중")  # compute's share takes cells as the whole, not an aggregate
+    if change and periods != 2:
+        raise _Open("변화를 볼 두 시점이 없는 표")
     groups = [(k, t) for k in range(targets) for t in range(periods)]
     one = len(groups) == 1
     per_side: dict[int, list[list[str]]] = {}
+    values: dict[int, list[float | None]] = {}
     for side in order:
         sets, mine = fixed[id(side)], asked[id(side)]
         wanted = [(sets[k % len(sets)], mine if aggregate else [mine[t % len(mine)]]) for k, t in groups]
@@ -437,9 +533,17 @@ def _repeated(op: Op, order: list[_Side], fixed: dict, asked: dict, scale: float
             raise _Open(f"칸 없음: {', '.join(missing[:3])}")
         refs = iter(c.source_ref for c in found)
         per_side[id(side)] = [[next(refs) for _ in ps] for _, ps in wanted]
+        values[id(side)] = [c.value for c in found]
+    if change and op == "diff" and not directed:
+        late = groups.index((0, 1))  # the first target at the later period: its larger table goes first
+        a, b = (values[id(s)][late] for s in order)
+        if a is not None and b is not None and a < b:
+            order = [order[1], order[0]]
+        directed = True
     steps: list = []
     show: list[str] = []
     present = "compare"
+    results: dict[tuple[int, int], str] = {}
     for g in range(len(groups)):
         tag = "" if one else f"_{g}"
         ids = []
@@ -455,8 +559,14 @@ def _repeated(op: Op, order: list[_Side], fixed: dict, asked: dict, scale: float
             ids.append(sid)
         more, result, present = _combined(op, ids, scale, directed, tag)
         steps += more
+        results[groups[g]] = result
         cells = [f"t{n}{tag}" for n in range(len(order))]
         show += [*cells, *[i for i in ids if i not in cells], result]
+    if change:
+        for k in range(targets):
+            note = "증감률" if change == "pct_change" else "변화"
+            steps.append(CombineStep(id=f"c_{k}", a=results[(k, 1)], b=results[(k, 0)], fn=change, note=note))
+            show.append(f"c_{k}")
     return build.written(PlanV3(steps=steps, show=show, present=present))
 
 
@@ -526,6 +636,11 @@ def _plan(question: str, res: MultiResources) -> Built:
     aggregate = None
     if several and periods.ranges and not EACH_PERIOD.search(question):
         aggregate = "avg" if AVG_WORDS.search(q) else "sum"
+    if all(len(set(p)) >= 2 for p in asked.values()) and (
+            between := _between_change(question, sides, several, aggregate is not None)) is not None:
+        op, order, scale, directed, change = between  # loop 18: the calculation at two periods and its change
+        ends = {id(s): [min(asked[id(s)]), max(asked[id(s)])] for s in sides}
+        return _repeated(op, order, fixed, ends, scale, directed, None, change)
     op, order, scale, directed = _operation(question, sides, several, aggregate is not None)
     if op == "list":
         steps: list = []
