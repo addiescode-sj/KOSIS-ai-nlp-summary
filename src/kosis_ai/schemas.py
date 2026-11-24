@@ -39,8 +39,9 @@ RefusalReason = Literal[
 ]
 MeasureKind = Literal["count_stock", "count_flow", "ratio", "average", "index"]
 # How a chart is drawn today (kosis_chat/chart/builders.py; ChartSpec.kind is an open string, E6): bars by name, bars in period order, a line over periods, a pie,
-# (S6) one line per series over periods, and bars of several targets side by side at each period.
-ChartKind = Literal["bar", "timeline", "line", "pie", "multi_line", "grouped_bar"]
+# (S6) one line per series over periods, bars of several targets side by side at each period, and (T1-32) a share at
+# each period as a 100% bar (the share and the rest).
+ChartKind = Literal["bar", "timeline", "line", "pie", "multi_line", "grouped_bar", "stacked_bar"]
 # What a caveat warns about (S6, kosis_chat/answer/caveats.py): asked periods the table lacks, a condition the question
 # left out and code filled in, a simple average of rates, a provisional value, a symbol cell shown, a series that
 # changed its basis, an event start the model gave, and an alternative (another scenario, a look-alike label).

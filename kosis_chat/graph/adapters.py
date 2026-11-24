@@ -216,7 +216,7 @@ def compose_done_node(res: StatResources) -> Callable:
 def chart_node(step: Step, res: StatResources) -> Callable:
     """The chart branch: runs beside the compose path (it needs only the computed facts) and writes only `chart_out`."""
     def chart(state: StatState) -> dict:
-        return {"chart_out": step(ChartIn(type=state.plan.type, computed=state.computed), res).chart}
+        return {"chart_out": step(ChartIn(type=state.plan.type, computed=state.computed, question=state.question), res).chart}
     return chart
 
 

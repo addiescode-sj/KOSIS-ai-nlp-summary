@@ -339,9 +339,9 @@ def test_average_question_is_answered_with_a_chart_in_the_contract(households):
     assert answer.decision_metadata["pattern"] == "avg" and stat.query.periods == ["2015", "2020", "2023", "2024"]
     assert [s.op for s in stat.query.plan.steps] == ["select", "aggregate"]
     assert stat.result.facts[4].derivation == "(f1 + f2 + f3 + f4) / 4" and stat.text.startswith("2015년부터 2024년까지 서울특별시 1인 가구는 연평균 3,101.50가구입니다.")
-    assert answer.chart.kind == "timeline" and answer.chart.fact_ids == ["f1", "f2", "f3", "f4", "f5"]
+    assert answer.chart.kind == "line" and answer.chart.fact_ids == ["f1", "f2", "f3", "f4", "f5"]  # T1-32: an average over periods is a line
     assert [p.fact_id for p in answer.chart.points()] == ["f1", "f2", "f3", "f4"] and "chart" not in stat.model_dump()
-    assert stat.numbers_origin == "code" and stat.numbers_verified and answer.decision_metadata["chart"] == "timeline"
+    assert stat.numbers_origin == "code" and stat.numbers_verified and answer.decision_metadata["chart"] == "line"
     _, user = bot.client.calls[0]
     assert "{f5} [반드시 인용] 평균 ((f1 + f2 + f3 + f4) / 4) = 3,101.50가구 — 2015년~2024년 4개 시점 평균" in user
 

@@ -234,11 +234,10 @@ def _grid(computed: Computed) -> ChartSpec | None:
 def chart_spec(kind: QuestionType, computed: Computed) -> ChartSpec | None:
     """The chart for the answer (kind, the drawn points, the facts drawn; no Vega-Lite: chart/vega.py to_vega), or None
     when there is nothing to draw."""
-    by_id = {f.id: f for f in computed.result.facts}
-    if computed.pattern in GRID_PATTERNS and (found := _grid(computed)) is not None:
-        return found
-    builder = BUILDERS[computed.pattern or kind]
-    try:
-        return builder(computed, by_id)
-    except (KeyError, IndexError, StopIteration):  # an unexpected fact layout: answer without a chart
+    try:  # T1-32: any error (an unknown pattern, an unexpected fact layout) is an answer without a chart
+        by_id = {f.id: f for f in computed.result.facts}
+        if computed.pattern in GRID_PATTERNS and (found := _grid(computed)) is not None:
+            return found
+        return BUILDERS[computed.pattern or kind](computed, by_id)
+    except Exception:  # noqa: BLE001 - the chart is an extra of the answer
         return None
