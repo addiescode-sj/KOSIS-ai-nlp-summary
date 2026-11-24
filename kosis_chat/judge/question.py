@@ -44,7 +44,9 @@ from kosis_chat.prepare.index import (  # noqa: E402, F401
 from kosis_chat.shared.labels import LABEL_ALIASES, interval_forms, squash  # noqa: E402
 from kosis_chat.shared.labels import MEMBER_TAILS, SEX_NAMES  # noqa: E402  # loop 14
 from kosis_chat.shared.labels import DOING_ENDINGS, NATION_AXIS, NATION_WORD  # noqa: E402  # loop 15
+from kosis_chat.shared.labels import predicate_forms  # noqa: E402  # loop 16
 from kosis_chat.shared.patterns import ORDINAL_NAME  # noqa: E402  # loop 15
+from kosis_chat.shared.patterns import BOTH_SEXES, WHOLE_AFTER, count_words_of  # noqa: E402  # loop 16
 from kosis_chat.shared.patterns import COHORT, PAREN, RECENT_N, REGION_SUFFIX, YEAR, YEAR_RANGE, YEAR_SINCE  # noqa: E402
 from kosis_chat.shared.patterns import PREVIOUS_MONTH, PREVIOUS_SAME_MONTH, PREVIOUS_YEAR  # noqa: E402  # loop 5
 from kosis_chat.shared.patterns import COUNT_STEM_SUFFIX, TOTAL_PREFIX  # noqa: E402  # loop 12
@@ -297,6 +299,19 @@ def _found(form: str, question: str, squashed: str, lower_level: bool) -> bool:
     return True
 
 
+def _token_found(token: str, q: str) -> bool:
+    """Loop 16: a token of a name (label_forms' tokens) said in the squashed question. A token that starts or ends
+    with a digit is said only where its number is a number of its own (as _found reads a form of digits alone): '20'
+    and '24년' of '20～24년' are not said by "2024년", whose digits run on."""
+    if token not in q:
+        return False
+    if not (token[:1].isdigit() or token[-1:].isdigit()):
+        return True
+    before = r"(?<!\d)" if token[:1].isdigit() else ""
+    after = r"(?!\d)" if token[-1:].isdigit() else ""
+    return re.search(before + re.escape(token) + after, q) is not None
+
+
 _WORD = re.compile(r"[0-9A-Za-z가-힣]+")
 _NAME_WORD = 3  # the shortest word read as coming from the survey's or the table's name
 
@@ -317,13 +332,22 @@ def name_spans(index: TableIndex, question: str) -> list[tuple[int, int]]:
 
 
 def _outside_names(form: str, q: str, spans: list[tuple[int, int]]) -> bool:
-    """The form occurs in q at least once that is not strictly inside a word of a name (name_spans)."""
+    """The form occurs in q at least once that is not strictly inside a word of a name (name_spans). Loop 16: a word of
+    a name made of the form and a counting tail (_counted_tail: '사망' in '사망자수', '출생' in '출생아수') says the form;
+    it is the name counted, not a part of the name's word."""
     at = q.find(form)
     while at >= 0:
-        if not any(a <= at and at + len(form) <= b and b - a > len(form) for a, b in spans):
+        if not any(a <= at and at + len(form) <= b and b - a > len(form)
+                   and not (a == at and _counted_tail(q[at + len(form):b])) for a, b in spans):
             return True
         at = q.find(form, at + 1)
     return False
+
+
+def _counted_tail(tail: str) -> bool:
+    """Loop 16: the tail a count name puts after the name it counts: the count word (shared COUNT_STEM_SUFFIX: 수,
+    건수, 자수, 아수) or the counted person (_COUNTED_FORMS: 자, 아), the same tails label_forms reads."""
+    return bool(COUNT_STEM_SUFFIX.fullmatch(tail)) or tail in _COUNTED_FORMS
 
 
 _JOIN_MARK = "-_·"  # a mark that joins a group's name and an attribute ('귀농인-여자', '가구주_남자')
@@ -336,13 +360,23 @@ def _core(label: str) -> str:
     return squash(text[: m.start()] if m and _known_unit(m.group(1).strip()) else text)
 
 
-def group_parts(axis: Axis, elsewhere) -> dict[str, tuple[str, str]]:
+def _by_words(index: TableIndex) -> tuple[str, ...]:
+    """Loop 16: the words of a table's title and of its categories' names that name what the table is split by
+    ('자녀수별', '보유대수별'), squashed, without 별."""
+    text = " ".join([getattr(index.table.meta, "tbl_nm", "") or "", *index.axes])
+    return tuple(w[:-1] for w in _WORD.findall(text) if w.endswith("별") and len(w) >= 3)
+
+
+def group_parts(axis: Axis, elsewhere, by_words: tuple[str, ...] = ()) -> dict[str, tuple[str, str]]:
     """Loop 7: code -> (group, attribute) for the names of a category made of the name of a group of the same category
     and an attribute, joined by a mark or written together: '귀농인-여자' and '귀농인여자' beside '귀농인' or '귀농인-계'
     (the group: another name of the category, or the stem of its total name, two characters or more). The attribute
     is a word of two Hangul characters or more that no other category of the table names (elsewhere: their exact
     forms; there that category holds the attribute). A total name and a name with no such group have none, and so has
-    a regional category ('서울특별시' is no group '서울' with an attribute)."""
+    a regional category ('서울특별시' is no group '서울' with an attribute).
+
+    Loop 16: also a group no other name gives, when a join mark follows it and a word of what the table is split by
+    holds it (by_words: '자녀' of '자녀-없음' in a table '…자녀수별 가구')."""
     if axis.regional:
         return {}
     cores = {code: _core(label) for code, label in axis.labels.items()}
@@ -353,6 +387,10 @@ def group_parts(axis: Axis, elsewhere) -> dict[str, tuple[str, str]]:
         if is_total(axis.labels[code]):
             continue
         group = next((core[:k] for k in range(len(core) - 1, 1, -1) if core[:k] in groups), None)  # the longest
+        if group is None and by_words:
+            mark = next((k for k, ch in enumerate(core) if ch in _JOIN_MARK), 0)
+            if mark >= 2 and _HANGUL.fullmatch(core[:mark]) and any(core[:mark] in w for w in by_words):
+                group = core[:mark]
         if group is None:
             continue
         attr = core[len(group):].lstrip(_JOIN_MARK)
@@ -433,7 +471,9 @@ def group_parts_of(index: TableIndex) -> dict[str, dict[str, tuple[str, str]]]:
                 exact_of[name] = set().union(*(label_forms(label)[0] for label in index.axes[name].labels.values()))
             return exact_of[name]
 
-        return {name: group_parts(axis, lambda name=name: set().union(*(forms(n) for n in index.axes if n != name)))
+        by_words = _by_words(index)
+        return {name: group_parts(axis, lambda name=name: set().union(*(forms(n) for n in index.axes if n != name)),
+                                  by_words)
                 for name, axis in index.axes.items()}
 
     caches = getattr(index.table, "caches", None)
@@ -578,6 +618,42 @@ def ordinal_form(label: str) -> str | None:
     return m.group(1) + core[m.end() + 1:]
 
 
+# Loop 16: a name of a number and a counting word ('1명', '2대', '3명 이상'): group 1 the number, 2 the counting word,
+# 3 the words after it.
+_NUMBER_NAME = re.compile(r"^(\d+)\s*([가-힣]+?)(?:\s+([가-힣]+))?$")
+# What says a count is no one name of it: "한 명도 없는" (none at all), "세 명 이상" (a range), "두 명까지".
+_NOT_ONE_COUNT = re.compile(r"\s*(?:도|이상|이하|미만|초과|넘|까지|부터|에서)")
+
+
+def number_word_forms(label: str) -> tuple[tuple[str, str], ...]:
+    """Loop 16: ((squashed form, pattern on the question as written), ...) for a name of a number and a counting word
+    said with a native Korean number word (shared count_words_of): '2명' -> '두명' ("두 명"), '3명 이상' -> '세명이상'.
+    None for another name, a total, or a number the count words do not hold."""
+    text = _UNIT_PAREN.sub("", label).strip().lstrip("-").strip()
+    m = _NUMBER_NAME.match(text)
+    if m is None or is_total(label):
+        return ()
+    n, unit, tail = int(m.group(1)), m.group(2), m.group(3) or ""
+    out = []
+    for word in count_words_of(n):
+        pattern = r"\s*".join(re.escape(ch) for ch in word + unit) + "".join(r"\s*" + re.escape(ch) for ch in tail)
+        out.append((word + unit + tail, pattern))
+    return tuple(out)
+
+
+def _said_as_count(pattern: str, question: str) -> bool:
+    """Loop 16: a count said with a number word (number_word_forms) as the name: where a word starts (not the ending
+    of a describing word: '가는 두 명' has '두' after a space, '…한 명' after Hangul is no number), followed by nothing
+    Hangul or by a particle or a copula ("두 명인", "한 명이"), not by what makes it none or a range (_NOT_ONE_COUNT)."""
+    for m in re.finditer(r"(?<![가-힣])" + pattern, question):
+        after = question[m.end():]
+        if _NOT_ONE_COUNT.match(after):
+            continue
+        if not re.match(r"[가-힣]", after) or _WORD_PARTICLE.match(after):
+            return True
+    return False
+
+
 # A particle or a copula right after a word ("첫째는", "둘째인", "셋째와"), nothing Hangul after it.
 _WORD_PARTICLE = re.compile(r"(?:은|는|이|가|을|를|의|도|만|와|과|랑|이랑|하고|인|이고|이야|이며)(?![가-힣])")
 
@@ -642,7 +718,8 @@ def match_labels(index: TableIndex, question: str) -> list[Match]:
             if hit:
                 found.append(Match(axis.name, code, label, hit, True))
                 continue
-            hit = ("".join(tokens) if len(tokens) >= 2 and all(t in q and _outside_names(t, q, spans) for t in tokens)
+            hit = ("".join(tokens) if len(tokens) >= 2 and all(_token_found(t, q) and _outside_names(t, q, spans)
+                                                               for t in tokens)
                    else None)
             hit = hit or next((f for f in partial if seen(f)), None)
             if hit:
@@ -666,6 +743,12 @@ def match_labels(index: TableIndex, question: str) -> list[Match]:
                 if _said_as_ordinal(form, end, question):
                     found.append(Match(axis.name, code, label, form, True))
                     continue
+            # loop 16: a name of a number said with a native number word ('두 명' for '2명': number_word_forms)
+            hit = next((f for f, pattern in number_word_forms(label)
+                        if f in q and _outside_names(f, q, spans) and _said_as_count(pattern, question)), None)
+            if hit:
+                found.append(Match(axis.name, code, label, hit, True))
+                continue
             # loop 15: a nation said in a pair with the nation the category fixes ('한중': nation_pairs)
             hit = next((f for f in pairs.get((axis.name, code), ())
                         if f in q and _outside_names(f, q, spans) and _said_as_pair(f, question)), None)
@@ -673,10 +756,12 @@ def match_labels(index: TableIndex, question: str) -> list[Match]:
                 found.append(Match(axis.name, code, label, hit, True))
                 continue
             # loop 7: a group and an attribute said apart ("귀농인 중 여자", "귀농인 여성"); an attribute is also said
-            # by its other names (LABEL_ALIASES)
+            # by its other names (LABEL_ALIASES); loop 16: a predicate in its noun form by its other forms ("자녀가
+            # 없는" for '자녀-없음': shared predicate_forms)
             if code in split:
                 group, attr = split[code]
-                said = next((f for f in (attr, *(squash(a) for a in LABEL_ALIASES.get(attr, ()))) if seen(f)), None)
+                said = next((f for f in (attr, *(squash(a) for a in LABEL_ALIASES.get(attr, ())), *predicate_forms(attr))
+                             if seen(f)), None)
                 if seen(group) and said:
                     found.append(Match(axis.name, code, label, group + attr, False, parts=(group, said)))
                     continue
@@ -687,7 +772,71 @@ def match_labels(index: TableIndex, question: str) -> list[Match]:
                 if (hit := _said_by_head(heads[code], question, q, spans, heads)) is not None:
                     form, parts = hit
                     found.append(Match(axis.name, code, label, form, True, parts=parts))
-    return _dedupe(found, q)
+    return _dedupe(_measured_whole(found + both_sexes_whole(index, question), q), q)
+
+
+def both_sexes_whole(index: TableIndex, question: str) -> list[Match]:
+    """Loop 16: the two sexes named as one word (shared BOTH_SEXES) and followed by a word of the whole (shared
+    WHOLE_AFTER: "남녀 전체", "남녀를 합친", "남자와 여자 합계") name the total of a category of the two sexes (two
+    names of shared SEX_NAMES beside a total): one match whose form covers the words, so the word that puts together
+    is no sum of the rest. None when a sex is named apart too ("남녀 전체 중 여자"), when the words of the whole do not
+    follow, or when the category has no total (the two are taken as before)."""
+    m = BOTH_SEXES.search(question)
+    if m is None or (w := WHOLE_AFTER.match(squash(question[m.end():]))) is None:
+        return []
+    if any(s in question[: m.start()] + " " + question[m.end():] for s in SEX_NAMES if len(s) >= 2):
+        return []
+    out = []
+    for axis in index.axes.values():
+        if axis.regional:
+            continue
+        sexes = [c for c, label in axis.labels.items() if _core(label) in SEX_NAMES]
+        totals = [c for c, label in axis.labels.items() if is_total(label) and axis.parents.get(c) is None]
+        if len(sexes) == 2 and totals:
+            code = totals[0]
+            out.append(Match(axis.name, code, axis.labels[code], squash(m.group(0)) + w.group(0), True))
+    return out
+
+
+# Loop 16: what may stand between a name and the noun that says what is counted of it: nothing, a copula ("2명인
+# 가구수") or one describing word ("없이 사는 가구수").
+_MEASURE_BETWEEN = re.compile(r"(?:인|[가-힣]{0,3}[는던])?")
+
+
+def _measured_whole(found: list[Match], q: str) -> list[Match]:
+    """Loop 16: a whole name matched by its stem only, without its total mark ('가구수' of '가구수-계'), where every
+    place q says it comes right after a name of the same category that is matched (_MEASURE_BETWEEN: "자녀가 없는
+    가구수"), is the noun of what is counted of that name, not a target of its own: left out. Said apart ("가구수와
+    자녀 없는 가구수", "가구수 중"), with its mark, or with no other name of its category matched, it stays."""
+    out = []
+    for m in found:
+        stem = total_stem(m.label)
+        others = [o for o in found if o.axis == m.axis and o.code != m.code and not is_total(o.label)]
+        if stem is None or m.form != squash(stem) or not others or m.form not in q:
+            out.append(m)
+            continue
+        pieces = {o.form if o.form in q or not o.parts else o.parts[-1] for o in others}
+        after_part = [any(_MEASURE_BETWEEN.fullmatch(q[e:at]) for piece in pieces
+                          for e in (k + len(piece) for k in _places(piece, q[:at])))
+                      for at in _places(m.form, q)]
+        # every other place follows a describing word too ("자녀가 없는 가구수와 자동차가 없는 가구수": the second is
+        # what is counted of another table's name)
+        described = [_DESCRIBED.search(q[:at]) is not None for at in _places(m.form, q)]
+        if not (any(after_part) and all(a or d for a, d in zip(after_part, described))):
+            out.append(m)
+    return out
+
+
+# Loop 16: a describing word right before a place (its ending: 는, 던, or the copula 인).
+_DESCRIBED = re.compile(r"(?:[가-힣][는던]|인)$")
+
+
+def _places(form: str, text: str) -> list[int]:
+    out, at = [], text.find(form)
+    while at >= 0:
+        out.append(at)
+        at = text.find(form, at + 1)
+    return out
 
 
 def _said_by_head(parts: tuple[str, str, str], question: str, q: str, spans,

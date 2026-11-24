@@ -56,6 +56,7 @@ from kosis_chat.shared.patterns import asks_level  # isort: skip  # loop 8
 from kosis_chat.shared.patterns import COUNT_STEM_SUFFIX, TOTAL_AMOUNT, asks_gap_of, asks_relative  # isort: skip  # loop 9
 from kosis_chat.shared.patterns import candidate_nouns  # isort: skip  # loop 12
 from kosis_chat.shared.patterns import ROLE_AXES, STAY_AXIS, VISIT_AXIS, role_kind  # isort: skip  # loop 12
+from kosis_chat.shared.patterns import BOTH_SEXES, WHOLE_AFTER  # isort: skip  # loop 16
 
 PERIOD_AXIS = "시점"  # Plan.over when an extreme question ranks periods ("가장 낮았던 해")
 RECENT_POINTS = 5
@@ -79,7 +80,7 @@ _PREVIOUS = default_strings.PREVIOUS_CODES
 # "3인 이하", "5인 이상", "65세 이상": a range over numbered labels of one category.
 _NUM_RANGE = re.compile(r"(\d+)\s*(인|세)\s*(이하|이상|미만|초과)")
 _NUM_LABEL = re.compile(r"^(\d+)\s*(인|세)\s*(이상)?(?:\s*\(.*\))?$")
-_BOTH_SEXES = re.compile(r"남녀|남성과\s*여성|남자와\s*여자|성별")
+_BOTH_SEXES = BOTH_SEXES  # loop 16: shared/patterns.py (judge/question.py both_sexes_whole reads it too)
 # Two targets at two periods (S5): how their gap changed ("격차가 벌어졌어"), or which changed more ("증가율이 더 높아").
 _GAP_WORDS = re.compile(r"격차|차이")
 _GAP_CHANGE = re.compile(r"변했|변화|벌어|좁혀|줄어|늘어|커졌|작아|달라|줄었|늘었")
@@ -249,10 +250,17 @@ def _ten_group(question: str, index: TableIndex) -> tuple[str, list[str]] | None
 
 
 def _both_sexes(question: str, index: TableIndex, codes: dict[str, list[str]]) -> None:
-    if not _BOTH_SEXES.search(question):
+    """The two sexes when the question names them as one word (shared BOTH_SEXES). Loop 16: not when a word of the
+    whole follows (shared WHOLE_AFTER: "남녀 전체", "남녀 합친"): the parser matched the category's total for it
+    (judge/question.py both_sexes_whole); a category with no total takes the two as before."""
+    m = _BOTH_SEXES.search(question)
+    if not m:
         return
+    whole = bool(WHOLE_AFTER.match(squash(question[m.end():])))
     for name, axis in index.axes.items():
         pair = [c for c, label in axis.labels.items() if label.strip() in ("남자", "여자")]
+        if whole and _total(index, name) is not None and _total(index, name) in codes.get(name, []):
+            continue
         if len(pair) == 2 and len(codes.get(name, [])) < 2:
             codes[name] = sorted(pair, key=lambda c: axis.labels[c] != "남자")
 
@@ -1462,7 +1470,7 @@ def _extreme_plan(plan: Plan, index: TableIndex, lookup: _Lookup, note: str | No
         return _change_rank_plan(plan, index, lookup, ends, rest, places, note)
     # both ends of a ranking: with their difference or ratio (loop 3), or (loop 4) named each with its own ranking word
     # ("가장 많은 곳과 가장 적은 곳", "최댓값과 최솟값") for their values alone
-    both_ends = not changed and places is None and EXTREME_MAX.search(rest) and pick_of(rest) == "min"
+    both_ends = not changed and places is None and EXTREME_MAX.search(rest) and pick_of(rest, plan.question) == "min"
     formula = bool(ASKS_GAP.search(rest) or ASKS_RATIO.search(rest))
     if both_ends and (formula or len(EXTREME_WORDS.findall(MOST_RECENT.sub(" ", rest))) >= 2):
         return _extremes_plan(plan, index, lookup, rest, note, formula)

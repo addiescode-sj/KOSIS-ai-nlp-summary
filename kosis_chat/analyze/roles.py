@@ -6,13 +6,15 @@ import re
 
 from kosis_chat.judge.question import label_forms, squash
 from kosis_chat.shared.patterns import COUNT_WORD, OF_PERCENT, REFERENCE_AFTER, REGION_SUFFIX, refers_after
+from kosis_chat.shared.patterns import MIN_WORDS, asks_min  # loop 16
 
 # "전국보다", "전국 대비", "전국 평균의 몇 배", "전국에 비해": the label before these is the reference (loop 12: the
 # patterns are shared with the judge, shared/patterns.py).
 _REFERENCE_AFTER = REFERENCE_AFTER
 _OF_PERCENT = OF_PERCENT  # loop 8: "서울의 몇 퍼센트"
-# loop 3: also the adverbs (적게, 작게), 최솟값, and the bottom of a ranking (하위, 아래·밑·뒤에서 세어).
-_MIN_WORDS = re.compile(r"낮|짧|적은|적었|적게|최저|최소|최솟|작은|작았|작게|꼴찌|하위|(?:아래|밑|뒤)에서")
+# loop 3: also the adverbs (적게, 작게), 최솟값, and the bottom of a ranking (하위, 아래·밑·뒤에서 세어). Loop 16: one
+# list in shared/patterns.py (MIN_WORDS, asks_min, read at a word's start beside _COMPARATIVE).
+_MIN_WORDS = MIN_WORDS
 # T1-28 S2b: was r"(?:특별시|광역시|특별자치시|특별자치도|도)$", the same literal suffixes anchored at the end in another
 # order and without the group; is_province only asks whether one matches, which neither changes.
 _PROVINCE = REGION_SUFFIX
@@ -62,8 +64,10 @@ def reference_index(question: str, labels: list[str], between: tuple[str, ...] |
     return None
 
 
-def pick_of(question: str) -> str:
-    return "min" if _MIN_WORDS.search(question) else "max"
+def pick_of(question: str, spaced: str | None = None) -> str:
+    """'min' when the question asks for the smaller end (shared asks_min), else 'max'. spaced: the question as written
+    when question is its squashed rest (the word starts are read there)."""
+    return "min" if asks_min(question, spaced) else "max"
 
 
 def is_province(label: str) -> bool:

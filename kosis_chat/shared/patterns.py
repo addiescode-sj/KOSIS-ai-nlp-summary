@@ -221,6 +221,27 @@ MULTI_DIFF = re.compile(rf"{ASKS_GAP.pattern}|{_COMPARATIVE}")
 ASKS_DIFF = re.compile(rf"비교|보다|대비|{MULTI_DIFF.pattern}")
 MULTI_FEWER = re.compile(r"적(?!어\s*(?:줘|주|봐|달|둬))|낮|작(?!년)|모자|덜")
 
+# The smaller end of a ranking (analyze/roles.py pick_of; loop 3: the adverbs 적게·작게, 최솟값, the bottom of a
+# ranking: 하위, 아래·밑·뒤에서 세어). Loop 16 (moved from analyze/roles.py _MIN_WORDS): a one-syllable stem with its
+# ending (_MIN_STEM_FORMS: 낮은, 적은, 작게, 짧은) also ends nouns ('면적은', '실적은', '성적은'), so it is read only where
+# a word starts or right after a ranking adverb written together with it ("가장적은"), on the question as written.
+_MIN_STEM_FORMS = r"낮|짧|적은|적었|적게|작은|작았|작게"
+MIN_WORDS = re.compile(_MIN_STEM_FORMS + r"|최저|최소|최솟|꼴찌|하위|(?:아래|밑|뒤)에서")
+_MIN_STEM_AT_START = re.compile(rf"(?:(?<![가-힣])|(?<=가장)|(?<=제일)|(?<=더)|(?<=덜))(?:{_MIN_STEM_FORMS})")
+_MIN_STEM = re.compile(rf"^(?:{_MIN_STEM_FORMS})$")
+
+
+def asks_min(text: str, spaced: str | None = None) -> bool:
+    """Loop 16: text (the question, or its squashed rest) asks for the smaller end. spaced: the question as written,
+    where a one-syllable stem form found in text is looked for at a word's start (text itself when None)."""
+    spaced = text if spaced is None else spaced
+    for m in MIN_WORDS.finditer(text):
+        if not _MIN_STEM.match(m.group(0)):
+            return True
+        if any(s.group(0) == m.group(0) for s in _MIN_STEM_AT_START.finditer(spaced)):
+            return True
+    return False
+
 
 # Loop 8. A division said with its verb: the target the particle 로 / 으로 follows ("서울 출생아 수로 나누면", "부산으로
 # 나눈") is the denominator. Read on the squashed question, right after the target's name and the counting words
@@ -238,6 +259,14 @@ OF_PERCENT = re.compile(r"^의몇(?:퍼센트|%|프로)")
 JOIN_AFTER = re.compile(r"^(?:와|과|및|하고|이랑|랑|그리고|또는|,|·)")
 # Loop 12: the subject particles after a name ("서울은", "서울이"), on the squashed question.
 SUBJECT_AFTER = re.compile(r"^(?:은|는|이|가)")
+# The two sexes named as one word ("남녀", "남성과 여성", "남자와 여자", "성별"; was analyze/rules.py _BOTH_SEXES).
+BOTH_SEXES = re.compile(r"남녀|남성과\s*여성|남자와\s*여자|성별")
+# Loop 16 (loop 13's WHOLE_AFTER, kept to the words of the whole and the words that put together): said right after
+# two names named as one word (BOTH_SEXES), on the squashed question, the whole of them is meant ("남녀 전체", "남녀
+# 합계", "남녀를 합친", "남녀 모두 합쳐서", "남녀 통틀어"), not each. 모두 and 전부 alone say both each ("남녀 모두
+# 늘었어"), so they count only before a word that puts together.
+WHOLE_AFTER = re.compile(r"^(?:의|을|를|이|가)?(?:전체|통틀어|도합|합계|합산)"
+                         r"|^(?:을|를|이|가)?(?:모두|전부)?(?:합쳐|합친|합한|합해|합하|더한|더해)")
 
 
 def refers_after(rest: str) -> bool:
@@ -339,6 +368,13 @@ ORDINAL_NAME = re.compile(r"^((?:" + "|".join(sorted(_COUNT_WORDS, key=len, reve
 
 def count_of(word: str) -> int:
     return int(word) if word.isdigit() else _COUNT_WORDS[word]
+
+
+def count_words_of(n: int) -> tuple[str, ...]:
+    """Loop 16: the native Korean number words for n (the count words above: 2 -> '두', '둘'), none for a number they do
+    not hold. Not for 10 and up: '열' starts the numbers after it ('열세', '열두'), so '열 + a counting word' is no
+    reading of a name of 10."""
+    return tuple(w for w, k in _COUNT_WORDS.items() if k == n and k < 10)
 
 
 def rank_places(question: str) -> tuple[str, int] | None:

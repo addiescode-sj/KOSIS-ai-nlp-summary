@@ -114,6 +114,20 @@ def _spans(form: str, q: str) -> list[tuple[int, int]]:
     return out
 
 
+def _match_spans(m, q: str) -> list[tuple[int, int]]:
+    """Loop 16: where the squashed question names a match: its form, or, for a name matched by its parts said apart
+    (Match.parts: '자녀' and '없는' of '자녀-없음'), from each place of its first part to the nearest place of its last
+    part after it."""
+    if m.form in q or not m.parts:
+        return _spans(m.form, q)
+    out = []
+    for a, b in _spans(m.parts[0], q):
+        end = q.find(m.parts[-1], b)
+        if end >= 0:
+            out.append((a, end + len(m.parts[-1])))
+    return out
+
+
 def _stems(label: str) -> set[str]:
     """Shorter names of an item: without a leading 총 ('총인구수' -> '인구수'), and a count item by its stem ('혼인건수' ->
     '혼인', '사망자수' -> '사망', '총인구수' -> '인구'). The stem only for names that end with a count suffix."""
@@ -137,7 +151,7 @@ def _item_spans(index: TableIndex, q: str, question: str) -> dict[str, tuple[lis
     out: dict[str, tuple[list[tuple[int, int]], bool]] = {}
     for m in match_labels(index, question):
         if m.axis == ITEM_AXIS:
-            out.setdefault(m.code, ([], True))[0].extend(_spans(m.form, q))
+            out.setdefault(m.code, ([], True))[0].extend(_match_spans(m, q))
     if out:
         return out
     for code, label in index.axes[ITEM_AXIS].labels.items():

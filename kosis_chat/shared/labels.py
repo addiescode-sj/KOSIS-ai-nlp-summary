@@ -45,6 +45,21 @@ LABEL_ALIASES.update(FAMILY_ROLES)
 # thing ('취업자', '귀농인') is also said by its stem with one of them (judge/question.py doing_forms).
 DOING_ENDINGS = ("한", "하는", "하던", "했던")
 
+# Loop 16: a predicate named in its noun form, a stem ending with a consonant and the noun ending 음 ('없음', '있음'),
+# is also said by the stem with a describing, an adverb or a joining ending ('없는', '없던', '없이', '없고'):
+# predicate_forms.
+NOUN_FORM_ENDING = "음"
+PREDICATE_ENDINGS = ("는", "던", "었던", "었는", "이", "고", "어서")
+
+
+def predicate_forms(word: str) -> tuple[str, ...]:
+    """Loop 16: the other forms of a predicate named in its noun form ('없음' -> '없는', '없이', ...), none for
+    another word (no 음 at its end, or a stem that is not Hangul)."""
+    stem = word[: -len(NOUN_FORM_ENDING)]
+    if not word.endswith(NOUN_FORM_ENDING) or len(stem) < 1 or not re.fullmatch(r"[가-힣]+", stem):
+        return ()
+    return tuple(stem + e for e in PREDICATE_ENDINGS)
+
 # Loop 15: a category of nations, read on its name ('아내 국적별', '국가별', '출신 나라별'), and a word for a nation or
 # its people in a category's name or a table's title ('한국인', '한국', '한국인과의'): group 1 the nation. The words
 # for the nations other than one ('외국인', '타국') name no nation.
