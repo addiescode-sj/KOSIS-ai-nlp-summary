@@ -37,16 +37,20 @@ def _refers(rest: str, q: str) -> bool:
     return refers_after(rest)
 
 
-def reference_index(question: str, labels: list[str], between: tuple[str, ...] | list[str] = ()) -> int | None:
+def reference_index(question: str, labels: list[str], between: tuple[str, ...] | list[str] = (),
+                    said: list[tuple[str, ...]] | None = None) -> int | None:
     """Index of the label the question compares against, or None when it only names both ('서울이랑 경기도').
 
     Loop 8: also the label a division names as its divisor (shared DIVISOR_AFTER, DIVIDE), and either after the other
-    names and the counting words between the label and the word (_skip_names: "서울 출생아 수로 나누면")."""
+    names and the counting words between the label and the word (_skip_names: "서울 출생아 수로 나누면").
+    Loop 14: said, for each label, the forms the question named it by (Match.form: '중학생' for '중학교'), looked for
+    beside the label's own forms."""
     q = squash(question)
     between = tuple(between)
     for skip in (False, True):
         for i, label in enumerate(labels):
             exact, _, _ = label_forms(label, regional_total=True)
+            exact = exact | set(said[i] if said and i < len(said) else ())
             for form in sorted(exact, key=len, reverse=True):
                 at = q.find(form)
                 while at >= 0:

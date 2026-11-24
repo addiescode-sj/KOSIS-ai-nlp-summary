@@ -118,7 +118,8 @@ TOTAL_AMOUNT = re.compile(r"(?:모두|전부|통틀어|도합|총)\s*(?:해서|�
 
 # Two categories of one table that hold the same names in two roles (loop 5): where a flow starts and where it ends
 # (전출지별 × 전입지별, 출발지 × 도착지, 출신지 × 거주지). The role of a category, read on its name:
-ORIGIN_AXIS = re.compile(r"전출|출발|출신|유출|송출|발송|이전\s*전")
+# Loop 14: also where people were born or grew up, the place they came from (출생지, 태생지, 성장지).
+ORIGIN_AXIS = re.compile(r"전출|출발|출신|유출|송출|발송|이전\s*전|출생|태생|성장")
 DEST_AXIS = re.compile(r"전입|도착|목적|유입|수신|행선|거주|이전\s*후")
 # The role of a name the question gives (on the squashed question, right after the name): a particle of a start
 # (에서, 부터, 로부터) or of an end (으로, 로, 에, 까지), or, after a subject or object particle, a word of leaving
@@ -140,7 +141,8 @@ VISIT_AXIS = re.compile(r"통근|통학|종사지|근무지|직장|등교|방문
 # verb decides; with no such verb the particle does (ORIGIN_AFTER, DEST_AFTER).
 _ROLE_PARTICLE = r"^(?:에서|에|으로|로|을|를|이|가|의|은|는)?"
 ROLE_VERBS = {
-    "leave": re.compile(_ROLE_PARTICLE + r"(?:떠나|떠난|나간|나가|빠져나|유출|전출|출발|출신)"),
+    # loop 14: also being born or growing up there (the place people came from: 태어난, 출생한, 자란, 성장한)
+    "leave": re.compile(_ROLE_PARTICLE + r"(?:떠나|떠난|나간|나가|빠져나|유출|전출|출발|출신|태어나|태어난|태생|출생|자란|자라|성장)"),
     "arrive": re.compile(_ROLE_PARTICLE + r"(?:들어오|들어온|들어간|들어가|옮겨온|옮겨간|유입|전입|도착)"),
     "stay": re.compile(_ROLE_PARTICLE + r"(?:사는|살고|살면서|살며|살던|산다|거주|머무|머문|머물|상주)"),
     "visit": re.compile(_ROLE_PARTICLE + r"(?:통근|출근|통학|등교|다니|다닌|다녀|오가|오간|오고가|일하|근무|방문)"),

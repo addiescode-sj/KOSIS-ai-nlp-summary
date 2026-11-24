@@ -30,6 +30,21 @@ LABEL_ALIASES = {
 }
 
 
+# Loop 14: the tail of a name of a place people attend, and the word for the people who attend it: a name ending
+# with the tail is also said by its members ('중학교' as '중학생', '대학교' as '대학생', '대학원' as '대학원생'). The
+# last character of the member tail is the person suffix of the three-character shortenings ('남고생': a sex, the
+# first character of the name, the suffix). Longest tail first.
+MEMBER_TAILS = (
+    ("대학원", "대학원생"),
+    ("유치원", "유치원생"),
+    ("학교", "학생"),
+    ("대학", "대학생"),
+    ("학원", "학원생"),
+)
+# Loop 14: names of the two sexes; their first character is put before a noun for people ('남학생', '여고생').
+SEX_NAMES = ("남자", "여자", "남성", "여성", "남", "여")
+
+
 def squash(text: str) -> str:
     return re.sub(r"\s+", "", text or "")
 
@@ -42,6 +57,20 @@ _JOINS = ("-", "~", "∼")
 _FROM_TO = ("에서", "부터")
 # The halves of a ten-year group ("20대 초반" = 20-24, "30대 후반" = 35-39): the first half's words and the second's.
 HALF_OF_TEN = {"초반": 0, "전반": 0, "후반": 5}
+
+
+def interval_bounds(core: str) -> tuple[int, int, str] | None:
+    """Loop 14: (low, high, counting word) of an interval name with nothing before or after it ('20-24세', '20 - 24세'
+    -> (20, 24, '세')), None for another name. The one reading of an interval's bounds interval_forms uses too."""
+    m = _INTERVAL.match(squash(core))
+    if m is None or m.group(1) or m.group(5):
+        return None
+    return int(m.group(2)), int(m.group(3)), m.group(4)
+
+
+# Loop 14: a ten group said as one word ('20대', '30 대'): not a decade of years ('2010년대'), not a half of one ('20대
+# 초반', an interval name's form above), not a part of a larger number.
+TEN_GROUP = re.compile(r"(?<![\d.])([1-9]0)\s*대(?!\s*(?:초반|전반|중반|후반))")
 
 
 def interval_forms(core: str) -> set[str]:

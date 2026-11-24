@@ -42,6 +42,7 @@ from kosis_chat.prepare.index import (  # noqa: E402, F401
 # T1-28 S2b: label helpers and the patterns two stages share moved to kosis_chat/shared/ (old names are aliases).
 # LABEL_ALIASES was read from data/scope.py (the judge importing the B0 scope module).
 from kosis_chat.shared.labels import LABEL_ALIASES, interval_forms, squash  # noqa: E402
+from kosis_chat.shared.labels import MEMBER_TAILS, SEX_NAMES  # noqa: E402  # loop 14
 from kosis_chat.shared.patterns import COHORT, PAREN, RECENT_N, REGION_SUFFIX, YEAR, YEAR_RANGE, YEAR_SINCE  # noqa: E402
 from kosis_chat.shared.patterns import PREVIOUS_MONTH, PREVIOUS_SAME_MONTH, PREVIOUS_YEAR  # noqa: E402  # loop 5
 from kosis_chat.shared.patterns import COUNT_STEM_SUFFIX, TOTAL_PREFIX  # noqa: E402  # loop 12
@@ -437,11 +438,83 @@ def group_parts_of(index: TableIndex) -> dict[str, dict[str, tuple[str, str]]]:
     return build() if caches is None else caches.get("judge.group_parts", build)
 
 
+def member_forms(index: TableIndex) -> tuple[dict[tuple[str, str], tuple[str, ...]], str]:
+    """Loop 14: ((axis, code) -> the words a question says a name by through the people it is about, the sex
+    initials of the table).
+
+    - A name ending with a tail of a place people attend (shared MEMBER_TAILS) by its members: '중학교' -> '중학생'.
+    - A name of a sex (shared SEX_NAMES) by its first character before a noun for those members, the member word of
+      a name of the table or the member tail alone: '남학생', '여중학생'.
+    - Both at once, by a sex's first character, the name's first character and the member tail's last character:
+      '남고생' for '남자' and '고등학교'.
+    A word two names of the table give is neither's; a word holding the exact form of another name of the table is
+    that name's (the shorter name keeps it as before: '대학생' stays '대학' when the table has '대학')."""
+    def build():
+        places: list[tuple[str, str, str, str, str]] = []  # (axis, code, core, member word, member tail)
+        sexes: list[tuple[str, str, str]] = []  # (axis, code, initial)
+        exact_all: dict[str, set[tuple[str, str]]] = {}
+        for axis in index.axes.values():
+            for code, label in axis.labels.items():
+                for form in label_forms(label)[0]:
+                    if len(form) >= 2:
+                        exact_all.setdefault(form, set()).add((axis.name, code))
+                if is_total(label):
+                    continue
+                core = squash(PAREN.sub(" ", _core(label)).split(" - ")[0])
+                if core in SEX_NAMES:
+                    sexes.append((axis.name, code, core[0]))
+                    continue
+                tail = next(((t, m) for t, m in MEMBER_TAILS if core.endswith(t)), None)
+                if tail and _HANGUL.fullmatch(core):
+                    places.append((axis.name, code, core, core[: -len(tail[0])] + tail[1], tail[1]))
+        given: dict[str, set[tuple[str, str]]] = {}
+        nouns = {member for *_, member, _ in places} | {tail for *_, tail in places}
+        for name, code, core, member, tail in places:
+            if core not in member:
+                given.setdefault(member, set()).add((name, code))
+        for name, code, initial in sexes:
+            for noun in nouns:
+                given.setdefault(initial + noun, set()).add((name, code))
+        for name, code, core, member, tail in places:
+            for s_name, s_code, initial in sexes:
+                short = initial + core[0] + tail[-1]
+                given.setdefault(short, set()).update({(name, code), (s_name, s_code)})
+        out: dict[tuple[str, str], list[str]] = {}
+        for form, owners in given.items():
+            by_axis: dict[str, set[str]] = {}
+            for a, c in owners:
+                by_axis.setdefault(a, set()).add(c)
+            if any(len(codes) > 1 for codes in by_axis.values()):
+                continue  # two names of one category give the word
+            if any(f in form and not (exact_all[f] <= owners) for f in exact_all):
+                continue  # another name of the table is in the word
+            for owner in owners:
+                out.setdefault(owner, []).append(form)
+        return {k: tuple(sorted(v, key=len, reverse=True)) for k, v in out.items()}, "".join(i for *_, i in sexes)
+
+    caches = getattr(index.table, "caches", None)
+    return build() if caches is None else caches.get("judge.member_forms", build)
+
+
+def _said_alone(form: str, question: str, before: str) -> bool:
+    """Loop 14: the question says form as a word of its own (spaces allowed inside): no Hangul right before it but a
+    sex initial (before) that starts the word ('남중학생'). Not '전남학생' (전남 + 학생)."""
+    pattern = r"\s*".join(re.escape(ch) for ch in form)
+    for m in re.finditer(pattern, question):
+        at = m.start()
+        if at == 0 or not re.match(r"[가-힣]", question[at - 1]):
+            return True
+        if question[at - 1] in before and (at == 1 or not re.match(r"[가-힣]", question[at - 2])):
+            return True
+    return False
+
+
 def match_labels(index: TableIndex, question: str) -> list[Match]:
     q = squash(question)
     spans = name_spans(index, question)
     found: list[Match] = []
     splits = group_parts_of(index)
+    members, initials = member_forms(index)
     for axis in index.axes.values():
         split = splits.get(axis.name, {})
         for code, label in axis.labels.items():
@@ -462,6 +535,12 @@ def match_labels(index: TableIndex, question: str) -> list[Match]:
             hit = hit or next((f for f in partial if seen(f)), None)
             if hit:
                 found.append(Match(axis.name, code, label, hit, False))
+                continue
+            # loop 14: a name said through its members ('중학생', '남학생', '남고생': member_forms)
+            hit = next((f for f in members.get((axis.name, code), ())
+                        if f in q and _outside_names(f, q, spans) and _said_alone(f, question, initials)), None)
+            if hit:
+                found.append(Match(axis.name, code, label, hit, True))
                 continue
             # loop 7: a group and an attribute said apart ("귀농인 중 여자", "귀농인 여성"); an attribute is also said
             # by its other names (LABEL_ALIASES)
