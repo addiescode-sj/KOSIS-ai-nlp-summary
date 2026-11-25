@@ -68,7 +68,7 @@ def test_answer_is_summarize_stat_on_the_same_table(workspace, frame, mock_llm):
 
 def test_output_carries_the_chart_and_the_spans(workspace, frame, mock_llm):
     out = module(mock_llm).answer(StatInput(question=AVERAGE, tables=[ParquetTable(frame=frame)]))
-    assert isinstance(out.chart, ChartSpec) and out.chart.kind == "timeline" and out.chart.vega_lite is None
+    assert isinstance(out.chart, ChartSpec) and out.chart.kind == "line" and out.chart.vega_lite is None  # T1-32: an average over periods is a line
     assert "chart" not in out.answer.model_dump() and "chart" not in json.loads(out.model_dump_json())["answer"]
     assert set(out.chart.fact_ids) <= {f.id for f in out.answer.result.facts}
     assert to_vega(out.chart)["data"]["values"]  # Vega-Lite on demand
