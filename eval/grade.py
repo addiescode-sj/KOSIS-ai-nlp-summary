@@ -82,6 +82,19 @@ def _strip_period(ref: str) -> str:
     return ref.rsplit("|", 1)[0]
 
 
+_TWO_TERM_DIFF = re.compile(r"f\d+ - f\d+")
+
+
+def _recomputes(expected: float | None, fact) -> bool:
+    """A derived fact recomputed from the shown values. A %p difference of two percents (T1-33, loop 9) is taken of
+    the percents before rounding, so the difference of the two rounded values may be one last digit off (each
+    rounding moves a value by up to half of one): one digit is allowed there, half of one elsewhere."""
+    if (expected is not None and fact.value is not None and fact.round is not None and fact.unit == "%p"
+            and _TWO_TERM_DIFF.fullmatch(fact.derivation or "")):
+        return abs(expected - fact.value) <= 10 ** -fact.round + 1e-12
+    return _close(expected, fact.value, fact.round)
+
+
 def _close(expected: float | None, actual: float | None, digits: int | None) -> bool:
     if expected is None or actual is None:
         return expected is actual
@@ -146,7 +159,7 @@ def count_unsupported(answer: StatAnswer, cells: dict[str, Cell], details: list[
             except (KeyError, ValueError, ZeroDivisionError, SyntaxError) as exc:
                 expected = None
                 details.append(f"unsupported {f.id}: cannot recompute {f.derivation!r} ({exc})")
-            if not _close(expected, f.value, f.round):
+            if not _recomputes(expected, f):
                 count += 1
                 if expected is not None:
                     details.append(f"unsupported {f.id}: {f.derivation} = {expected}, answer says {f.value}")

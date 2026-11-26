@@ -1,5 +1,7 @@
 """v3 plans (T0-04): the PlanV3 contract, the plan engine's blocks, and the plans the rules build (build.py)."""
 
+import re
+
 import pytest
 from pydantic import ValidationError
 
@@ -35,7 +37,9 @@ def recomputes(facts):
     by_id = {f.id: f.value for f in facts if f.value is not None}
     for f in facts:
         if f.derivation:
-            assert abs(round(evaluate(f.derivation, by_id), f.round) - f.value) < 1e-9, f
+            # a %p difference is of the percents before rounding (loop 9): one last digit off is allowed
+            tol = 10 ** -f.round if f.unit == "%p" and re.fullmatch(r"f\d+ - f\d+", f.derivation) else 0
+            assert abs(round(evaluate(f.derivation, by_id), f.round) - f.value) <= tol + 1e-9, f
     return True
 
 

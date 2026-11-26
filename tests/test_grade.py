@@ -263,3 +263,16 @@ def test_golden_injected_errors_are_all_caught():
         total += 1
         caught += g.verdict == "FAIL" and expect in g.error_types
     assert caught == total == len(items)
+
+
+def test_a_percent_point_difference_may_be_one_last_digit_off_its_rounded_inputs():
+    """T1-33 (loop 9): a %p difference is of the percents before rounding: 10.004% and 7.996%, shown 10.00 and 8.00,
+    give 2.01%p against 2.00 recomputed. One last digit is allowed for a %p difference only."""
+    from eval.grade import _recomputes
+
+    gap = Fact(id="f3", value=2.01, unit="%p", derivation="f1 - f2", round=2)
+    assert _recomputes(2.00, gap)
+    assert not _recomputes(1.99 - 0.001, gap)
+    other = Fact(id="f3", value=2.01, unit="명", derivation="f1 - f2", round=2)
+    assert not _recomputes(2.00, other)
+    assert _recomputes(2.01, other)
