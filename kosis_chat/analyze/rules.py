@@ -341,10 +341,61 @@ def _excluded(question: str, index: TableIndex, codes: dict[str, list[str]], per
     return found
 
 
+def _drop_match(codes: dict[str, list[str]], m: Match) -> None:
+    kept = [c for c in codes.get(m.axis, []) if c != m.code]
+    if kept:
+        codes[m.axis] = kept
+    else:
+        codes.pop(m.axis, None)
+
+
+def _one_word_one_axis(matches: list[Match], codes: dict[str, list[str]]) -> None:
+    """One question word picks a code on one category only (T3-51).
+
+    '이혼사유 미상' matches the item '미상' and the age '미상': the item keeps it and the age goes back to its total.
+    A word two categories other than the item share is left as it is: a flow names one place in a start and an end
+    category ("서울로 전입한 사람 중 부산에서 온"), which the flow rules read."""
+    axes: dict[str, set[str]] = {}
+    for m in matches:
+        axes.setdefault(m.form, set()).add(m.axis)
+    shared = {form for form, names in axes.items() if ITEM_AXIS in names and len(names) > 1}
+    for m in matches:
+        if m.form in shared and m.axis != ITEM_AXIS:
+            _drop_match(codes, m)
+
+
+_NAME_PIECES = re.compile(r"[-()\[\]/·,]")
+
+
+def _names_the_table(index: TableIndex, matches: list[Match], codes: dict[str, list[str]]) -> list[str]:
+    """A category word that is in the table's or the survey's name usually names the whole table (T3-51).
+
+    '사할린동포 생활비' on a survey of Sakhalin Koreans is not the 특성별 '사할린' row; '취득한 자 중 기타' on the table
+    '한국국적을 취득한 자-기타(계)' is not the nationality '기타'. Such a category is left to the model (the returned
+    unresolved entries, which also tell it why); the item column is not, as item names are often in the table name.
+    Counted: a word of 3+ letters inside either name, or a word that is a whole piece of the table name ('-기타')."""
+    meta = index.table.meta
+    names = [squash(meta.tbl_nm or ""), squash(meta.survey_nm or "")]
+    pieces = {squash(p) for p in _NAME_PIECES.split(meta.tbl_nm or "") if p.strip()}
+    out: list[str] = []
+    for m in matches:
+        if m.axis == ITEM_AXIS or m.code not in codes.get(m.axis, []) or not index.axes[m.axis].has_total:
+            continue
+        if (len(m.form) >= 3 and any(m.form in n for n in names)) or m.form in pieces:
+            _drop_match(codes, m)
+            total = _total(index, m.axis)
+            out.append(f"{m.axis}: 질문 낱말 '{m.form}'은(는) 표 이름·조사명({meta.tbl_nm} / {meta.survey_nm})에 있어 "
+                       f"표 전체를 가리킬 수 있음. 그렇다면 합계 {total}={index.axes[m.axis].labels[total].strip()}, "
+                       f"'{m.form}' 칸을 따로 물은 것이면 {m.code}={m.label.strip()}")
+    return list(dict.fromkeys(out))
+
+
 def rule_plan(question: str, index: TableIndex, default_applied: dict[str, str] | None = None) -> Plan:
     parsed = parse(index, question)
     resolved = resolve(index, parsed)
     codes = {name: _order_in_question(question, index, name, sorted(cs)) for name, cs in resolved.codes.items()}
+    _one_word_one_axis(parsed.matches, codes)
+    left_open = _names_the_table(index, parsed.matches, codes)
     if found := _number_range(question, index):
         codes[found[0]] = found[1]
     _both_sexes(question, index, codes)
@@ -372,6 +423,7 @@ def rule_plan(question: str, index: TableIndex, default_applied: dict[str, str] 
     periods, missing = _periods(p, index, default, months, years_step(question))
     plan = Plan(question, kind, codes, periods, missing_years=missing, default_applied=default,
                 events=list(parsed.periods.events), pairs=pairs, pair_reference=pair_reference)
+    plan.unresolved += left_open
     plan.pattern, plan.groups = _operation(question, parsed.rest, parsed.periods, index, kind, months)
     if (kind in ("value", "compare") and (plan.pattern is None or (plan.pattern == "sum" and not plan.groups))
             and _excluded(question, index, codes, periods)):
