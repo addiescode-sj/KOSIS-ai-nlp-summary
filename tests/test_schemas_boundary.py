@@ -42,7 +42,7 @@ MODELS = (
     (analyze_schemas, "Plan", "kosis_chat.compute.analyze",
      {"question": _REQUIRED, "type": _REQUIRED, "codes": _REQUIRED, "periods": _REQUIRED, "over": None, "pick": None,
       "missing_years": [], "default_applied": {}, "unresolved": [], "pattern": None, "groups": [], "events": [],
-      "pairs": [], "pair_reference": None}, False),
+      "pairs": [], "pair_reference": None, "candidates": []}, False),
     (analyze_schemas, "TermSteps", "kosis_chat.compute.build",
      {"cells": _REQUIRED, "value": _REQUIRED, "total": None, "agg": None, "periods": ("", "")}, True),
     (analyze_schemas, "Built", "kosis_chat.compute.build",

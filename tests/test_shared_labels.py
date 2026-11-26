@@ -61,7 +61,7 @@ def test_fact_label(dims, skip_totals, expected):
 
 def test_aliases_and_old_names():
     assert LABEL_ALIASES["전북특별자치도"] == ("전북", "전라북도")
-    assert len(LABEL_ALIASES) == 10
+    assert len(LABEL_ALIASES) == 14  # loop 14: the family roles (FAMILY_ROLES) added
     assert question.LABEL_ALIASES is scope.LABEL_ALIASES is LABEL_ALIASES
     assert question.squash is scope._squash is squash
     assert render.item_label is item_label and render.fact_label is fact_label

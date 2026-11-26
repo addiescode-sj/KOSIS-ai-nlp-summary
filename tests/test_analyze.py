@@ -201,7 +201,8 @@ def test_share_of_a_sub_region_uses_its_parent(table, index):
     _, built = analyze("2023년 서울특별시 일반가구 중 종로구 가구 비중은?", table, index)
     assert cells(built, "p") == [ref("T0", "11010", "2023")] and cells(built, "t") == [ref("T0", "11", "2023")]
     _, built = analyze("2023년 일반가구 중 종로구 가구 비중은?", table, index)
-    assert cells(built, "t") == [ref("T0", "11", "2023")]  # the parent even when the question does not name it
+    # loop 12 C-4: the whole the question names before '중' (the table's own noun) is the denominator, not the parent
+    assert cells(built, "t") == [ref("T0", "00", "2023")]
     _, built = analyze("2023년 일반가구 중 서울특별시 가구 비중은?", table, index)
     assert cells(built, "t") == [ref("T0", "00", "2023")]  # a province has no parent: the total
 
