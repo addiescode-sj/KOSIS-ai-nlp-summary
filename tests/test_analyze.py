@@ -290,3 +290,36 @@ def test_a_share_word_inside_a_named_label_is_not_a_share_question(structure):
     assert plan.type == "trend" and plan.codes["인구구조별"] == ["33"]  # %p keeps the code measured in %
     diff = next(f for f in compute(table, built).result.facts if f.derivation and "-" in f.derivation)
     assert (diff.value, diff.unit) == (pytest.approx(10.5), "%p")
+
+
+def _two_axis_table(tmp_path, tbl_id, items, dim, catalog):
+    """One year, items x one category (code, label) pairs, every value 1."""
+    rows = [{"period": "2024", "item_id": ic, "item_name": il, "unit": "건", "dim1_name": dim[0], "dim1_code": dc,
+             "dim1_label": dl, "value_raw": "1", "value": 1.0} for ic, il in items for dc, dl in dim[1]]
+    table = clean(load_table(write_table(tmp_path / "data", tbl_id, rows, catalog)))
+    return table, build_index(table)
+
+
+def test_one_question_word_picks_a_code_on_the_item_only(tmp_path):
+    """T3-51: '이혼사유 미상' is the item '미상', not also the age '미상' (the age goes back to its total)."""
+    table, index = _two_axis_table(
+        tmp_path, "FAKE_DIV", [("T0", "계"), ("T19", "미상")], ("연령별", [("00", "계"), ("95", "미상")]),
+        {"survey_name": "가상 동향", "organization": "가상 기관", "table_name": "가상 이혼사유별 이혼", "period": "년",
+         "url": "https://example.invalid/div"})
+    plan, built = analyze("2024년 이혼사유 미상 이혼은 몇 건이야?", table, index)
+    assert plan.codes == {"항목": ["T19"]} and not plan.unresolved
+    assert cells(built) == ["FAKE_DIV|T19|00|2024"]
+
+
+def test_a_category_word_in_the_survey_name_is_left_to_the_model(tmp_path):
+    """T3-51: on a survey of Sakhalin Koreans, '사할린동포' names the table, not the 특성별 row '사할린'."""
+    table, index = _two_axis_table(
+        tmp_path, "FAKE_SKH", [("T001", "비율")], ("특성별", [("00", "전체"), ("03001", "사할린"), ("03002", "러시아")]),
+        {"survey_name": "가상 영주귀국사할린동포실태조사", "organization": "가상 기관", "table_name": "가상 생활비",
+         "period": "년", "url": "https://example.invalid/skh"})
+    plan = rule_plan("2024년 사할린 동포 비율은?", index)
+    assert "특성별" not in plan.codes and plan.unresolved and plan.unresolved[0].startswith("특성별:")
+    with pytest.raises(Unresolved):
+        build_plan(plan, index, table)
+    # a category word that is in neither name still picks its code
+    assert rule_plan("2024년 러시아 출신 비율은?", index).codes.get("특성별") == ["03002"]
