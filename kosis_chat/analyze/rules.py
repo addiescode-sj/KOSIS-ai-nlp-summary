@@ -532,18 +532,29 @@ def _drop_match(codes: dict[str, list[str]], m: Match) -> None:
         codes.pop(m.axis, None)
 
 
-def _one_word_one_axis(matches: list[Match], codes: dict[str, list[str]]) -> None:
+def _one_word_one_axis(index: TableIndex, matches: list[Match], codes: dict[str, list[str]]) -> None:
     """One question word picks a code on one category only (T3-51).
 
     '이혼사유 미상' matches the item '미상' and the age '미상': the item keeps it and the age goes back to its total.
     A word two categories other than the item share is left as it is: a flow names one place in a start and an end
-    category ("서울로 전입한 사람 중 부산에서 온"), which the flow rules read."""
-    axes: dict[str, set[str]] = {}
+    category ("서울로 전입한 사람 중 부산에서 온"), which the flow rules read.
+    T1-33 merge, two more left as they are: the item and a category that are a pair of places (loop 14 _twin_axes:
+    '서울' is a place of birth in the items and a place lived in the regions, which the flow rules read), and a word
+    that names two things at once, a member noun (loop 14: '남중생' is the item '중학교' and the sex '남자'): the word
+    is inside the item's label but not the other's, or the other way round. Only a word inside both labels ('미상')
+    is one name said once."""
+    twins = _twin_axes(index)
+    item_labels: dict[str, set[str]] = {}
     for m in matches:
-        axes.setdefault(m.form, set()).add(m.axis)
-    shared = {form for form, names in axes.items() if ITEM_AXIS in names and len(names) > 1}
+        if m.axis == ITEM_AXIS:
+            item_labels.setdefault(m.form, set()).add(squash(m.label))
     for m in matches:
-        if m.form in shared and m.axis != ITEM_AXIS:
+        if m.axis == ITEM_AXIS or m.form not in item_labels:
+            continue
+        if twins is not None and ITEM_AXIS in twins and m.axis in twins:
+            continue
+        form = squash(m.form)
+        if form in squash(m.label) and any(form in label for label in item_labels[m.form]):
             _drop_match(codes, m)
 
 
@@ -577,7 +588,7 @@ def rule_plan(question: str, index: TableIndex, default_applied: dict[str, str] 
     parsed = parse(index, question)
     resolved = resolve(index, parsed)
     codes = {name: _order_in_question(question, index, name, sorted(cs)) for name, cs in resolved.codes.items()}
-    _one_word_one_axis(parsed.matches, codes)
+    _one_word_one_axis(index, parsed.matches, codes)
     left_open = _names_the_table(index, parsed.matches, codes)
     ranged = None
     if found := _number_range(question, index):
@@ -607,6 +618,9 @@ def rule_plan(question: str, index: TableIndex, default_applied: dict[str, str] 
             else:
                 codes.pop(side, None)
         pairs, pair_reference = found[1], found[2]
+        # T1-33 merge: _flows reads every name of the pair with its role (a name without one returns None), so a name
+        # of the table's name (_names_the_table) given a role here is the place asked: its note is not left open
+        left_open = [u for u in left_open if u.split(":")[0] not in found[0]]
         kind = _question_type(question, parsed.periods, codes, parsed.matches, parsed.rest, between)
         if pairs and kind not in ("share", "extreme"):
             kind = "compare"  # two flows: compared (blocks.compare reads the difference or the ratio asked)
