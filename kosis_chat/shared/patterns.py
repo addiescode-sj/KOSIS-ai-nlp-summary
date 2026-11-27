@@ -105,15 +105,26 @@ RATE_OF_CHANGE = re.compile(rf"증가율|감소율|증감률|증감율|변화율
 # A change asked at all (an amount unless RATE_OF_CHANGE says a rate): the verb forms above, the noun 증감 and the
 # verbs of a change with no direction (변했다, 변화, 달라졌다, 바뀌었다).
 CHANGE_ASKED = re.compile(CHANGE_WORDS.pattern + r"|증감(?![률율])|변했|변화(?!율)|달라졌|바뀌었|" + RATE_OF_CHANGE.pattern)
+# How a gap between two values changed between two periods ("격차가 벌어졌어", "차이는 얼마나 변했어"): the gap nouns
+# and the change words read with them. Loop 18: moved from analyze/rules.py (_GAP_WORDS, _GAP_CHANGE: one table's two
+# targets at two periods) so the multi-table rules read the same words (a gap between two tables at two periods).
+GAP_WORDS = re.compile(r"격차|차이")
+GAP_CHANGE = re.compile(r"변했|변화|벌어|좁혀|줄어|늘어|커졌|작아|달라|줄었|늘었")
 # Loop 5 (compute/answer_facts.py, which of a change and a rate of change a trend answer keeps): a percent asked
 # (퍼센트, %, 프로; not a percent point), and an amount asked: 몇 + a counting word ("몇 명", "몇 건", "몇 가구", "몇 세";
 # not 몇 퍼센트, 몇 배, 몇 년, 몇 월, 몇 위) or a percent point (%p, 퍼센트 포인트).
 PERCENT = re.compile(r"퍼센트(?!\s*포인트)|%(?!\s*(?:p|포인트))|프로(?!그|젝)")
-ASKS_AMOUNT = re.compile(r"몇\s*(?!퍼센트|프로|배|번|위|등|년|개월|월|분기|시)[가-힣]|%\s*p|퍼센트\s*포인트|%\s*포인트")
+_HOW_MANY = r"몇\s*(?!퍼센트|프로|배|번|위|등|년|개월|월|분기|시)[가-힣]"  # 몇 + a counting word (몇 명, 몇 건, 몇 가구)
+ASKS_AMOUNT = re.compile(_HOW_MANY + r"|%\s*p|퍼센트\s*포인트|%\s*포인트")
+# Loop 9: a word of the whole (모두, 전부, 총, 통틀어, 도합; the adverbs judge TOTAL_WORDS reads and their kin) right
+# before 몇 + a counting word ("모두 몇 명", "전부 합해서 몇 건", "총 몇 가구"): the amount of the targets together. A
+# word of the whole before a request ("모두 알려줘") lists the values and is not this.
+TOTAL_AMOUNT = re.compile(r"(?:모두|전부|통틀어|도합|총)\s*(?:해서|합해서|합쳐서|더해서)?\s*" + _HOW_MANY)
 
 # Two categories of one table that hold the same names in two roles (loop 5): where a flow starts and where it ends
 # (전출지별 × 전입지별, 출발지 × 도착지, 출신지 × 거주지). The role of a category, read on its name:
-ORIGIN_AXIS = re.compile(r"전출|출발|출신|유출|송출|발송|이전\s*전")
+# Loop 14: also where people were born or grew up, the place they came from (출생지, 태생지, 성장지).
+ORIGIN_AXIS = re.compile(r"전출|출발|출신|유출|송출|발송|이전\s*전|출생|태생|성장")
 DEST_AXIS = re.compile(r"전입|도착|목적|유입|수신|행선|거주|이전\s*후")
 # The role of a name the question gives (on the squashed question, right after the name): a particle of a start
 # (에서, 부터, 로부터) or of an end (으로, 로, 에, 까지), or, after a subject or object particle, a word of leaving
@@ -124,6 +135,29 @@ DEST_AFTER = re.compile(r"^(?:으로|로|에|까지)(?!서)"
                         r"|^(?:을|를|이|가|의|은|는)?(?:들어오|들어온|들어간|들어가|옮겨온|옮겨간|유입|전입|도착)")
 # A second flow named only as the first one turned around: "그 반대", "반대로", "거꾸로", "역방향", "역으로".
 REVERSE = re.compile(r"반대|거꾸로|역방향|역으로")
+# Loop 12: the roles a category of places plays, read on its name, as four kinds: where a flow leaves (ORIGIN_AXIS),
+# where it arrives (DEST_AXIS), where people stay (거주지, 상주지, 주소지) and where they go to and from each day
+# (통근지, 통학지, 종사지, 근무지, 직장). A pair is read in the pair: the place people stay is the end of a flow of
+# moving (출신지 × 거주지) and the start of a flow of going to and from (상주지 × 통근통학지).
+STAY_AXIS = re.compile(r"거주|상주|주소")
+VISIT_AXIS = re.compile(r"통근|통학|종사지|근무지|직장|등교|방문지")
+# Loop 12: the verb after a name and its particle that says which of those roles the name plays ("서울에 사는", "부산에
+# 거주하는", "서울로 통근하는", "인천에서 출근하는" is a stay only by its particle: the verb is of going). The kind of the
+# verb decides; with no such verb the particle does (ORIGIN_AFTER, DEST_AFTER).
+_ROLE_PARTICLE = r"^(?:에서|에|으로|로|을|를|이|가|의|은|는)?"
+ROLE_VERBS = {
+    # loop 14: also being born or growing up there (the place people came from: 태어난, 출생한, 자란, 성장한)
+    "leave": re.compile(_ROLE_PARTICLE + r"(?:떠나|떠난|나간|나가|빠져나|유출|전출|출발|출신|태어나|태어난|태생|출생|자란|자라|성장)"),
+    "arrive": re.compile(_ROLE_PARTICLE + r"(?:들어오|들어온|들어간|들어가|옮겨온|옮겨간|유입|전입|도착)"),
+    "stay": re.compile(_ROLE_PARTICLE + r"(?:사는|살고|살면서|살며|살던|산다|거주|머무|머문|머물|상주)"),
+    "visit": re.compile(_ROLE_PARTICLE + r"(?:통근|출근|통학|등교|다니|다닌|다녀|오가|오간|오고가|일하|근무|방문)"),
+}
+ROLE_AXES = {"leave": ORIGIN_AXIS, "arrive": DEST_AXIS, "stay": STAY_AXIS, "visit": VISIT_AXIS}
+
+
+def role_kind(after: str) -> str | None:
+    """Loop 12: the kind of role (ROLE_VERBS) the verb right after a name and its particle says, or None."""
+    return next((kind for kind, verb in ROLE_VERBS.items() if verb.match(after)), None)
 
 # Years asked at a regular interval: "2년 간격으로", "5년마다", "3년 주기로", "5년 단위로", "격년으로" (loop 4).
 # Group 1 the number of years (none: 격년, every other year).
@@ -163,6 +197,23 @@ MULTI_WHOLE_AFTER = re.compile(r"^(?:은|는|이|가)?(?:중|가운데|대비|�
 # their own (not 중구, 중학교). The group is a share's whole and a ranking's pool (its members are the candidates).
 WITHIN_AFTER = re.compile(r"^\s*(?:은|는|이|가)?\s*(?:(?:중|가운데)(?:에서|에|의)?(?![가-힣])|(?:안|내)(?:에서|의)(?![가-힣])"
                           r"|에\s*(?:속한|속하는|속해|해당하는|해당한|해당되는))")
+# Loop 15: the word of looking inside of WITHIN_AFTER said as a word of its own after a space ("… 사람들 중", "…
+# 집단 가운데", "… 안에서"), wherever it is in the question.
+_WITHIN_WORD = re.compile(r"(?<=\s)(?:(?:중|가운데)(?:에서|에|의)?(?![가-힣])|(?:안|내)(?:에서|의)(?![가-힣]))")
+
+
+def within_split(question: str) -> tuple[int, int] | None:
+    """Loop 15: (start, end) on the squashed question of the one word of looking inside a group the question says as
+    a word of its own (_WITHIN_WORD); None for none or two. The names before it are where the question looks, the
+    names after it the parts, whatever words come between a name and the word."""
+    found = list(_WITHIN_WORD.finditer(question))
+    if len(found) != 1:
+        return None
+    m = found[0]
+    start = len(re.sub(r"\s+", "", question[: m.start()]))
+    return start, start + len(re.sub(r"\s+", "", m.group(0)))
+
+
 # A difference of two numbers, and the words that ask how much fewer (the reference minus the subject). The
 # one-syllable comparatives are kept out of the words they also start (loop 1 learnings): 적어 줘 (write it down),
 # 작년 (last year), 크기 (size). One list for one table (ASKS_DIFF) and several (MULTI_DIFF).
@@ -174,6 +225,109 @@ EXCLUDE = re.compile(r"제외|빼고|빼면|뺀|말고|나머지|그\s*밖|(?<![
 MULTI_DIFF = re.compile(rf"{ASKS_GAP.pattern}|{_COMPARATIVE}")
 ASKS_DIFF = re.compile(rf"비교|보다|대비|{MULTI_DIFF.pattern}")
 MULTI_FEWER = re.compile(r"적(?!어\s*(?:줘|주|봐|달|둬))|낮|작(?!년)|모자|덜")
+
+# The smaller end of a ranking (analyze/roles.py pick_of; loop 3: the adverbs 적게·작게, 최솟값, the bottom of a
+# ranking: 하위, 아래·밑·뒤에서 세어). Loop 16 (moved from analyze/roles.py _MIN_WORDS): a one-syllable stem with its
+# ending (_MIN_STEM_FORMS: 낮은, 적은, 작게, 짧은) also ends nouns ('면적은', '실적은', '성적은'), so it is read only where
+# a word starts or right after a ranking adverb written together with it ("가장적은"), on the question as written.
+_MIN_STEM_FORMS = r"낮|짧|적은|적었|적게|작은|작았|작게"
+MIN_WORDS = re.compile(_MIN_STEM_FORMS + r"|최저|최소|최솟|꼴찌|하위|(?:아래|밑|뒤)에서")
+_MIN_STEM_AT_START = re.compile(rf"(?:(?<![가-힣])|(?<=가장)|(?<=제일)|(?<=더)|(?<=덜))(?:{_MIN_STEM_FORMS})")
+_MIN_STEM = re.compile(rf"^(?:{_MIN_STEM_FORMS})$")
+
+
+def asks_min(text: str, spaced: str | None = None) -> bool:
+    """Loop 16: text (the question, or its squashed rest) asks for the smaller end. spaced: the question as written,
+    where a one-syllable stem form found in text is looked for at a word's start (text itself when None)."""
+    spaced = text if spaced is None else spaced
+    for m in MIN_WORDS.finditer(text):
+        if not _MIN_STEM.match(m.group(0)):
+            return True
+        if any(s.group(0) == m.group(0) for s in _MIN_STEM_AT_START.finditer(spaced)):
+            return True
+    return False
+
+
+# Loop 8. A division said with its verb: the target the particle 로 / 으로 follows ("서울 출생아 수로 나누면", "부산으로
+# 나눈") is the denominator. Read on the squashed question, right after the target's name and the counting words
+# that may come between (COUNT_WORD: "부산 출생아 수로", "서울 가구수로").
+DIVIDE = re.compile(r"나누|나눈|나눠|나눴")
+DIVISOR_AFTER = re.compile(r"^(?:으로|로)")
+COUNT_WORD = re.compile(r"^(?:건수|가구수|인구수|수|명|건|가구|개|곳)")
+# Loop 18: bound nouns of a case or a side ("남자인 경우", "65세 이상인 쪽"), and a name said with the copula's
+# describing form and one of them (COPULA_BOUND, on the squashed question): what stands between a name and the word
+# that makes it the reference (analyze/roles.py _skip_names), as the counting words do.
+BOUND_NOUNS = ("경우", "쪽", "편", "측")
+COPULA_BOUND = re.compile(r"^(?:인|이던|이었던|였던)(?:" + "|".join(BOUND_NOUNS) + ")")
+# What follows the label a comparison is made against, on the squashed question (was analyze/roles.py
+# _REFERENCE_AFTER and _OF_PERCENT; loop 12: the judge reads them too): "전국보다", "전국 대비", "전국 평균의 몇 배",
+# "전국에 비해", and a 의 that is read as a reference only before 몇 배 or 몇 퍼센트 (REFERENCE_OF).
+REFERENCE_AFTER = re.compile(r"^(?:평균)?(?:보다|대비|에비해|의몇배|의)")
+OF_PERCENT = re.compile(r"^의몇(?:퍼센트|%|프로)")
+# Loop 12: a particle that joins two names as targets side by side ("서울과 종로구", "취업자 및 제조업", "서울이랑",
+# "서울하고", "서울, 종로구"), right after the first name on the squashed question.
+JOIN_AFTER = re.compile(r"^(?:와|과|및|하고|이랑|랑|그리고|또는|,|·)")
+# Loop 12: the subject particles after a name ("서울은", "서울이"), on the squashed question.
+SUBJECT_AFTER = re.compile(r"^(?:은|는|이|가)")
+# The two sexes named as one word ("남녀", "남성과 여성", "남자와 여자", "성별"; was analyze/rules.py _BOTH_SEXES).
+BOTH_SEXES = re.compile(r"남녀|남성과\s*여성|남자와\s*여자|성별")
+# Loop 16 (loop 13's WHOLE_AFTER, kept to the words of the whole and the words that put together): said right after
+# two names named as one word (BOTH_SEXES), on the squashed question, the whole of them is meant ("남녀 전체", "남녀
+# 합계", "남녀를 합친", "남녀 모두 합쳐서", "남녀 통틀어"), not each. 모두 and 전부 alone say both each ("남녀 모두
+# 늘었어"), so they count only before a word that puts together.
+WHOLE_AFTER = re.compile(r"^(?:의|을|를|이|가)?(?:전체|통틀어|도합|합계|합산)"
+                         r"|^(?:을|를|이|가)?(?:모두|전부)?(?:합쳐|합친|합한|합해|합하|더한|더해)")
+
+
+def refers_after(rest: str) -> bool:
+    """Whether the squashed text right after a label makes it the reference of a comparison (REFERENCE_AFTER, a 의
+    only before 몇 배 / 몇 퍼센트) or the divisor of a division said with its verb ("B로 나누면")."""
+    if REFERENCE_AFTER.match(rest):
+        return not rest.startswith("의") or "배" in rest[:6] or bool(OF_PERCENT.match(rest))
+    return bool(DIVISOR_AFTER.match(rest)) and bool(DIVIDE.search(rest))
+
+
+def asks_level(rest: str) -> bool:
+    """Loop 8: one value as a percent of another ("부산은 서울의 몇 퍼센트", "서울 대비 대구 비율은 몇 %"), read on the
+    question without its labels: a percent asked with no word of a difference or of more / less (not "몇 퍼센트 많아",
+    a relative difference) and no change ("몇 퍼센트 늘었어")."""
+    return bool(PERCENT.search(rest)) and not MULTI_DIFF.search(rest) and not CHANGE_ASKED.search(rest)
+
+
+def asks_ratio_noun(rest: str) -> bool:
+    """Loop 15: the noun 비율 asked of one target with nothing else that compares or divides two values (no other word
+    of ASKS_RATIO: 몇 배, 나누다; no word of ASKS_DIFF: 대비, 보다, 차이, more / less) and no change, read on the question
+    without its labels (a 비율 inside a name the question names is the name's). The rules read it as a share only of
+    a part of a group the question looks inside (analyze/rules.py _scoped_percent), as they read asks_level."""
+    if "비율" not in rest:
+        return False
+    other = rest.replace("비율", " ")
+    return not ASKS_RATIO.search(other) and not ASKS_DIFF.search(other) and not CHANGE_ASKED.search(rest)
+
+
+# Loop 9: words that compare two values by more / less (the comparatives of MULTI_DIFF: 많, 적, 높, 낮, 크, 작, 넘, 모자,
+# 덜), apart from the nouns of a difference (차이, 격차, 빼다).
+_MORE_LESS = re.compile(_COMPARATIVE)
+# Loop 9: a word naming the reference of a comparison ("보다", "에 비해", "대비", "와 비교해"), on the squashed rest.
+_AGAINST = re.compile(r"보다|에비해|대비|와비교|과비교")
+AGAINST = _AGAINST  # loop 12: the multi-table rules find the reference of a relative difference by it
+
+
+def asks_relative(rest: str) -> bool:
+    """Loop 9: one value's difference from another as a percent of the other ("서울은 부산보다 몇 퍼센트 많아", "몇 %
+    적어"): a percent and a word of more / less asked, read on the question without its labels; no difference named
+    (차이, 격차: "차이가 몇 퍼센트" is left as it was), no ratio, no change. The other side of asks_level, which reads
+    the same percent without a word of more / less."""
+    return (bool(PERCENT.search(rest)) and bool(_MORE_LESS.search(rest)) and not ASKS_GAP.search(rest)
+            and not ASKS_RATIO.search(rest) and not CHANGE_ASKED.search(rest))
+
+
+def asks_gap_of(rest: str) -> bool:
+    """Loop 9: two numbers of one kind compared as a difference (two parts' shares): a difference named (차이, 격차,
+    빼다), a percent point, or a word naming the reference with a word of more / less ("A 비중은 B보다 얼마나 높아").
+    Read on the question without its labels (squashed)."""
+    return bool(ASKS_GAP.search(rest) or re.search(r"%\s*p|퍼센트\s*포인트|%\s*포인트", rest)
+                or (_AGAINST.search(rest) and _MORE_LESS.search(rest)))
 
 
 def asked_comparison(rest: str) -> tuple[bool, bool]:
@@ -197,6 +351,8 @@ TOTAL_PREFIX = re.compile(r"^(?:총|전체)")
 _COUNT_WORDS = {"하나": 1, "한": 1, "첫": 1, "두": 2, "둘": 2, "세": 3, "셋": 3, "네": 4, "넷": 4, "다섯": 5, "여섯": 6,
                 "일곱": 7, "여덟": 8, "아홉": 9, "열": 10}
 _COUNT = r"(\d+|" + "|".join(sorted(_COUNT_WORDS, key=len, reverse=True)) + r")"
+# Loop 20: the native number words that count (not the ordinal stem 첫), longest first, as one alternation.
+NATIVE_COUNT = "|".join(sorted((w for w in _COUNT_WORDS if w != "첫"), key=len, reverse=True))
 # One place: "3번째", "세 번째로", "둘째로", "3위", "2등" (not 3위까지 / 3위 안: several; not 1등급).
 RANK_PLACE = re.compile(rf"{_COUNT}\s*번\s*째|{_COUNT}\s*째|(\d+)\s*(?:위|등)(?!\s*(?:까지|안|이내|권|내|부터)|급|분)")
 # The first n places: "상위 3개", "하위 다섯 곳", "위에서 세 번째까지", "1~3위", "1위부터 3위까지", "3위까지", "3위 안",
@@ -216,8 +372,21 @@ ASKS_PERIOD = re.compile(
 RANK_WORDS = re.compile(r"상위|하위|순위|번\s*째|(?:첫|둘|셋|넷|다섯)\s*째|\d\s*(?:위|등)(?!급|분)")
 
 
+
+# Loop 15: an ordinal word ('첫째', '둘째', '다섯째'), built from the count words above, at the start of a name
+# ('둘째아', '넷째아 이상'): group 1 the ordinal.
+ORDINAL_NAME = re.compile(r"^((?:" + "|".join(sorted(_COUNT_WORDS, key=len, reverse=True)) + r")째)")
+
+
 def count_of(word: str) -> int:
     return int(word) if word.isdigit() else _COUNT_WORDS[word]
+
+
+def count_words_of(n: int) -> tuple[str, ...]:
+    """Loop 16: the native Korean number words for n (the count words above: 2 -> '두', '둘'), none for a number they do
+    not hold. Not for 10 and up: '열' starts the numbers after it ('열세', '열두'), so '열 + a counting word' is no
+    reading of a name of 10."""
+    return tuple(w for w, k in _COUNT_WORDS.items() if k == n and k < 10)
 
 
 def rank_places(question: str) -> tuple[str, int] | None:
@@ -225,6 +394,8 @@ def rank_places(question: str) -> tuple[str, int] | None:
     place only (the plain extreme question)."""
     if m := RANK_TOP.search(question):
         n = count_of(next(g for g in m.groups() if g))
+        return ("places", n) if n >= 2 else None
+    if (n := _count_after_candidates(question)) is not None:
         return ("places", n) if n >= 2 else None
     if m := RANK_PLACE.search(question):
         n = count_of(next(g for g in m.groups() if g))
@@ -239,3 +410,56 @@ CHANGE_DOWN = re.compile(r"줄었|줄어|줄은|감소|떨어|하락|내려|내�
 RANKING = re.compile(r"가장|제일|최고|최저|최대|최소|최댓|최솟|꼴찌|" + RANK_WORDS.pattern)
 # "가장 최근 ~" names a period, not a ranking (was analyze/rules.py MOST_RECENT).
 MOST_RECENT = re.compile(r"(?:가장|제일)\s*최근")
+
+# Loop 12: the words that pick one of a kind ("어느 산업", "어떤 연령대", "무슨 업종").
+WHICH_OF = re.compile(r"(?<![가-힣])(?:어느|어떤|무슨)\s+")
+_WORDS_AFTER = re.compile(r"[가-힣]+")
+
+
+def _adnominal(word: str) -> bool:
+    """A describing word that ends with ㄴ or 던 ("많은", "큰", "높았던", "늘어난"): it modifies the noun after it."""
+    last = word[-1]
+    return last == "던" or ("가" <= last <= "힣" and (ord(last) - 0xAC00) % 28 == 4)
+
+
+# Loop 20: a syllable closed by ㄴ, or 던: the end of a describing word (as _adnominal reads one word). One set,
+# read by the rules here and by the judge (judge/question.py _MEASURE_BETWEEN, _DESCRIBED).
+ADNOMINAL_END = "[던" + "".join(chr(c) for c in range(0xAC00, 0xD7A4) if (c - 0xAC00) % 28 == 4) + "]"
+# Loop 20: a ranking word, a describing word right after it (within a few letters: "가장 많은", "제일 인구가 적은"),
+# the noun it modifies (one to four letters, not closed by a particle) and a count of places, on the squashed
+# question: "가장많은시도세곳의", "제일적은지역2곳의".
+_COUNT_AFTER_NOUN = re.compile(
+    rf"(?:가장|제일|최고|최저|최대|최소|꼴찌)[가-힣]{{0,6}}?{ADNOMINAL_END}([가-힣]{{1,4}}?){_COUNT}(?:개|곳|군데)(?!월)")
+
+
+def _count_after_candidates(question: str) -> int | None:
+    """Loop 20: a count of places said after the noun a ranking word's describing word modifies (the place
+    candidate_nouns reads: "가장 많은 시도 세 곳의 인구", "인구가 제일 적은 지역 3곳의"): the first n places, whatever
+    particle follows. RANK_TOP leaves a count before 의 / 중 alone: there it names the pool, said before the ranking
+    word ("17개 시도 중 가장 많은 곳"), which this does not read."""
+    q = re.sub(r"\s+", "", question)
+    for m in _COUNT_AFTER_NOUN.finditer(q):
+        if MOST_RECENT.match(q, m.start()) or re.search(r"[의을를은는에]$", m.group(1)):
+            continue
+        return count_of(m.group(2))
+    return None
+
+
+def candidate_nouns(question: str) -> list[str]:
+    """Loop 12: the nouns a ranking question names its candidates by, squashed with what follows them in their phrase:
+    the noun a ranking word's describing word modifies ("가장 많은 산업은" -> '산업은...', "제일 적은 대표자 연령대는" ->
+    '대표자연령대는...'; the describing word within two words after the ranking word) and the noun after a word that
+    picks one of a kind ("어느 산업의" -> '산업의...'). A noun elsewhere in the question (a condition: "산업 구분 없이")
+    is not one."""
+    out: list[str] = []
+    for m in RANKING.finditer(question):
+        if MOST_RECENT.match(question, m.start()):
+            continue
+        words = list(_WORDS_AFTER.finditer(question, m.end()))
+        for k, w in enumerate(words[:3]):
+            if _adnominal(w.group(0)) and k + 1 < len(words):
+                out.append(re.sub(r"\s+", "", question[words[k + 1].start():])[:16])
+                break
+    for m in WHICH_OF.finditer(question):
+        out.append(re.sub(r"\s+", "", question[m.end():])[:16])
+    return out

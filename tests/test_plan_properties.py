@@ -7,6 +7,7 @@
 4. Periods named by meaning resolve to table periods only, ascending and once each, or to a refusal / ask-back.
 """
 
+import re
 import tempfile
 from pathlib import Path
 
@@ -56,7 +57,9 @@ def recomputes(facts) -> None:
     known = {f.id: f.value for f in facts if f.value is not None}
     for f in facts:
         if f.derivation:
-            assert abs(round(evaluate(f.derivation, known), f.round) - f.value) < 1e-9, f
+            # a %p difference is of the percents before rounding (loop 9): one last digit off is allowed
+            tol = 10 ** -f.round if f.unit == "%p" and re.fullmatch(r"f\d+ - f\d+", f.derivation) else 0
+            assert abs(round(evaluate(f.derivation, known), f.round) - f.value) <= tol + 1e-9, f
 
 
 @CHECK

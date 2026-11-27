@@ -29,6 +29,64 @@ LABEL_ALIASES = {
     "세종특별자치시": ("세종시",),
 }
 
+# Loop 15: a role in a family written as one Hanja character (a parent of a child, a spouse, a child of a parent) and
+# the everyday words for it: the plain word, the familiar one and the two-character Hanja word. The one character
+# itself is not matched (judge/question.py _found takes two characters or more); a word for both roles ('부모') is
+# neither's.
+FAMILY_ROLES = {
+    "부": ("아버지", "아빠", "부친"),
+    "모": ("어머니", "엄마", "모친"),
+    "처": ("아내", "부인"),
+    "자": ("아들",),
+}
+LABEL_ALIASES.update(FAMILY_ROLES)
+
+# Loop 18: the roles of the two spouses, by the first character of a sex's name (SEX_NAMES: '남', '여'), and the
+# events a couple makes one of (a marriage, a divorce). In a table counting such events, the two sexes are the two
+# spouses: a sex is also said by its spouse's words ("남편이 초혼인 혼인 건수": judge/question.py spouse_forms).
+SPOUSE_ROLES = {"남": ("남편", "신랑"), "여": ("아내", "신부", "부인")}
+COUPLE_EVENTS = ("혼인", "결혼", "이혼", "초혼", "재혼")
+
+# Loop 15: the describing endings of a 하다 verb ('취업한', '취업하는', '취업했던'): a name for the people who did a
+# thing ('취업자', '귀농인') is also said by its stem with one of them (judge/question.py doing_forms).
+DOING_ENDINGS = ("한", "하는", "하던", "했던")
+
+# Loop 16: a predicate named in its noun form, a stem ending with a consonant and the noun ending 음 ('없음', '있음'),
+# is also said by the stem with a describing, an adverb or a joining ending ('없는', '없던', '없이', '없고'):
+# predicate_forms.
+NOUN_FORM_ENDING = "음"
+PREDICATE_ENDINGS = ("는", "던", "었던", "었는", "이", "고", "어서")
+
+
+def predicate_forms(word: str) -> tuple[str, ...]:
+    """Loop 16: the other forms of a predicate named in its noun form ('없음' -> '없는', '없이', ...), none for
+    another word (no 음 at its end, or a stem that is not Hangul)."""
+    stem = word[: -len(NOUN_FORM_ENDING)]
+    if not word.endswith(NOUN_FORM_ENDING) or len(stem) < 1 or not re.fullmatch(r"[가-힣]+", stem):
+        return ()
+    return tuple(stem + e for e in PREDICATE_ENDINGS)
+
+# Loop 15: a category of nations, read on its name ('아내 국적별', '국가별', '출신 나라별'), and a word for a nation or
+# its people in a category's name or a table's title ('한국인', '한국', '한국인과의'): group 1 the nation. The words
+# for the nations other than one ('외국인', '타국') name no nation.
+NATION_AXIS = re.compile(r"국적|국가|나라")
+NATION_WORD = re.compile(r"^(?!외국|타국)([가-힣]+국)인?(?:과의|와의|의|과|와|은|는|이|가)?$")
+
+
+# Loop 14: the tail of a name of a place people attend, and the word for the people who attend it: a name ending
+# with the tail is also said by its members ('중학교' as '중학생', '대학교' as '대학생', '대학원' as '대학원생'). The
+# last character of the member tail is the person suffix of the three-character shortenings ('남고생': a sex, the
+# first character of the name, the suffix). Longest tail first.
+MEMBER_TAILS = (
+    ("대학원", "대학원생"),
+    ("유치원", "유치원생"),
+    ("학교", "학생"),
+    ("대학", "대학생"),
+    ("학원", "학원생"),
+)
+# Loop 14: names of the two sexes; their first character is put before a noun for people ('남학생', '여고생').
+SEX_NAMES = ("남자", "여자", "남성", "여성", "남", "여")
+
 
 def squash(text: str) -> str:
     return re.sub(r"\s+", "", text or "")
@@ -42,6 +100,20 @@ _JOINS = ("-", "~", "∼")
 _FROM_TO = ("에서", "부터")
 # The halves of a ten-year group ("20대 초반" = 20-24, "30대 후반" = 35-39): the first half's words and the second's.
 HALF_OF_TEN = {"초반": 0, "전반": 0, "후반": 5}
+
+
+def interval_bounds(core: str) -> tuple[int, int, str] | None:
+    """Loop 14: (low, high, counting word) of an interval name with nothing before or after it ('20-24세', '20 - 24세'
+    -> (20, 24, '세')), None for another name. The one reading of an interval's bounds interval_forms uses too."""
+    m = _INTERVAL.match(squash(core))
+    if m is None or m.group(1) or m.group(5):
+        return None
+    return int(m.group(2)), int(m.group(3)), m.group(4)
+
+
+# Loop 14: a ten group said as one word ('20대', '30 대'): not a decade of years ('2010년대'), not a half of one ('20대
+# 초반', an interval name's form above), not a part of a larger number.
+TEN_GROUP = re.compile(r"(?<![\d.])([1-9]0)\s*대(?!\s*(?:초반|전반|중반|후반))")
 
 
 def interval_forms(core: str) -> set[str]:

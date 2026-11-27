@@ -5,35 +5,70 @@ from __future__ import annotations
 import re
 
 from kosis_chat.judge.question import label_forms, squash
-from kosis_chat.shared.patterns import REGION_SUFFIX
+from kosis_chat.shared.patterns import COUNT_WORD, OF_PERCENT, REFERENCE_AFTER, REGION_SUFFIX, refers_after
+from kosis_chat.shared.patterns import MIN_WORDS, asks_min  # loop 16
+from kosis_chat.shared.patterns import COPULA_BOUND  # loop 18
 
-# "전국보다", "전국 대비", "전국 평균의 몇 배", "전국에 비해": the label before these is the reference.
-_REFERENCE_AFTER = re.compile(r"^(?:평균)?(?:보다|대비|에비해|의몇배|의)")
-# loop 3: also the adverbs (적게, 작게), 최솟값, and the bottom of a ranking (하위, 아래·밑·뒤에서 세어).
-_MIN_WORDS = re.compile(r"낮|적은|적었|적게|최저|최소|최솟|작은|작았|작게|꼴찌|하위|(?:아래|밑|뒤)에서")
+# "전국보다", "전국 대비", "전국 평균의 몇 배", "전국에 비해": the label before these is the reference (loop 12: the
+# patterns are shared with the judge, shared/patterns.py).
+_REFERENCE_AFTER = REFERENCE_AFTER
+_OF_PERCENT = OF_PERCENT  # loop 8: "서울의 몇 퍼센트"
+# loop 3: also the adverbs (적게, 작게), 최솟값, and the bottom of a ranking (하위, 아래·밑·뒤에서 세어). Loop 16: one
+# list in shared/patterns.py (MIN_WORDS, asks_min, read at a word's start beside _COMPARATIVE).
+_MIN_WORDS = MIN_WORDS
 # T1-28 S2b: was r"(?:특별시|광역시|특별자치시|특별자치도|도)$", the same literal suffixes anchored at the end in another
 # order and without the group; is_province only asks whether one matches, which neither changes.
 _PROVINCE = REGION_SUFFIX
 
 
-def reference_index(question: str, labels: list[str]) -> int | None:
-    """Index of the label the question compares against, or None when it only names both ('서울이랑 경기도')."""
+def _skip_names(q: str, end: int, between: tuple[str, ...]) -> int:
+    """Loop 8: past the other names and the counting words that follow a target's name ("서울 출생아 수의", "부산
+    가구수로"): between holds the forms of the other labels the question names."""
+    forms = sorted({f for f in between if f}, key=len, reverse=True)
+    while True:
+        nxt = next((f for f in forms if q.startswith(f, end)), None)
+        if nxt is None and (m := COUNT_WORD.match(q[end:]) or COPULA_BOUND.match(q[end:])):
+            nxt = m.group(0)  # loop 18: also a copula and a bound noun ("여자인 경우보다": shared COPULA_BOUND)
+        if nxt is None:
+            return end
+        end += len(nxt)
+
+
+def _refers(rest: str, q: str) -> bool:
+    # "의" alone is a possessive ("서울의 출생아"); counted only before 몇 배 (loop 8: or 몇 퍼센트); loop 8: also the
+    # divisor of a division said with its verb ("B로 나누면"). Loop 12: one body in shared/patterns.py refers_after.
+    return refers_after(rest)
+
+
+def reference_index(question: str, labels: list[str], between: tuple[str, ...] | list[str] = (),
+                    said: list[tuple[str, ...]] | None = None) -> int | None:
+    """Index of the label the question compares against, or None when it only names both ('서울이랑 경기도').
+
+    Loop 8: also the label a division names as its divisor (shared DIVISOR_AFTER, DIVIDE), and either after the other
+    names and the counting words between the label and the word (_skip_names: "서울 출생아 수로 나누면").
+    Loop 14: said, for each label, the forms the question named it by (Match.form: '중학생' for '중학교'), looked for
+    beside the label's own forms."""
     q = squash(question)
-    for i, label in enumerate(labels):
-        exact, _, _ = label_forms(label, regional_total=True)
-        for form in sorted(exact, key=len, reverse=True):
-            at = q.find(form)
-            if at >= 0 and _REFERENCE_AFTER.match(q[at + len(form) :]):
-                # "의" alone is a possessive ("서울의 출생아"); count it only before 몇 배.
-                rest = q[at + len(form) :]
-                if rest.startswith("의") and "배" not in rest[:6]:
-                    continue
-                return i
+    between = tuple(between)
+    for skip in (False, True):
+        for i, label in enumerate(labels):
+            exact, _, _ = label_forms(label, regional_total=True)
+            exact = exact | set(said[i] if said and i < len(said) else ())
+            for form in sorted(exact, key=len, reverse=True):
+                at = q.find(form)
+                while at >= 0:
+                    end = at + len(form)
+                    end = _skip_names(q, end, between) if skip else end
+                    if (not skip or end > at + len(form)) and _refers(q[end:], q):
+                        return i
+                    at = q.find(form, at + 1)
     return None
 
 
-def pick_of(question: str) -> str:
-    return "min" if _MIN_WORDS.search(question) else "max"
+def pick_of(question: str, spaced: str | None = None) -> str:
+    """'min' when the question asks for the smaller end (shared asks_min), else 'max'. spaced: the question as written
+    when question is its squashed rest (the word starts are read there)."""
+    return "min" if asks_min(question, spaced) else "max"
 
 
 def is_province(label: str) -> bool:

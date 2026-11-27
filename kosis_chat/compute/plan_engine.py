@@ -299,7 +299,9 @@ class _Run:
             if isinstance(src, Cells):
                 _check_units([*src.reads])
         reads = [s.reads[0] for s in (a_src, b_src) if isinstance(s, Cells)]
-        if len(reads) == 2 and not cross:
+        # loop 9: per, ratio and index keep neither input's unit (people per business), in one table as across two
+        # (_aligned); a difference, a sum and a rate of change still compare like with like below
+        if len(reads) == 2 and not cross and step.fn not in ("per", "ratio", "index"):
             _check_units(reads)
         a, b = self._scalar(step.a), self._scalar(step.b)
         if a.id == b.id:  # first and last of a series with one number, or one cell against itself
@@ -324,8 +326,8 @@ class _Run:
         elif fn == "avg_change":  # loop 4: the average change per period, read to two decimals as an average is
             fact = self._make(f"({a.id} - {b.id}) / {step.years}", (a.value - b.value) / step.years,
                               max(2, a.digits, b.digits), _diff_unit(unit), step.note)
-        elif fn == "pp_diff":
-            fact = self._make(f"{a.id} - {b.id}", a.value - b.value, PERCENT_DIGITS, "%p", step.note)
+        elif fn == "pp_diff":  # loop 9: of the percents before rounding (two shares, two rates of change)
+            fact = self._make(f"{a.id} - {b.id}", a.key - b.key, PERCENT_DIGITS, "%p", step.note)
         else:
             if not b.value:
                 raise CalcRefused("missing_value", messages.refusal_message("missing_value", raw="0", meaning="기준값이 0"))
@@ -420,7 +422,7 @@ class _Run:
         semantics.check_share_bound(sum(values) / whole * 100, "·".join(r.cell.item for r in parts.reads))
         fact = self.add(_derived(self.ids(), expr, sum(values) / whole * 100, PERCENT_DIGITS, "%", step.note))
         period = total.reads[0].cell.period_raw
-        return Scalar(fact.id, fact.value, "%", PERCENT_DIGITS, (period, period))
+        return Scalar(fact.id, fact.value, "%", PERCENT_DIGITS, (period, period), exact=sum(values) / whole * 100)
 
     def rank(self, step: RankStep) -> Ranking:
         if step.of:
